@@ -1,0 +1,148 @@
+#!/bin/bash
+# The bundle's entry point, which execs the binary beside it.
+#
+# It exists because the GUI links libglfw from Homebrew by absolute path. When
+# that library is absent dyld kills the process before main() runs, and macOS
+# reports nothing but "Sweep++ quit unexpectedly" -- a message that names
+# neither the cause nor the fix. Anything inside the binary is already too late
+# to say so, hence a script in front of it.
+#
+# Written for bash 3.2, which is what macOS ships: no associative arrays, and
+# no bare expansion of a possibly-empty array under `set -u`.
+set -u
+
+here="$(cd -- "$(dirname -- "$0")" && pwd)"
+payload="$here/@SWEEPPP_BUNDLE_NAME@"
+
+# formula:dylib:what it is for.
+#
+# glfw is linked into the binary, so its absence is fatal. The others are
+# opened on demand by the plugin that needs them, so the instrument starts
+# without them and loses one capability each -- which is not worth a dialog on
+# a machine that has no bladeRF and never will.
+fatal_libs=(
+    "glfw:libglfw.3.dylib:the window and input"
+)
+optional_libs=(
+    "fftw:libfftw3f.3.dylib:the FFTW transform backend"
+    "hackrf:libhackrf.0.dylib:HackRF radios"
+    "libbladerf:libbladeRF.2.dylib:bladeRF radios"
+    "librtlsdr:librtlsdr.0.dylib:RTL-SDR radios"
+    "libusb:libusb-1.0.0.dylib:Fobos SDR radios"
+)
+
+# Homebrew, located without trusting PATH. An application started from the
+# Finder inherits launchd's, which is /usr/bin:/bin:/usr/sbin:/sbin and has no
+# /opt/homebrew/bin on it -- so `command -v brew` reports Homebrew missing on a
+# machine that has it, and this script runs from the Finder far more often than
+# from a shell. PATH is still consulted first, for an install somewhere else.
+brew_bin=''
+for candidate in "$(command -v brew 2> /dev/null || true)" \
+    /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        brew_bin="$candidate"
+        break
+    fi
+done
+
+# Its own answer first, then both standard prefixes -- Apple silicon installs
+# under /opt/homebrew and Intel under /usr/local, and a package built on one
+# runs on the other under Rosetta.
+prefixes=()
+if [ -n "$brew_bin" ]; then
+    brew_prefix="$("$brew_bin" --prefix 2> /dev/null || true)"
+    if [ -n "$brew_prefix" ]; then
+        prefixes+=("$brew_prefix")
+    fi
+fi
+prefixes+=(/opt/homebrew /usr/local)
+
+installed() { # formula, dylib
+    local prefix
+    for prefix in "${prefixes[@]}"; do
+        if [ -f "$prefix/opt/$1/lib/$2" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+missing_formulas=()
+missing_lines=()
+fatal=0
+
+record_if_missing() { # entry, "fatal" or "optional"
+    local formula rest dylib purpose
+    formula="${1%%:*}"
+    rest="${1#*:}"
+    dylib="${rest%%:*}"
+    purpose="${rest#*:}"
+
+    if installed "$formula" "$dylib"; then
+        return 0
+    fi
+    missing_formulas+=("$formula")
+    missing_lines+=("    $formula -- $purpose")
+    if [ "$2" = fatal ]; then
+        fatal=1
+    fi
+    return 0
+}
+
+for entry in "${fatal_libs[@]}"; do
+    record_if_missing "$entry" fatal
+done
+for entry in "${optional_libs[@]}"; do
+    record_if_missing "$entry" optional
+done
+
+# Everything present, or only the optional ones absent: start, and leave the
+# note where a terminal shows it and the system log keeps it.
+if [ "${#missing_formulas[@]}" -gt 0 ]; then
+    command="brew install ${missing_formulas[*]}"
+    {
+        echo "@SWEEPPP_PRODUCT_NAME@: these Homebrew packages are not installed:"
+        printf '%s\n' "${missing_lines[@]}"
+        echo
+        echo "  $command"
+    } >&2
+fi
+
+if [ "$fatal" -eq 0 ]; then
+    if [ ! -x "$payload" ]; then
+        echo "@SWEEPPP_PRODUCT_NAME@: $payload is missing; the application bundle is incomplete" >&2
+        exit 1
+    fi
+    exec "$payload" "$@"
+fi
+
+# Fatal, and a terminal has already been told. Started from the Finder there is
+# no terminal, and an alert is the only place a person will ever see this.
+if [ ! -t 2 ]; then
+    detail="$(printf '%s\n' "${missing_lines[@]}")"
+    if [ -n "$brew_bin" ]; then
+        advice="Install them in Terminal with:
+
+$command"
+    else
+        advice="Homebrew is not installed. Install it from https://brew.sh, then run:
+
+$command"
+    fi
+
+    # Interpolated into AppleScript source, which is safe only because every
+    # value above is one of this file's own constants: no quotes, no
+    # backslashes, nothing a person can influence.
+    osascript > /dev/null 2>&1 <<APPLESCRIPT
+set answer to display alert "@SWEEPPP_PRODUCT_NAME@ cannot start" message "@SWEEPPP_PRODUCT_NAME@ needs libraries that are not on this Mac:
+
+$detail
+
+$advice" as critical buttons {"Copy command", "Quit"} default button "Quit"
+if button returned of answer is "Copy command" then
+    set the clipboard to "$command"
+end if
+APPLESCRIPT
+fi
+
+exit 1

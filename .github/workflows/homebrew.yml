@@ -1,0 +1,121 @@
+# Keep the Homebrew tap's casks pointing at the current builds.
+#
+# The same shape as pages.yml: its own workflow, run after every completed
+# build, and rendered from the release state rather than from the run that
+# triggered it -- so it is re-runnable, and a hand-fixed tap can be regenerated
+# by dispatching it. The casks are written into the tap repository from
+# packaging/homebrew/cask.sh with the archives' checksums, and pushed only when
+# something changed.
+#
+# The tap is a separate repository because that is what `brew install
+# <owner>/<tap>/<cask>` resolves: github.com/<owner>/homebrew-<tap>. Writing
+# to it needs a token with contents:write there, the HOMEBREW_TAP_TOKEN
+# secret; the HOMEBREW_TAP variable names the repository when it is not the
+# default.
+
+name: homebrew
+
+on:
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+  push:
+    branches: [main]
+    paths: ['packaging/homebrew/**', '.github/workflows/homebrew.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.head_branch == 'main' ||
+        startsWith(github.event.workflow_run.head_branch, 'v')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tap token is there
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "$HOMEBREW_TAP_TOKEN" ]]; then
+            echo "::error::the HOMEBREW_TAP_TOKEN secret is not set; the tap cannot be updated"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.HOMEBREW_TAP || 'aurimasniekis/homebrew-sweeppp' }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      # The newest versioned release and the rolling nightly, each rendered
+      # from its own macOS archives. The nightly's version is read off the
+      # directory inside the tarball rather than any tag: that directory is
+      # what the cask's app path has to name.
+      - name: Render the casks
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          gh release list --repo "$repo" --limit 200 \
+            --json tagName,isPrerelease,isDraft > releases.json
+          stable=$(jq -r '.[] | select((.isDraft or .isPrerelease) | not) | .tagName' releases.json |
+                   { grep -E '^v[0-9]+(\.[0-9]+)*$' || true; } | sort -V | tail -n 1)
+          nightly=$(jq -r '.[] | select(.isDraft | not) | select(.tagName == "nightly") | .tagName' releases.json)
+          install -d tap/Casks
+
+          render() {
+            local channel=$1 tag=$2 dir="dl/$2" arm intel version
+            gh release download "$tag" --repo "$repo" --pattern '*-macos-*.tar.gz' --dir "$dir"
+            arm=$(ls "$dir"/*-macos-arm.tar.gz)
+            intel=$(ls "$dir"/*-macos-intel.tar.gz)
+            # sed reads the whole listing; `head -n 1` would close the pipe
+            # on tar, and pipefail makes that write error a failure.
+            version=$(tar tzf "$arm" | sed -nE '1s|^sweeppp-(.*)-macos-arm/$|\1|p')
+            if [[ -z "$version" ]]; then
+              echo "::error::$arm: no sweeppp-<version>-macos-arm/ directory inside"
+              exit 1
+            fi
+            packaging/homebrew/cask.sh "$channel" "$repo" "$version" \
+              "$(sha256sum "$arm" | cut -d' ' -f1)" \
+              "$(sha256sum "$intel" | cut -d' ' -f1)"
+          }
+
+          if [[ -n "$stable" ]]; then
+            render release "$stable" > tap/Casks/sweeppp.rb
+          else
+            echo "no versioned release yet; sweeppp.rb left as it is"
+          fi
+          if [[ -n "$nightly" ]]; then
+            render nightly nightly > tap/Casks/sweeppp-nightly.rb
+          else
+            echo "no nightly release; sweeppp-nightly.rb left as it is"
+          fi
+          git -C tap status --short
+
+      - name: Push the tap
+        run: |
+          set -euo pipefail
+          cd tap
+          if git diff --quiet && [[ -z "$(git status --porcelain)" ]]; then
+            echo "the tap is already current"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Casks
+          summary=$(git diff --cached --name-only | sed -E 's|^Casks/(.*)\.rb$|\1|' | paste -sd, - | sed 's/,/, /g')
+          git commit -q -m "Update $summary" \
+            -m "From $GITHUB_REPOSITORY@${GITHUB_SHA:0:8}, run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          git push

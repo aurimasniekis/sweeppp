@@ -1,0 +1,45 @@
+@echo off
+rem SPDX-FileCopyrightText: 2026 Aurimas Niekis <aurimas@niekis.lt>
+rem SPDX-License-Identifier: GPL-3.0-or-later
+
+setlocal
+set "exe=%~dp0sweeppp.exe"
+set "name=@SWEEPPP_PRODUCT_NAME@"
+rem One ProgId per channel, so a release and a nightly each register their
+rem own and unregistering one leaves the other's in place. The extension's
+rem default handler is a single value, so the last channel registered is
+rem the one a double-click opens; both stay under "Open with".
+set "progid=@SWEEPPP_PROGID@"
+set "ext=HKCU\Software\Classes\.sweeps"
+
+if /I "%~1"=="/u" goto unregister
+if not exist "%exe%" (
+    echo %name%: sweeppp.exe is not beside this script.
+    exit /b 1
+)
+
+reg add "%ext%" /ve /d "%progid%" /f >nul
+reg add "%ext%" /v "Content Type" /d "application/x-sweeps" /f >nul
+reg add "%ext%\OpenWithProgids" /v "%progid%" /t REG_SZ /d "" /f >nul
+reg add "HKCU\Software\Classes\%progid%" /ve /d "%name% session" /f >nul
+rem -2: the document icon compiled into the executable as resource id 2.
+reg add "HKCU\Software\Classes\%progid%\DefaultIcon" /ve /d "\"%exe%\",-2" /f >nul
+reg add "HKCU\Software\Classes\%progid%\shell\open\command" /ve /d "\"%exe%\" \"%%1\"" /f >nul
+
+rundll32.exe shell32.dll,SHChangeNotify 0x08000000 0x0000 0 0
+
+echo %name%: .sweeps files now open with %exe%
+echo Run this script with /u to undo it.
+exit /b 0
+
+:unregister
+reg delete "HKCU\Software\Classes\%progid%" /f >nul 2>&1
+reg delete "%ext%\OpenWithProgids" /v "%progid%" /f >nul 2>&1
+rem The default handler is dropped only when it is this channel's, so
+rem unregistering a nightly does not take the release's association with it.
+set "current="
+for /f "tokens=2,*" %%a in ('reg query "%ext%" /ve 2^>nul ^| findstr /i "REG_SZ"') do set "current=%%b"
+if /I "%current%"=="%progid%" reg delete "%ext%" /ve /f >nul 2>&1
+rundll32.exe shell32.dll,SHChangeNotify 0x08000000 0x0000 0 0
+echo %name%: the .sweeps association has been removed.
+exit /b 0

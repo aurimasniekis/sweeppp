@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sweepsfile"
+version = "1.0.0"
+description = "Read and write .sweeps spectrum session files"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "../LICENSE" }
+authors = [{ name = "Aurimas Niekis" }]
+keywords = ["sdr", "spectrum", "waterfall", "sweeps", "rf"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Ham Radio",
+    "Topic :: Scientific/Engineering",
+]
+
+# No install_requires, and that is the product.
+#
+# The binding is ctypes over the C ABI: no compiler, no extension module, no
+# build step. numpy is used where it earns its place -- whole-tile arrays -- and
+# every one of those has a scalar path that works without it.
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.20"]
+
+[project.urls]
+Homepage = "https://github.com/aurimasniekis/sweeppp"
+
+[tool.setuptools]
+packages = ["sweepsfile"]
+
+# The shared libsweepsfile is *not* bundled. It is found at import time -- see
+# sweepsfile._ffi -- because a wheel that carried one would have to pick an
+# architecture, a C++ runtime and a version of the format, and would then be
+# wrong for anyone who built the library themselves.

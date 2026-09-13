@@ -1,0 +1,16 @@
+Sweep++ and libsweepsfile are copyright their contributors.
+
+Aurimas Niekis <aurimas@niekis.lt>
+
+Licensing
+---------
+
+Two licences apply, to two disjoint parts of this repository:
+
+  lib/libsweepsfile/   MIT           -- see lib/libsweepsfile/LICENSE
+  everything else      GPL-3.0-or-later -- see LICENSE
+
+The split is explained in THIRD_PARTY.md. In short: FFTW and the radio
+libraries are confined to plugins, so no binary of Sweep++'s links a GPL
+component; the GPL is the application's own choice, and libsweepsfile is MIT
+because it depends on nothing at all.

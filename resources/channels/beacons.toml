@@ -1,0 +1,93 @@
+# Sweep++ channels -- beacons and single frequencies
+#
+# Everything here is one frequency rather than a span: a carrier that is either
+# there or not, which is what makes it worth marking on a sweep. No width, so
+# each draws as a line with a flag rather than as a band.
+#
+# On by default. This is the one file a fresh install paints, because these are
+# the frequencies that confirm the receiver is working at all.
+#
+# A user file of the same [channels].id in the config directory replaces this
+# one outright.
+
+[channels]
+id = "beacons"
+name = "Beacons"
+description = "Single known frequencies: navigation, telemetry and downlinks"
+
+[channels.colors]
+air = "#EF4444"
+nav = "#F59E0B"
+sat = "#10B981"
+
+[[group]]
+id = "air"
+name = "Aviation"
+color = "air"
+default = true
+
+  [[group.channel]]
+  name = "ADS-B 1090ES"
+  center = "1090 MHz"
+  description = "Extended squitter, the one everyone receives"
+
+  [[group.channel]]
+  name = "UAT 978"
+  center = "978 MHz"
+  description = "Universal Access Transceiver, North America"
+
+[[group]]
+id = "nav"
+name = "Navigation"
+color = "nav"
+default = true
+
+  [[group.channel]]
+  name = "GPS L1"
+  center = "1575.42 MHz"
+
+  [[group.channel]]
+  name = "GPS L2"
+  center = "1227.6 MHz"
+
+  [[group.channel]]
+  name = "GPS L5"
+  center = "1176.45 MHz"
+
+  [[group.channel]]
+  name = "Galileo E1"
+  center = "1575.42 MHz"
+
+  [[group.channel]]
+  name = "GLONASS L1"
+  center = "1602 MHz"
+
+[[group]]
+id = "sat"
+name = "Satellite downlinks"
+color = "sat"
+default = true
+
+  [[group.channel]]
+  name = "NOAA-15 APT"
+  center = "137.62 MHz"
+
+  [[group.channel]]
+  name = "NOAA-18 APT"
+  center = "137.912 MHz"
+
+  [[group.channel]]
+  name = "NOAA-19 APT"
+  center = "137.1 MHz"
+
+  [[group.channel]]
+  name = "Meteor-M LRPT"
+  center = "137.1 MHz"
+
+  [[group.channel]]
+  name = "ISS voice"
+  center = "145.8 MHz"
+
+  [[group.channel]]
+  name = "ISS APRS"
+  center = "145.825 MHz"

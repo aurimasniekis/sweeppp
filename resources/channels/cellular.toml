@@ -1,0 +1,475 @@
+# Sweep++ channels -- cellular, Bluetooth and Zigbee
+#
+# The cellular blocks are the band edges from 3GPP, uplink and downlink kept
+# apart because which of the two is on the air at a given place is the whole
+# question when a handset is being looked for. Which bands are actually
+# deployed is national, and several of these overlap by design.
+#
+# Indicative, for navigation: this is not an allocation table and not a
+# licence.
+#
+# A user file of the same [channels].id in the config directory replaces this
+# one outright.
+
+[channels]
+id = "cellular"
+name = "Cellular and short range"
+description = "GSM, LTE and 5G NR blocks, Bluetooth and Zigbee channels"
+
+[channels.colors]
+gsm = "#A855F7"
+lte = "#C084FC"
+nr = "#E879F9"
+ble = "#EC4899"
+zigbee = "#F472B6"
+
+[[group]]
+id = "gsm"
+name = "GSM"
+color = "gsm"
+
+  [[group.channel]]
+  name = "GSM 850 uplink"
+  start = "824 MHz"
+  stop = "849 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "GSM 850 downlink"
+  start = "869 MHz"
+  stop = "894 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "GSM 900 uplink"
+  start = "880 MHz"
+  stop = "915 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "GSM 900 downlink"
+  start = "925 MHz"
+  stop = "960 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "GSM 1800 uplink"
+  start = "1710 MHz"
+  stop = "1785 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "GSM 1800 downlink"
+  start = "1805 MHz"
+  stop = "1880 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "GSM 1900 uplink"
+  start = "1850 MHz"
+  stop = "1910 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "GSM 1900 downlink"
+  start = "1930 MHz"
+  stop = "1990 MHz"
+  type = "band"
+
+[[group]]
+id = "lte"
+name = "LTE"
+color = "lte"
+
+  [[group.channel]]
+  name = "LTE B1 uplink"
+  start = "1920 MHz"
+  stop = "1980 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B1 downlink"
+  start = "2110 MHz"
+  stop = "2170 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B3 uplink"
+  start = "1710 MHz"
+  stop = "1785 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B3 downlink"
+  start = "1805 MHz"
+  stop = "1880 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B7 uplink"
+  start = "2500 MHz"
+  stop = "2570 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B7 downlink"
+  start = "2620 MHz"
+  stop = "2690 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B8 uplink"
+  start = "880 MHz"
+  stop = "915 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B8 downlink"
+  start = "925 MHz"
+  stop = "960 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B20 uplink"
+  start = "832 MHz"
+  stop = "862 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B20 downlink"
+  start = "791 MHz"
+  stop = "821 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B28 uplink"
+  start = "703 MHz"
+  stop = "748 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B28 downlink"
+  start = "758 MHz"
+  stop = "803 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B38 (TDD)"
+  start = "2570 MHz"
+  stop = "2620 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "LTE B40 (TDD)"
+  start = "2300 MHz"
+  stop = "2400 MHz"
+  type = "band"
+
+[[group]]
+id = "nr"
+name = "5G NR"
+color = "nr"
+
+  [[group.channel]]
+  name = "NR n1 uplink"
+  start = "1920 MHz"
+  stop = "1980 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "NR n1 downlink"
+  start = "2110 MHz"
+  stop = "2170 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "NR n3 uplink"
+  start = "1710 MHz"
+  stop = "1785 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "NR n3 downlink"
+  start = "1805 MHz"
+  stop = "1880 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "NR n28 uplink"
+  start = "703 MHz"
+  stop = "748 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "NR n28 downlink"
+  start = "758 MHz"
+  stop = "803 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "NR n41 (TDD)"
+  start = "2496 MHz"
+  stop = "2690 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "NR n78 (TDD)"
+  start = "3300 MHz"
+  stop = "3800 MHz"
+  type = "band"
+
+[[group]]
+id = "ble"
+name = "Bluetooth LE"
+color = "ble"
+width = "2 MHz"
+
+[[group]]
+id = "ble/all"
+name = "All 40 channels"
+
+  [[group.channel]]
+  name = "BLE 0"
+  center = "2402 MHz"
+
+  [[group.channel]]
+  name = "BLE 1"
+  center = "2404 MHz"
+
+  [[group.channel]]
+  name = "BLE 2"
+  center = "2406 MHz"
+
+  [[group.channel]]
+  name = "BLE 3"
+  center = "2408 MHz"
+
+  [[group.channel]]
+  name = "BLE 4"
+  center = "2410 MHz"
+
+  [[group.channel]]
+  name = "BLE 5"
+  center = "2412 MHz"
+
+  [[group.channel]]
+  name = "BLE 6"
+  center = "2414 MHz"
+
+  [[group.channel]]
+  name = "BLE 7"
+  center = "2416 MHz"
+
+  [[group.channel]]
+  name = "BLE 8"
+  center = "2418 MHz"
+
+  [[group.channel]]
+  name = "BLE 9"
+  center = "2420 MHz"
+
+  [[group.channel]]
+  name = "BLE 10"
+  center = "2422 MHz"
+
+  [[group.channel]]
+  name = "BLE 11"
+  center = "2424 MHz"
+
+  [[group.channel]]
+  name = "BLE 12"
+  center = "2426 MHz"
+
+  [[group.channel]]
+  name = "BLE 13"
+  center = "2428 MHz"
+
+  [[group.channel]]
+  name = "BLE 14"
+  center = "2430 MHz"
+
+  [[group.channel]]
+  name = "BLE 15"
+  center = "2432 MHz"
+
+  [[group.channel]]
+  name = "BLE 16"
+  center = "2434 MHz"
+
+  [[group.channel]]
+  name = "BLE 17"
+  center = "2436 MHz"
+
+  [[group.channel]]
+  name = "BLE 18"
+  center = "2438 MHz"
+
+  [[group.channel]]
+  name = "BLE 19"
+  center = "2440 MHz"
+
+  [[group.channel]]
+  name = "BLE 20"
+  center = "2442 MHz"
+
+  [[group.channel]]
+  name = "BLE 21"
+  center = "2444 MHz"
+
+  [[group.channel]]
+  name = "BLE 22"
+  center = "2446 MHz"
+
+  [[group.channel]]
+  name = "BLE 23"
+  center = "2448 MHz"
+
+  [[group.channel]]
+  name = "BLE 24"
+  center = "2450 MHz"
+
+  [[group.channel]]
+  name = "BLE 25"
+  center = "2452 MHz"
+
+  [[group.channel]]
+  name = "BLE 26"
+  center = "2454 MHz"
+
+  [[group.channel]]
+  name = "BLE 27"
+  center = "2456 MHz"
+
+  [[group.channel]]
+  name = "BLE 28"
+  center = "2458 MHz"
+
+  [[group.channel]]
+  name = "BLE 29"
+  center = "2460 MHz"
+
+  [[group.channel]]
+  name = "BLE 30"
+  center = "2462 MHz"
+
+  [[group.channel]]
+  name = "BLE 31"
+  center = "2464 MHz"
+
+  [[group.channel]]
+  name = "BLE 32"
+  center = "2466 MHz"
+
+  [[group.channel]]
+  name = "BLE 33"
+  center = "2468 MHz"
+
+  [[group.channel]]
+  name = "BLE 34"
+  center = "2470 MHz"
+
+  [[group.channel]]
+  name = "BLE 35"
+  center = "2472 MHz"
+
+  [[group.channel]]
+  name = "BLE 36"
+  center = "2474 MHz"
+
+  [[group.channel]]
+  name = "BLE 37"
+  center = "2476 MHz"
+
+  [[group.channel]]
+  name = "BLE 38"
+  center = "2478 MHz"
+
+  [[group.channel]]
+  name = "BLE 39"
+  center = "2480 MHz"
+
+[[group]]
+id = "ble/adv"
+name = "Advertising"
+
+  [[group.channel]]
+  name = "BLE adv 37"
+  center = "2402 MHz"
+
+  [[group.channel]]
+  name = "BLE adv 38"
+  center = "2426 MHz"
+
+  [[group.channel]]
+  name = "BLE adv 39"
+  center = "2480 MHz"
+
+[[group]]
+id = "zigbee"
+name = "Zigbee 2.4 GHz"
+color = "zigbee"
+width = "2 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 11"
+  center = "2405 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 12"
+  center = "2410 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 13"
+  center = "2415 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 14"
+  center = "2420 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 15"
+  center = "2425 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 16"
+  center = "2430 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 17"
+  center = "2435 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 18"
+  center = "2440 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 19"
+  center = "2445 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 20"
+  center = "2450 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 21"
+  center = "2455 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 22"
+  center = "2460 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 23"
+  center = "2465 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 24"
+  center = "2470 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 25"
+  center = "2475 MHz"
+
+  [[group.channel]]
+  name = "Zigbee ch 26"
+  center = "2480 MHz"

@@ -1,0 +1,1954 @@
+# Sweep++ channels -- FPV video links
+#
+# Analog channel plans from a catalogue of published vendor tables: every plan
+# that appeared on at least eight devices, in the vendor's own channel order,
+# so channel 1 of a band is the frequency its manual calls channel 1. A plan
+# whose published row repeats a frequency or breaks its own run is a
+# transcription error rather than a band, and is not here.
+#
+# Band letters are not consistent between vendors. The letter on a group is
+# whichever one most of them print for that plan, and the labels they use
+# instead are on the group's description. Where two genuinely different plans
+# claim one letter inside a band -- 3.3 GHz has three "B" -- the plan on the
+# most devices keeps the plain letter and the others carry their range, because
+# dropping one would drop a plan somebody's VTX is tuned to.
+#
+# Every analog channel is 12 MHz wide. That is the occupied bandwidth of the
+# video carrier rather than the channel spacing, and it is the same at every
+# one of these carriers.
+#
+# The digital branch is authored from published operating ranges and nominal
+# channel bandwidths. Indicative, for navigation: what a link actually occupies
+# depends on its mode and its region.
+#
+# A user file of the same [channels].id in the config directory replaces this
+# one outright.
+
+[channels]
+id = "fpv"
+name = "FPV video"
+description = "Analog and digital video links"
+width = "12 MHz"
+
+[channels.colors]
+analog = "#F97316"
+digital = "#38BDF8"
+
+[[group]]
+id = "analog"
+name = "Analog"
+color = "analog"
+
+[[group]]
+id = "analog/12"
+name = "1.2 GHz"
+
+[[group]]
+id = "analog/12/a"
+name = "Band A"
+description = "Also published as 1.2G A, FR8, 1G3 BAND A, 1G2 BandA ( MHz ), 1.2G Band A (MHz)"
+
+  [[group.channel]]
+  name = "A1 1080"
+  center = "1080 MHz"
+
+  [[group.channel]]
+  name = "A2 1120"
+  center = "1120 MHz"
+
+  [[group.channel]]
+  name = "A3 1160"
+  center = "1160 MHz"
+
+  [[group.channel]]
+  name = "A4 1200"
+  center = "1200 MHz"
+
+  [[group.channel]]
+  name = "A5 1240"
+  center = "1240 MHz"
+
+  [[group.channel]]
+  name = "A6 1280"
+  center = "1280 MHz"
+
+  [[group.channel]]
+  name = "A7 1320"
+  center = "1320 MHz"
+
+  [[group.channel]]
+  name = "A8 1360"
+  center = "1360 MHz"
+
+[[group]]
+id = "analog/30"
+name = "3.0 GHz"
+
+[[group]]
+id = "analog/30/a"
+name = "Band A"
+
+  [[group.channel]]
+  name = "A1 3000"
+  center = "3000 MHz"
+
+  [[group.channel]]
+  name = "A2 3030"
+  center = "3030 MHz"
+
+  [[group.channel]]
+  name = "A3 3060"
+  center = "3060 MHz"
+
+  [[group.channel]]
+  name = "A4 3090"
+  center = "3090 MHz"
+
+  [[group.channel]]
+  name = "A5 3120"
+  center = "3120 MHz"
+
+  [[group.channel]]
+  name = "A6 3150"
+  center = "3150 MHz"
+
+  [[group.channel]]
+  name = "A7 3180"
+  center = "3180 MHz"
+
+  [[group.channel]]
+  name = "A8 3210"
+  center = "3210 MHz"
+
+[[group]]
+id = "analog/30/h"
+name = "Band H"
+description = "Also published as 8 Band- H, 3.3G H, FR8, FR 8, A"
+
+  [[group.channel]]
+  name = "H1 3060"
+  center = "3060 MHz"
+
+  [[group.channel]]
+  name = "H2 3080"
+  center = "3080 MHz"
+
+  [[group.channel]]
+  name = "H3 3100"
+  center = "3100 MHz"
+
+  [[group.channel]]
+  name = "H4 3120"
+  center = "3120 MHz"
+
+  [[group.channel]]
+  name = "H5 3140"
+  center = "3140 MHz"
+
+  [[group.channel]]
+  name = "H6 3160"
+  center = "3160 MHz"
+
+  [[group.channel]]
+  name = "H7 3180"
+  center = "3180 MHz"
+
+  [[group.channel]]
+  name = "H8 3200"
+  center = "3200 MHz"
+
+[[group]]
+id = "analog/33"
+name = "3.3 GHz"
+
+[[group]]
+id = "analog/33/b"
+name = "Band B"
+description = "Also published as d, 4 Band- D, Band E, 3.3G B, 2 BAND B"
+
+  [[group.channel]]
+  name = "B1 3170"
+  center = "3170 MHz"
+
+  [[group.channel]]
+  name = "B2 3190"
+  center = "3190 MHz"
+
+  [[group.channel]]
+  name = "B3 3210"
+  center = "3210 MHz"
+
+  [[group.channel]]
+  name = "B4 3230"
+  center = "3230 MHz"
+
+  [[group.channel]]
+  name = "B5 3250"
+  center = "3250 MHz"
+
+  [[group.channel]]
+  name = "B6 3270"
+  center = "3270 MHz"
+
+  [[group.channel]]
+  name = "B7 3290"
+  center = "3290 MHz"
+
+  [[group.channel]]
+  name = "B8 3310"
+  center = "3310 MHz"
+
+[[group]]
+id = "analog/33/b2"
+name = "Band B · 3200–3340 MHz"
+description = "Also published as 2 Band - B, 3.3G D, FR2, Band A, FR 2"
+
+  [[group.channel]]
+  name = "B1 3200"
+  center = "3200 MHz"
+
+  [[group.channel]]
+  name = "B2 3220"
+  center = "3220 MHz"
+
+  [[group.channel]]
+  name = "B3 3240"
+  center = "3240 MHz"
+
+  [[group.channel]]
+  name = "B4 3260"
+  center = "3260 MHz"
+
+  [[group.channel]]
+  name = "B5 3280"
+  center = "3280 MHz"
+
+  [[group.channel]]
+  name = "B6 3300"
+  center = "3300 MHz"
+
+  [[group.channel]]
+  name = "B7 3320"
+  center = "3320 MHz"
+
+  [[group.channel]]
+  name = "B8 3340"
+  center = "3340 MHz"
+
+[[group]]
+id = "analog/33/g"
+name = "Band G"
+description = "Also published as 3.3G G, FR7, FR 7"
+
+  [[group.channel]]
+  name = "G1 3220"
+  center = "3220 MHz"
+
+  [[group.channel]]
+  name = "G2 3240"
+  center = "3240 MHz"
+
+  [[group.channel]]
+  name = "G3 3260"
+  center = "3260 MHz"
+
+  [[group.channel]]
+  name = "G4 3280"
+  center = "3280 MHz"
+
+  [[group.channel]]
+  name = "G5 3300"
+  center = "3300 MHz"
+
+  [[group.channel]]
+  name = "G6 3320"
+  center = "3320 MHz"
+
+  [[group.channel]]
+  name = "G7 3340"
+  center = "3340 MHz"
+
+  [[group.channel]]
+  name = "G8 3360"
+  center = "3360 MHz"
+
+[[group]]
+id = "analog/33/b3"
+name = "Band B · 3240–3470 MHz"
+
+  [[group.channel]]
+  name = "B1 3240"
+  center = "3240 MHz"
+
+  [[group.channel]]
+  name = "B2 3270"
+  center = "3270 MHz"
+
+  [[group.channel]]
+  name = "B3 3300"
+  center = "3300 MHz"
+
+  [[group.channel]]
+  name = "B4 3330"
+  center = "3330 MHz"
+
+  [[group.channel]]
+  name = "B5 3370"
+  center = "3370 MHz"
+
+  [[group.channel]]
+  name = "B6 3400"
+  center = "3400 MHz"
+
+  [[group.channel]]
+  name = "B7 3430"
+  center = "3430 MHz"
+
+  [[group.channel]]
+  name = "B8 3470"
+  center = "3470 MHz"
+
+[[group]]
+id = "analog/33/f"
+name = "Band F"
+description = "Also published as Band B, 6 Band- F, 3.3G F, FR6, B"
+
+  [[group.channel]]
+  name = "F1 3310"
+  center = "3310 MHz"
+
+  [[group.channel]]
+  name = "F2 3330"
+  center = "3330 MHz"
+
+  [[group.channel]]
+  name = "F3 3355"
+  center = "3355 MHz"
+
+  [[group.channel]]
+  name = "F4 3380"
+  center = "3380 MHz"
+
+  [[group.channel]]
+  name = "F5 3405"
+  center = "3405 MHz"
+
+  [[group.channel]]
+  name = "F6 3430"
+  center = "3430 MHz"
+
+  [[group.channel]]
+  name = "F7 3455"
+  center = "3455 MHz"
+
+  [[group.channel]]
+  name = "F8 3480"
+  center = "3480 MHz"
+
+[[group]]
+id = "analog/33/e"
+name = "Band E"
+description = "Also published as Band A, 5 Band- E, 3.3G E, FR5, A"
+
+  [[group.channel]]
+  name = "E1 3320"
+  center = "3320 MHz"
+
+  [[group.channel]]
+  name = "E2 3345"
+  center = "3345 MHz"
+
+  [[group.channel]]
+  name = "E3 3370"
+  center = "3370 MHz"
+
+  [[group.channel]]
+  name = "E4 3395"
+  center = "3395 MHz"
+
+  [[group.channel]]
+  name = "E5 3420"
+  center = "3420 MHz"
+
+  [[group.channel]]
+  name = "E6 3445"
+  center = "3445 MHz"
+
+  [[group.channel]]
+  name = "E7 3470"
+  center = "3470 MHz"
+
+  [[group.channel]]
+  name = "E8 3495"
+  center = "3495 MHz"
+
+[[group]]
+id = "analog/33/a"
+name = "Band A"
+description = "Also published as C, 3 Band- C, Band D, 3.3G A, 1 BAND A"
+
+  [[group.channel]]
+  name = "A1 3330"
+  center = "3330 MHz"
+
+  [[group.channel]]
+  name = "A2 3350"
+  center = "3350 MHz"
+
+  [[group.channel]]
+  name = "A3 3370"
+  center = "3370 MHz"
+
+  [[group.channel]]
+  name = "A4 3390"
+  center = "3390 MHz"
+
+  [[group.channel]]
+  name = "A5 3410"
+  center = "3410 MHz"
+
+  [[group.channel]]
+  name = "A6 3430"
+  center = "3430 MHz"
+
+  [[group.channel]]
+  name = "A7 3450"
+  center = "3450 MHz"
+
+  [[group.channel]]
+  name = "A8 3470"
+  center = "3470 MHz"
+
+[[group]]
+id = "analog/33/a2"
+name = "Band A · 3360–3500 MHz"
+description = "Also published as 3.3G C, FR1, Band b, FR 1, L"
+
+  [[group.channel]]
+  name = "A1 3360"
+  center = "3360 MHz"
+
+  [[group.channel]]
+  name = "A2 3380"
+  center = "3380 MHz"
+
+  [[group.channel]]
+  name = "A3 3400"
+  center = "3400 MHz"
+
+  [[group.channel]]
+  name = "A4 3420"
+  center = "3420 MHz"
+
+  [[group.channel]]
+  name = "A5 3440"
+  center = "3440 MHz"
+
+  [[group.channel]]
+  name = "A6 3460"
+  center = "3460 MHz"
+
+  [[group.channel]]
+  name = "A7 3480"
+  center = "3480 MHz"
+
+  [[group.channel]]
+  name = "A8 3500"
+  center = "3500 MHz"
+
+[[group]]
+id = "analog/38"
+name = "3.8 GHz"
+
+[[group]]
+id = "analog/38/e"
+name = "Band E"
+
+  [[group.channel]]
+  name = "E1 3500"
+  center = "3500 MHz"
+
+  [[group.channel]]
+  name = "E2 3530"
+  center = "3530 MHz"
+
+  [[group.channel]]
+  name = "E3 3560"
+  center = "3560 MHz"
+
+  [[group.channel]]
+  name = "E4 3590"
+  center = "3590 MHz"
+
+  [[group.channel]]
+  name = "E5 3620"
+  center = "3620 MHz"
+
+  [[group.channel]]
+  name = "E6 3650"
+  center = "3650 MHz"
+
+  [[group.channel]]
+  name = "E7 3680"
+  center = "3680 MHz"
+
+  [[group.channel]]
+  name = "E8 3710"
+  center = "3710 MHz"
+
+[[group]]
+id = "analog/38/f"
+name = "Band F"
+
+  [[group.channel]]
+  name = "F1 3740"
+  center = "3740 MHz"
+
+  [[group.channel]]
+  name = "F2 3770"
+  center = "3770 MHz"
+
+  [[group.channel]]
+  name = "F3 3800"
+  center = "3800 MHz"
+
+  [[group.channel]]
+  name = "F4 3830"
+  center = "3830 MHz"
+
+  [[group.channel]]
+  name = "F5 3860"
+  center = "3860 MHz"
+
+  [[group.channel]]
+  name = "F6 3890"
+  center = "3890 MHz"
+
+  [[group.channel]]
+  name = "F7 3920"
+  center = "3920 MHz"
+
+  [[group.channel]]
+  name = "F8 3950"
+  center = "3950 MHz"
+
+[[group]]
+id = "analog/38/r"
+name = "Band R (raceband)"
+
+  [[group.channel]]
+  name = "R1 3980"
+  center = "3980 MHz"
+
+  [[group.channel]]
+  name = "R2 4010"
+  center = "4010 MHz"
+
+  [[group.channel]]
+  name = "R3 4040"
+  center = "4040 MHz"
+
+  [[group.channel]]
+  name = "R4 4070"
+  center = "4070 MHz"
+
+  [[group.channel]]
+  name = "R5 4100"
+  center = "4100 MHz"
+
+  [[group.channel]]
+  name = "R6 4130"
+  center = "4130 MHz"
+
+  [[group.channel]]
+  name = "R7 4160"
+  center = "4160 MHz"
+
+  [[group.channel]]
+  name = "R8 4190"
+  center = "4190 MHz"
+
+[[group]]
+id = "analog/45"
+name = "4.5 GHz"
+
+[[group]]
+id = "analog/45/p"
+name = "Band P"
+
+  [[group.channel]]
+  name = "P1 4220"
+  center = "4220 MHz"
+
+  [[group.channel]]
+  name = "P2 4250"
+  center = "4250 MHz"
+
+  [[group.channel]]
+  name = "P3 4280"
+  center = "4280 MHz"
+
+  [[group.channel]]
+  name = "P4 4310"
+  center = "4310 MHz"
+
+  [[group.channel]]
+  name = "P5 4340"
+  center = "4340 MHz"
+
+  [[group.channel]]
+  name = "P6 4370"
+  center = "4370 MHz"
+
+  [[group.channel]]
+  name = "P7 4400"
+  center = "4400 MHz"
+
+  [[group.channel]]
+  name = "P8 4430"
+  center = "4430 MHz"
+
+[[group]]
+id = "analog/45/h"
+name = "Band H"
+
+  [[group.channel]]
+  name = "H1 4470"
+  center = "4470 MHz"
+
+  [[group.channel]]
+  name = "H2 4500"
+  center = "4500 MHz"
+
+  [[group.channel]]
+  name = "H3 4530"
+  center = "4530 MHz"
+
+  [[group.channel]]
+  name = "H4 4560"
+  center = "4560 MHz"
+
+  [[group.channel]]
+  name = "H5 4590"
+  center = "4590 MHz"
+
+  [[group.channel]]
+  name = "H6 4620"
+  center = "4620 MHz"
+
+  [[group.channel]]
+  name = "H7 4650"
+  center = "4650 MHz"
+
+  [[group.channel]]
+  name = "H8 4680"
+  center = "4680 MHz"
+
+[[group]]
+id = "analog/49"
+name = "4.9 GHz"
+
+[[group]]
+id = "analog/49/u"
+name = "Band U"
+
+  [[group.channel]]
+  name = "U1 4710"
+  center = "4710 MHz"
+
+  [[group.channel]]
+  name = "U2 4740"
+  center = "4740 MHz"
+
+  [[group.channel]]
+  name = "U3 4770"
+  center = "4770 MHz"
+
+  [[group.channel]]
+  name = "U4 4812"
+  center = "4812 MHz"
+
+  [[group.channel]]
+  name = "U5 4839"
+  center = "4839 MHz"
+
+  [[group.channel]]
+  name = "U6 4872"
+  center = "4872 MHz"
+
+  [[group.channel]]
+  name = "U7 4911"
+  center = "4911 MHz"
+
+  [[group.channel]]
+  name = "U8 4938"
+  center = "4938 MHz"
+
+[[group]]
+id = "analog/49/x"
+name = "Band X"
+description = "Also published as Band r, 10 BAND X, Band X(R), 7 X (RF port B), FR7 (X)"
+
+  [[group.channel]]
+  name = "X1 4990"
+  center = "4990 MHz"
+
+  [[group.channel]]
+  name = "X2 5020"
+  center = "5020 MHz"
+
+  [[group.channel]]
+  name = "X3 5050"
+  center = "5050 MHz"
+
+  [[group.channel]]
+  name = "X4 5080"
+  center = "5080 MHz"
+
+  [[group.channel]]
+  name = "X5 5110"
+  center = "5110 MHz"
+
+  [[group.channel]]
+  name = "X6 5140"
+  center = "5140 MHz"
+
+  [[group.channel]]
+  name = "X7 5170"
+  center = "5170 MHz"
+
+  [[group.channel]]
+  name = "X8 5200"
+  center = "5200 MHz"
+
+[[group]]
+id = "analog/49/f"
+name = "Band F"
+description = "Also published as 4 BAND F, XN-48611 BAND F"
+
+  [[group.channel]]
+  name = "F1 5129"
+  center = "5129 MHz"
+
+  [[group.channel]]
+  name = "F2 5159"
+  center = "5159 MHz"
+
+  [[group.channel]]
+  name = "F3 5189"
+  center = "5189 MHz"
+
+  [[group.channel]]
+  name = "F4 5219"
+  center = "5219 MHz"
+
+  [[group.channel]]
+  name = "F5 5249"
+  center = "5249 MHz"
+
+  [[group.channel]]
+  name = "F6 5279"
+  center = "5279 MHz"
+
+  [[group.channel]]
+  name = "F7 5309"
+  center = "5309 MHz"
+
+  [[group.channel]]
+  name = "F8 5339"
+  center = "5339 MHz"
+
+[[group]]
+id = "analog/58"
+name = "5.8 GHz"
+
+[[group]]
+id = "analog/58/u"
+name = "Band U"
+description = "Also published as Band E, 8 BAND U, o"
+
+  [[group.channel]]
+  name = "U1 5325"
+  center = "5325 MHz"
+
+  [[group.channel]]
+  name = "U2 5348"
+  center = "5348 MHz"
+
+  [[group.channel]]
+  name = "U3 5366"
+  center = "5366 MHz"
+
+  [[group.channel]]
+  name = "U4 5384"
+  center = "5384 MHz"
+
+  [[group.channel]]
+  name = "U5 5402"
+  center = "5402 MHz"
+
+  [[group.channel]]
+  name = "U6 5420"
+  center = "5420 MHz"
+
+  [[group.channel]]
+  name = "U7 5438"
+  center = "5438 MHz"
+
+  [[group.channel]]
+  name = "U8 5456"
+  center = "5456 MHz"
+
+[[group]]
+id = "analog/58/p"
+name = "Band P"
+description = "Also published as Band L, 7 BAND L, G, 6 BAND P, XN-48611 BAND P"
+
+  [[group.channel]]
+  name = "P1 5333"
+  center = "5333 MHz"
+
+  [[group.channel]]
+  name = "P2 5373"
+  center = "5373 MHz"
+
+  [[group.channel]]
+  name = "P3 5413"
+  center = "5413 MHz"
+
+  [[group.channel]]
+  name = "P4 5453"
+  center = "5453 MHz"
+
+  [[group.channel]]
+  name = "P5 5493"
+  center = "5493 MHz"
+
+  [[group.channel]]
+  name = "P6 5533"
+  center = "5533 MHz"
+
+  [[group.channel]]
+  name = "P7 5573"
+  center = "5573 MHz"
+
+  [[group.channel]]
+  name = "P8 5613"
+  center = "5613 MHz"
+
+[[group]]
+id = "analog/58/l"
+name = "Band L"
+description = "Also published as Band b, F, LOWRACE, FR6 (L), FR6"
+
+  [[group.channel]]
+  name = "L1 5362"
+  center = "5362 MHz"
+
+  [[group.channel]]
+  name = "L2 5399"
+  center = "5399 MHz"
+
+  [[group.channel]]
+  name = "L3 5436"
+  center = "5436 MHz"
+
+  [[group.channel]]
+  name = "L4 5473"
+  center = "5473 MHz"
+
+  [[group.channel]]
+  name = "L5 5510"
+  center = "5510 MHz"
+
+  [[group.channel]]
+  name = "L6 5547"
+  center = "5547 MHz"
+
+  [[group.channel]]
+  name = "L7 5584"
+  center = "5584 MHz"
+
+  [[group.channel]]
+  name = "L8 5621"
+  center = "5621 MHz"
+
+[[group]]
+id = "analog/58/o"
+name = "Band O"
+description = "Also published as Band A, 9 BAND O, NANO1 Band 6"
+
+  [[group.channel]]
+  name = "O1 5474"
+  center = "5474 MHz"
+
+  [[group.channel]]
+  name = "O2 5492"
+  center = "5492 MHz"
+
+  [[group.channel]]
+  name = "O3 5510"
+  center = "5510 MHz"
+
+  [[group.channel]]
+  name = "O4 5528"
+  center = "5528 MHz"
+
+  [[group.channel]]
+  name = "O5 5546"
+  center = "5546 MHz"
+
+  [[group.channel]]
+  name = "O6 5564"
+  center = "5564 MHz"
+
+  [[group.channel]]
+  name = "O7 5582"
+  center = "5582 MHz"
+
+  [[group.channel]]
+  name = "O8 5600"
+  center = "5600 MHz"
+
+[[group]]
+id = "analog/58/e"
+name = "Band E"
+description = "Also published as 3 (Band E), Band T, FR3, C, FR3(E)"
+
+  [[group.channel]]
+  name = "E1 5705"
+  center = "5705 MHz"
+
+  [[group.channel]]
+  name = "E2 5685"
+  center = "5685 MHz"
+
+  [[group.channel]]
+  name = "E3 5665"
+  center = "5665 MHz"
+
+  [[group.channel]]
+  name = "E4 5645"
+  center = "5645 MHz"
+
+  [[group.channel]]
+  name = "E5 5885"
+  center = "5885 MHz"
+
+  [[group.channel]]
+  name = "E6 5905"
+  center = "5905 MHz"
+
+  [[group.channel]]
+  name = "E7 5925"
+  center = "5925 MHz"
+
+  [[group.channel]]
+  name = "E8 5945"
+  center = "5945 MHz"
+
+[[group]]
+id = "analog/58/h"
+name = "Band H"
+description = "Also published as Band P, 6 BAND H, u"
+
+  [[group.channel]]
+  name = "H1 5653"
+  center = "5653 MHz"
+
+  [[group.channel]]
+  name = "H2 5693"
+  center = "5693 MHz"
+
+  [[group.channel]]
+  name = "H3 5733"
+  center = "5733 MHz"
+
+  [[group.channel]]
+  name = "H4 5773"
+  center = "5773 MHz"
+
+  [[group.channel]]
+  name = "H5 5813"
+  center = "5813 MHz"
+
+  [[group.channel]]
+  name = "H6 5853"
+  center = "5853 MHz"
+
+  [[group.channel]]
+  name = "H7 5893"
+  center = "5893 MHz"
+
+  [[group.channel]]
+  name = "H8 5933"
+  center = "5933 MHz"
+
+[[group]]
+id = "analog/58/r"
+name = "Band R (raceband)"
+description = "Also published as 5 (Race Band), E, FR5, Race Band, Frequency Band R"
+
+  [[group.channel]]
+  name = "R1 5658"
+  center = "5658 MHz"
+
+  [[group.channel]]
+  name = "R2 5695"
+  center = "5695 MHz"
+
+  [[group.channel]]
+  name = "R3 5732"
+  center = "5732 MHz"
+
+  [[group.channel]]
+  name = "R4 5769"
+  center = "5769 MHz"
+
+  [[group.channel]]
+  name = "R5 5806"
+  center = "5806 MHz"
+
+  [[group.channel]]
+  name = "R6 5843"
+  center = "5843 MHz"
+
+  [[group.channel]]
+  name = "R7 5880"
+  center = "5880 MHz"
+
+  [[group.channel]]
+  name = "R8 5917"
+  center = "5917 MHz"
+
+[[group]]
+id = "analog/58/a"
+name = "Band A"
+description = "Also published as 1 (Band A), Band O, FR1, FR1(A), Frequency Band A"
+
+  [[group.channel]]
+  name = "A1 5865"
+  center = "5865 MHz"
+
+  [[group.channel]]
+  name = "A2 5845"
+  center = "5845 MHz"
+
+  [[group.channel]]
+  name = "A3 5825"
+  center = "5825 MHz"
+
+  [[group.channel]]
+  name = "A4 5805"
+  center = "5805 MHz"
+
+  [[group.channel]]
+  name = "A5 5785"
+  center = "5785 MHz"
+
+  [[group.channel]]
+  name = "A6 5765"
+  center = "5765 MHz"
+
+  [[group.channel]]
+  name = "A7 5745"
+  center = "5745 MHz"
+
+  [[group.channel]]
+  name = "A8 5725"
+  center = "5725 MHz"
+
+[[group]]
+id = "analog/58/b"
+name = "Band B"
+description = "Also published as 2 (Band B), FR2, Band H, FR2(B)"
+
+  [[group.channel]]
+  name = "B1 5733"
+  center = "5733 MHz"
+
+  [[group.channel]]
+  name = "B2 5752"
+  center = "5752 MHz"
+
+  [[group.channel]]
+  name = "B3 5771"
+  center = "5771 MHz"
+
+  [[group.channel]]
+  name = "B4 5790"
+  center = "5790 MHz"
+
+  [[group.channel]]
+  name = "B5 5809"
+  center = "5809 MHz"
+
+  [[group.channel]]
+  name = "B6 5828"
+  center = "5828 MHz"
+
+  [[group.channel]]
+  name = "B7 5847"
+  center = "5847 MHz"
+
+  [[group.channel]]
+  name = "B8 5866"
+  center = "5866 MHz"
+
+[[group]]
+id = "analog/58/f"
+name = "Band F"
+description = "Also published as 4 (Band F), FR4, Band n, D, FR4(F)"
+
+  [[group.channel]]
+  name = "F1 5740"
+  center = "5740 MHz"
+
+  [[group.channel]]
+  name = "F2 5760"
+  center = "5760 MHz"
+
+  [[group.channel]]
+  name = "F3 5780"
+  center = "5780 MHz"
+
+  [[group.channel]]
+  name = "F4 5800"
+  center = "5800 MHz"
+
+  [[group.channel]]
+  name = "F5 5820"
+  center = "5820 MHz"
+
+  [[group.channel]]
+  name = "F6 5840"
+  center = "5840 MHz"
+
+  [[group.channel]]
+  name = "F7 5860"
+  center = "5860 MHz"
+
+  [[group.channel]]
+  name = "F8 5880"
+  center = "5880 MHz"
+
+[[group]]
+id = "analog/61"
+name = "6.1 GHz"
+
+[[group]]
+id = "analog/61/u"
+name = "Band U"
+description = "Also published as 8 BAND U, XN-48611 BAND U"
+
+  [[group.channel]]
+  name = "U1 5960"
+  center = "5960 MHz"
+
+  [[group.channel]]
+  name = "U2 5980"
+  center = "5980 MHz"
+
+  [[group.channel]]
+  name = "U3 6000"
+  center = "6000 MHz"
+
+  [[group.channel]]
+  name = "U4 6020"
+  center = "6020 MHz"
+
+  [[group.channel]]
+  name = "U5 6030"
+  center = "6030 MHz"
+
+  [[group.channel]]
+  name = "U6 6040"
+  center = "6040 MHz"
+
+  [[group.channel]]
+  name = "U7 6050"
+  center = "6050 MHz"
+
+  [[group.channel]]
+  name = "U8 6060"
+  center = "6060 MHz"
+
+[[group]]
+id = "analog/61/a"
+name = "Band A"
+description = "Also published as BANDA, 1 BAND A, 7G R A, XN-61728 BAND A, SPI Band A"
+
+  [[group.channel]]
+  name = "A1 6110"
+  center = "6110 MHz"
+
+  [[group.channel]]
+  name = "A2 6130"
+  center = "6130 MHz"
+
+  [[group.channel]]
+  name = "A3 6150"
+  center = "6150 MHz"
+
+  [[group.channel]]
+  name = "A4 6170"
+  center = "6170 MHz"
+
+  [[group.channel]]
+  name = "A5 6190"
+  center = "6190 MHz"
+
+  [[group.channel]]
+  name = "A6 6210"
+  center = "6210 MHz"
+
+  [[group.channel]]
+  name = "A7 6230"
+  center = "6230 MHz"
+
+  [[group.channel]]
+  name = "A8 6250"
+  center = "6250 MHz"
+
+[[group]]
+id = "analog/65"
+name = "6.5 GHz"
+
+[[group]]
+id = "analog/65/u"
+name = "Band U"
+description = "Also published as BANDU, 8 BAND U, 7G R X, XN-61728 BAND U, SPI Band U"
+
+  [[group.channel]]
+  name = "U1 6115"
+  center = "6115 MHz"
+
+  [[group.channel]]
+  name = "U2 6265"
+  center = "6265 MHz"
+
+  [[group.channel]]
+  name = "U3 6425"
+  center = "6425 MHz"
+
+  [[group.channel]]
+  name = "U4 6585"
+  center = "6585 MHz"
+
+  [[group.channel]]
+  name = "U5 6745"
+  center = "6745 MHz"
+
+  [[group.channel]]
+  name = "U6 6905"
+  center = "6905 MHz"
+
+  [[group.channel]]
+  name = "U7 7065"
+  center = "7065 MHz"
+
+  [[group.channel]]
+  name = "U8 7185"
+  center = "7185 MHz"
+
+[[group]]
+id = "analog/65/b"
+name = "Band B"
+description = "Also published as BANDB, 2 BAND b, 7G R B, XN-61728 BAND B, SPI Band B"
+
+  [[group.channel]]
+  name = "B1 6270"
+  center = "6270 MHz"
+
+  [[group.channel]]
+  name = "B2 6290"
+  center = "6290 MHz"
+
+  [[group.channel]]
+  name = "B3 6310"
+  center = "6310 MHz"
+
+  [[group.channel]]
+  name = "B4 6330"
+  center = "6330 MHz"
+
+  [[group.channel]]
+  name = "B5 6350"
+  center = "6350 MHz"
+
+  [[group.channel]]
+  name = "B6 6370"
+  center = "6370 MHz"
+
+  [[group.channel]]
+  name = "B7 6390"
+  center = "6390 MHz"
+
+  [[group.channel]]
+  name = "B8 6410"
+  center = "6410 MHz"
+
+[[group]]
+id = "analog/65/e"
+name = "Band E"
+description = "Also published as BANDE, 3 BAND E, 7G R E, XN-61728 BAND E, SPI Band E"
+
+  [[group.channel]]
+  name = "E1 6430"
+  center = "6430 MHz"
+
+  [[group.channel]]
+  name = "E2 6450"
+  center = "6450 MHz"
+
+  [[group.channel]]
+  name = "E3 6470"
+  center = "6470 MHz"
+
+  [[group.channel]]
+  name = "E4 6490"
+  center = "6490 MHz"
+
+  [[group.channel]]
+  name = "E5 6510"
+  center = "6510 MHz"
+
+  [[group.channel]]
+  name = "E6 6530"
+  center = "6530 MHz"
+
+  [[group.channel]]
+  name = "E7 6550"
+  center = "6550 MHz"
+
+  [[group.channel]]
+  name = "E8 6570"
+  center = "6570 MHz"
+
+[[group]]
+id = "analog/65/f"
+name = "Band F"
+description = "Also published as BANDF, 4 BAND F, 7G R F, XN-61728 BAND F, SPI Band F"
+
+  [[group.channel]]
+  name = "F1 6590"
+  center = "6590 MHz"
+
+  [[group.channel]]
+  name = "F2 6610"
+  center = "6610 MHz"
+
+  [[group.channel]]
+  name = "F3 6630"
+  center = "6630 MHz"
+
+  [[group.channel]]
+  name = "F4 6650"
+  center = "6650 MHz"
+
+  [[group.channel]]
+  name = "F5 6670"
+  center = "6670 MHz"
+
+  [[group.channel]]
+  name = "F6 6690"
+  center = "6690 MHz"
+
+  [[group.channel]]
+  name = "F7 6710"
+  center = "6710 MHz"
+
+  [[group.channel]]
+  name = "F8 6730"
+  center = "6730 MHz"
+
+[[group]]
+id = "analog/65/r"
+name = "Band R (raceband)"
+description = "Also published as BANDR, 5 BAND r, 7G R R, XN-61728 BAND R, SPI Band R"
+
+  [[group.channel]]
+  name = "R1 6750"
+  center = "6750 MHz"
+
+  [[group.channel]]
+  name = "R2 6770"
+  center = "6770 MHz"
+
+  [[group.channel]]
+  name = "R3 6790"
+  center = "6790 MHz"
+
+  [[group.channel]]
+  name = "R4 6810"
+  center = "6810 MHz"
+
+  [[group.channel]]
+  name = "R5 6830"
+  center = "6830 MHz"
+
+  [[group.channel]]
+  name = "R6 6850"
+  center = "6850 MHz"
+
+  [[group.channel]]
+  name = "R7 6870"
+  center = "6870 MHz"
+
+  [[group.channel]]
+  name = "R8 6890"
+  center = "6890 MHz"
+
+[[group]]
+id = "analog/72"
+name = "7.2 GHz"
+
+[[group]]
+id = "analog/72/p"
+name = "Band P"
+description = "Also published as BANDP, 6 BAND P, 7G R L, XN-61728 BAND P, SPI Band P"
+
+  [[group.channel]]
+  name = "P1 6910"
+  center = "6910 MHz"
+
+  [[group.channel]]
+  name = "P2 6930"
+  center = "6930 MHz"
+
+  [[group.channel]]
+  name = "P3 6950"
+  center = "6950 MHz"
+
+  [[group.channel]]
+  name = "P4 6970"
+  center = "6970 MHz"
+
+  [[group.channel]]
+  name = "P5 6990"
+  center = "6990 MHz"
+
+  [[group.channel]]
+  name = "P6 7010"
+  center = "7010 MHz"
+
+  [[group.channel]]
+  name = "P7 7030"
+  center = "7030 MHz"
+
+  [[group.channel]]
+  name = "P8 7050"
+  center = "7050 MHz"
+
+[[group]]
+id = "analog/72/h"
+name = "Band H"
+description = "Also published as BANDH, 7 BAND H, 7G R J, XN-61728 BAND H, SPI Band H"
+
+  [[group.channel]]
+  name = "H1 7070"
+  center = "7070 MHz"
+
+  [[group.channel]]
+  name = "H2 7090"
+  center = "7090 MHz"
+
+  [[group.channel]]
+  name = "H3 7110"
+  center = "7110 MHz"
+
+  [[group.channel]]
+  name = "H4 7130"
+  center = "7130 MHz"
+
+  [[group.channel]]
+  name = "H5 7150"
+  center = "7150 MHz"
+
+  [[group.channel]]
+  name = "H6 7170"
+  center = "7170 MHz"
+
+  [[group.channel]]
+  name = "H7 7190"
+  center = "7190 MHz"
+
+  [[group.channel]]
+  name = "H8 7210"
+  center = "7210 MHz"
+
+[[group]]
+id = "analog/72/a"
+name = "Band A"
+description = "Also published as 7G S K, 7.5G H, J"
+
+  [[group.channel]]
+  name = "A1 7200"
+  center = "7200 MHz"
+
+  [[group.channel]]
+  name = "A2 7220"
+  center = "7220 MHz"
+
+  [[group.channel]]
+  name = "A3 7240"
+  center = "7240 MHz"
+
+  [[group.channel]]
+  name = "A4 7260"
+  center = "7260 MHz"
+
+  [[group.channel]]
+  name = "A5 7280"
+  center = "7280 MHz"
+
+  [[group.channel]]
+  name = "A6 7300"
+  center = "7300 MHz"
+
+  [[group.channel]]
+  name = "A7 7320"
+  center = "7320 MHz"
+
+  [[group.channel]]
+  name = "A8 7340"
+  center = "7340 MHz"
+
+[[group]]
+id = "analog/75"
+name = "7.5 GHz"
+
+[[group]]
+id = "analog/75/b"
+name = "Band B"
+description = "Also published as 7G S Z, 7.5G J, L"
+
+  [[group.channel]]
+  name = "B1 7360"
+  center = "7360 MHz"
+
+  [[group.channel]]
+  name = "B2 7380"
+  center = "7380 MHz"
+
+  [[group.channel]]
+  name = "B3 7400"
+  center = "7400 MHz"
+
+  [[group.channel]]
+  name = "B4 7420"
+  center = "7420 MHz"
+
+  [[group.channel]]
+  name = "B5 7440"
+  center = "7440 MHz"
+
+  [[group.channel]]
+  name = "B6 7460"
+  center = "7460 MHz"
+
+  [[group.channel]]
+  name = "B7 7480"
+  center = "7480 MHz"
+
+  [[group.channel]]
+  name = "B8 7500"
+  center = "7500 MHz"
+
+[[group]]
+id = "analog/75/e"
+name = "Band E"
+
+  [[group.channel]]
+  name = "E1 7520"
+  center = "7520 MHz"
+
+  [[group.channel]]
+  name = "E2 7540"
+  center = "7540 MHz"
+
+  [[group.channel]]
+  name = "E3 7560"
+  center = "7560 MHz"
+
+  [[group.channel]]
+  name = "E4 7580"
+  center = "7580 MHz"
+
+  [[group.channel]]
+  name = "E5 7600"
+  center = "7600 MHz"
+
+  [[group.channel]]
+  name = "E6 7620"
+  center = "7620 MHz"
+
+  [[group.channel]]
+  name = "E7 7640"
+  center = "7640 MHz"
+
+  [[group.channel]]
+  name = "E8 7680"
+  center = "7680 MHz"
+
+[[group]]
+id = "analog/80"
+name = "8.0 GHz"
+
+[[group]]
+id = "analog/80/f"
+name = "Band F"
+
+  [[group.channel]]
+  name = "F1 7700"
+  center = "7700 MHz"
+
+  [[group.channel]]
+  name = "F2 7720"
+  center = "7720 MHz"
+
+  [[group.channel]]
+  name = "F3 7740"
+  center = "7740 MHz"
+
+  [[group.channel]]
+  name = "F4 7760"
+  center = "7760 MHz"
+
+  [[group.channel]]
+  name = "F5 7780"
+  center = "7780 MHz"
+
+  [[group.channel]]
+  name = "F6 7800"
+  center = "7800 MHz"
+
+  [[group.channel]]
+  name = "F7 7820"
+  center = "7820 MHz"
+
+  [[group.channel]]
+  name = "F8 7840"
+  center = "7840 MHz"
+
+[[group]]
+id = "analog/80/r"
+name = "Band R (raceband)"
+
+  [[group.channel]]
+  name = "R1 7860"
+  center = "7860 MHz"
+
+  [[group.channel]]
+  name = "R2 7880"
+  center = "7880 MHz"
+
+  [[group.channel]]
+  name = "R3 7900"
+  center = "7900 MHz"
+
+  [[group.channel]]
+  name = "R4 7920"
+  center = "7920 MHz"
+
+  [[group.channel]]
+  name = "R5 7940"
+  center = "7940 MHz"
+
+  [[group.channel]]
+  name = "R6 7960"
+  center = "7960 MHz"
+
+  [[group.channel]]
+  name = "R7 7980"
+  center = "7980 MHz"
+
+  [[group.channel]]
+  name = "R8 8000"
+  center = "8000 MHz"
+
+[[group]]
+id = "analog/80/a"
+name = "Band A"
+
+  [[group.channel]]
+  name = "A1 8020"
+  center = "8020 MHz"
+
+  [[group.channel]]
+  name = "A2 8040"
+  center = "8040 MHz"
+
+  [[group.channel]]
+  name = "A3 8060"
+  center = "8060 MHz"
+
+  [[group.channel]]
+  name = "A4 8080"
+  center = "8080 MHz"
+
+  [[group.channel]]
+  name = "A5 8100"
+  center = "8100 MHz"
+
+  [[group.channel]]
+  name = "A6 8120"
+  center = "8120 MHz"
+
+  [[group.channel]]
+  name = "A7 8140"
+  center = "8140 MHz"
+
+  [[group.channel]]
+  name = "A8 8160"
+  center = "8160 MHz"
+
+[[group]]
+id = "analog/83"
+name = "8.3 GHz"
+
+[[group]]
+id = "analog/83/b"
+name = "Band B"
+
+  [[group.channel]]
+  name = "B1 8180"
+  center = "8180 MHz"
+
+  [[group.channel]]
+  name = "B2 8200"
+  center = "8200 MHz"
+
+  [[group.channel]]
+  name = "B3 8220"
+  center = "8220 MHz"
+
+  [[group.channel]]
+  name = "B4 8240"
+  center = "8240 MHz"
+
+  [[group.channel]]
+  name = "B5 8260"
+  center = "8260 MHz"
+
+  [[group.channel]]
+  name = "B6 8280"
+  center = "8280 MHz"
+
+  [[group.channel]]
+  name = "B7 8300"
+  center = "8300 MHz"
+
+  [[group.channel]]
+  name = "B8 8320"
+  center = "8320 MHz"
+
+[[group]]
+id = "analog/83/e"
+name = "Band E"
+
+  [[group.channel]]
+  name = "E1 8340"
+  center = "8340 MHz"
+
+  [[group.channel]]
+  name = "E2 8360"
+  center = "8360 MHz"
+
+  [[group.channel]]
+  name = "E3 8380"
+  center = "8380 MHz"
+
+  [[group.channel]]
+  name = "E4 8400"
+  center = "8400 MHz"
+
+  [[group.channel]]
+  name = "E5 8420"
+  center = "8420 MHz"
+
+  [[group.channel]]
+  name = "E6 8440"
+  center = "8440 MHz"
+
+  [[group.channel]]
+  name = "E7 8460"
+  center = "8460 MHz"
+
+  [[group.channel]]
+  name = "E8 8480"
+  center = "8480 MHz"
+
+[[group]]
+id = "analog/88"
+name = "8.8 GHz"
+
+[[group]]
+id = "analog/88/f"
+name = "Band F"
+
+  [[group.channel]]
+  name = "F1 8500"
+  center = "8500 MHz"
+
+  [[group.channel]]
+  name = "F2 8520"
+  center = "8520 MHz"
+
+  [[group.channel]]
+  name = "F3 8540"
+  center = "8540 MHz"
+
+  [[group.channel]]
+  name = "F4 8560"
+  center = "8560 MHz"
+
+  [[group.channel]]
+  name = "F5 8580"
+  center = "8580 MHz"
+
+  [[group.channel]]
+  name = "F6 8600"
+  center = "8600 MHz"
+
+  [[group.channel]]
+  name = "F7 8620"
+  center = "8620 MHz"
+
+  [[group.channel]]
+  name = "F8 8640"
+  center = "8640 MHz"
+
+[[group]]
+id = "analog/88/r"
+name = "Band R (raceband)"
+
+  [[group.channel]]
+  name = "R1 8660"
+  center = "8660 MHz"
+
+  [[group.channel]]
+  name = "R2 8680"
+  center = "8680 MHz"
+
+  [[group.channel]]
+  name = "R3 8700"
+  center = "8700 MHz"
+
+  [[group.channel]]
+  name = "R4 8720"
+  center = "8720 MHz"
+
+  [[group.channel]]
+  name = "R5 8740"
+  center = "8740 MHz"
+
+  [[group.channel]]
+  name = "R6 8760"
+  center = "8760 MHz"
+
+  [[group.channel]]
+  name = "R7 8780"
+  center = "8780 MHz"
+
+  [[group.channel]]
+  name = "R8 8800"
+  center = "8800 MHz"
+
+[[group]]
+id = "digital"
+name = "Digital"
+color = "digital"
+
+[[group]]
+id = "digital/dji"
+name = "DJI O3 / O4"
+description = "Operating ranges; the link picks a channel inside them"
+
+  [[group.channel]]
+  name = "DJI 2.4 GHz"
+  start = "2400 MHz"
+  stop = "2483.5 MHz"
+  type = "channel"
+
+  [[group.channel]]
+  name = "DJI 5.8 GHz"
+  start = "5725 MHz"
+  stop = "5850 MHz"
+  type = "channel"
+
+[[group]]
+id = "digital/hdzero"
+name = "HDZero"
+description = "Raceband centres, 27 MHz occupied"
+width = "27 MHz"
+
+  [[group.channel]]
+  name = "HDZero R1 5658"
+  center = "5658 MHz"
+
+  [[group.channel]]
+  name = "HDZero R2 5695"
+  center = "5695 MHz"
+
+  [[group.channel]]
+  name = "HDZero R3 5732"
+  center = "5732 MHz"
+
+  [[group.channel]]
+  name = "HDZero R4 5769"
+  center = "5769 MHz"
+
+  [[group.channel]]
+  name = "HDZero R5 5806"
+  center = "5806 MHz"
+
+  [[group.channel]]
+  name = "HDZero R6 5843"
+  center = "5843 MHz"
+
+  [[group.channel]]
+  name = "HDZero R7 5880"
+  center = "5880 MHz"
+
+  [[group.channel]]
+  name = "HDZero R8 5917"
+  center = "5917 MHz"
+
+[[group]]
+id = "digital/walksnail"
+name = "Walksnail Avatar"
+description = "Raceband centres, 20 MHz nominal"
+width = "20 MHz"
+
+  [[group.channel]]
+  name = "Avatar R1 5658"
+  center = "5658 MHz"
+
+  [[group.channel]]
+  name = "Avatar R2 5695"
+  center = "5695 MHz"
+
+  [[group.channel]]
+  name = "Avatar R3 5732"
+  center = "5732 MHz"
+
+  [[group.channel]]
+  name = "Avatar R4 5769"
+  center = "5769 MHz"
+
+  [[group.channel]]
+  name = "Avatar R5 5806"
+  center = "5806 MHz"
+
+  [[group.channel]]
+  name = "Avatar R6 5843"
+  center = "5843 MHz"
+
+  [[group.channel]]
+  name = "Avatar R7 5880"
+  center = "5880 MHz"
+
+  [[group.channel]]
+  name = "Avatar R8 5917"
+  center = "5917 MHz"

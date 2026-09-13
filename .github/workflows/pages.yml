@@ -1,0 +1,296 @@
+# Publish the landing page and the apt repository to GitHub Pages.
+#
+# Its own workflow rather than a job in build.yml, because nothing here is
+# built from the run that triggers it: the site is rendered from whatever the
+# releases page holds at the moment it runs. That is what makes it re-runnable
+# -- a failed deploy is re-run on its own, without rebuilding nine packages --
+# and what keeps it correct when the trigger is not a build at all, such as an
+# edit to the page. It follows every completed build run so the apt tree
+# picks up a new nightly or release within minutes, and nothing is committed
+# to a branch: the tree is a build artifact, regenerated whole every time.
+#
+# The apt pool is laid out per release tag rather than flat. Every nightly
+# release, current or archived, names its assets sweeppp-nightly-<distro>-
+# <arch>.deb, so a flat pool would have six versions of one file name.
+#
+# Nightlies whose Version carries no build stamp are left out. The stamp
+# (+YYYYMMDDHHMM.<sha>) is what lets apt order them; a bare +<sha> from before
+# it existed compares as a string against the digits and would win over every
+# stamped build.
+
+name: pages
+
+on:
+  # The whole run, nightly and release jobs included -- `completed` fires
+  # after the last job, so the release the apt tree reads is already there.
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Queued, never cancelled: each run publishes the current state, so the last
+# one to finish is right, but a cancelled deploy can leave Pages serving the
+# previous one indefinitely.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # A job-level `if:` rather than `branches:` on the trigger: on a tag run
+    # head_branch is the tag name, and a release push is exactly the run that
+    # has to be followed.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.head_branch == 'main' ||
+        startsWith(github.event.workflow_run.head_branch, 'v')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # How many versioned releases the `main` component carries.
+      STABLE_KEEP: '5'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/configure-pages@v6
+        id: pages
+
+      # Before anything is downloaded: an unsigned repository is one apt
+      # refuses, so there is no point building it.
+      - name: Check the signing key is there
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          if [[ -z "$APT_SIGNING_KEY" ]]; then
+            echo "::error::the APT_SIGNING_KEY secret is not set; the apt repository cannot be signed"
+            exit 1
+          fi
+
+      # apt-ftparchive is in apt-utils, which the runner image does not
+      # promise; the rest are listed so the step reads as what it needs.
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils gnupg imagemagick
+
+      # One listing, read three times below. Stable is the newest versions by
+      # version order; nightly is every rolling and archived nightly, newest
+      # published first -- the same shape build.yml prunes by.
+      - name: Select the releases
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json tagName,isPrerelease,isDraft,publishedAt > releases.json
+          jq -r '.[] | select((.isDraft or .isPrerelease) | not) | .tagName' releases.json |
+            { grep -E '^v[0-9]+(\.[0-9]+)*$' || true; } | sort -V -r > stable-all.txt
+          head -n "$STABLE_KEEP" stable-all.txt > stable.txt
+          jq -r '[.[] | select(.isDraft | not)
+                      | select(.tagName | test("^nightly(-[0-9a-f]{8})?$"))]
+                 | sort_by(.publishedAt) | reverse | .[].tagName' releases.json > nightly.txt
+          echo "stable:";  cat stable.txt
+          echo "nightly:"; cat nightly.txt
+
+      # One directory per tag, because the nightly assets all share a name.
+      - name: Download the packages
+        run: |
+          set -euo pipefail
+          fetch() {
+            local comp=$1 list=$2 tag
+            while read -r tag; do
+              [[ -n "$tag" ]] || continue
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+                --pattern '*.deb' --dir "dl/$comp/$tag" ||
+                echo "::warning::$tag has no .deb assets"
+            done < "$list"
+          }
+          fetch main stable.txt
+          fetch nightly nightly.txt
+          find dl -type f | sort
+
+      # Run from inside the tree so dpkg-scanpackages writes Filename: as
+      # pool/..., which is what apt joins to the repository URL.
+      - name: Build the apt tree
+        run: |
+          set -euo pipefail
+          install -d _site/apt
+          cd _site/apt
+
+          # Suite names are the distributions' codenames, so a client's
+          # $VERSION_CODENAME is its suite. The architecture comes from the
+          # control field rather than the file name: the name says aarch64,
+          # dpkg says arm64.
+          codename() {
+            case "$1" in
+              *-ubuntu2404-*) echo noble ;;
+              *-ubuntu2604-*) echo resolute ;;
+              *-debian13-*)   echo trixie ;;
+              *) return 1 ;;
+            esac
+          }
+          stamped='\+[0-9]{12}\.'
+
+          for comp in main nightly; do
+            for deb in "$GITHUB_WORKSPACE/dl/$comp"/*/*.deb; do
+              [[ -e "$deb" ]] || continue
+              tag=$(basename "$(dirname "$deb")")
+              file=$(basename "$deb")
+              if ! cn=$(codename "$file"); then
+                echo "::warning::$tag/$file: not built for a distribution this repository serves; skipped"
+                continue
+              fi
+              ver=$(dpkg-deb -f "$deb" Version)
+              if [[ "$comp" == nightly && ! "$ver" =~ $stamped ]]; then
+                echo "::notice::$tag/$file: version $ver has no build stamp; skipped"
+                continue
+              fi
+              install -d "pool/$cn/$comp/$tag"
+              install -m644 "$deb" "pool/$cn/$comp/$tag/$file"
+            done
+          done
+
+          for cn in noble resolute trixie; do
+            for comp in main nightly; do
+              # Written empty first, so a component with nothing in it -- main,
+              # until the first versioned release -- is a 200 rather than a 404
+              # that apt update reports on every client.
+              for arch in amd64 arm64; do
+                install -d "dists/$cn/$comp/binary-$arch"
+                : > "dists/$cn/$comp/binary-$arch/Packages"
+              done
+              if [[ -d "pool/$cn/$comp" ]]; then
+                # --multiversion, or every older nightly is dropped with a
+                # warning. Split by the Architecture: field afterwards; the
+                # --arch flag is a file-name glob that expects _amd64.deb.
+                dpkg-scanpackages --multiversion "pool/$cn/$comp" > "$RUNNER_TEMP/$cn-$comp.packages"
+                for arch in amd64 arm64; do
+                  awk -v RS='' -v ORS='\n\n' -v arch="$arch" \
+                      '$0 ~ "(^|\n)Architecture: " arch "($|\n)"' \
+                      "$RUNNER_TEMP/$cn-$comp.packages" > "dists/$cn/$comp/binary-$arch/Packages"
+                done
+              fi
+              for arch in amd64 arm64; do
+                gzip -9 -k -f "dists/$cn/$comp/binary-$arch/Packages"
+              done
+            done
+            # Into a temporary file first: apt-ftparchive hashes everything
+            # under dists/<cn>, and a half-written Release inside it would be
+            # hashed too.
+            apt-ftparchive \
+              -o APT::FTPArchive::Release::Origin=Sweep++ \
+              -o APT::FTPArchive::Release::Label=Sweep++ \
+              -o "APT::FTPArchive::Release::Suite=$cn" \
+              -o "APT::FTPArchive::Release::Codename=$cn" \
+              -o 'APT::FTPArchive::Release::Components=main nightly' \
+              -o 'APT::FTPArchive::Release::Architectures=amd64 arm64' \
+              release "dists/$cn" > "$RUNNER_TEMP/Release"
+            mv "$RUNNER_TEMP/Release" "dists/$cn/Release"
+          done
+          find . -type f | sort
+
+      # The passphrase goes in over a descriptor rather than --passphrase,
+      # which would put it in the process list. Empty when the key has none;
+      # gpg reads the descriptor only for a protected key.
+      - name: Sign the apt tree
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          APT_SIGNING_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+          GNUPGHOME: ${{ runner.temp }}/gnupg
+        run: |
+          set -euo pipefail
+          install -d -m700 "$GNUPGHOME"
+          printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --import
+          cd _site/apt
+          sign() {
+            gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 "$@" \
+              3<<<"$APT_SIGNING_PASSPHRASE"
+          }
+          for cn in noble resolute trixie; do
+            sign --armor --detach-sign -o "dists/$cn/Release.gpg" "dists/$cn/Release"
+            sign --clearsign -o "dists/$cn/InRelease" "dists/$cn/Release"
+          done
+          # Binary, not armored: this is the file the signed-by= option reads.
+          gpg --batch --export > sweeppp.gpg
+          # What a client will do with it, done here first.
+          for cn in noble resolute trixie; do
+            gpgv --keyring "$PWD/sweeppp.gpg" "dists/$cn/InRelease"
+          done
+
+      # The page is a template with {{…}} placeholders and one block per
+      # download button; the blocks that do not apply are cut out whole.
+      #
+      # The site's URL is the PAGES_URL repository variable when set, so a
+      # custom domain is one setting rather than an edit here; otherwise the
+      # one GitHub reports for the repository. A host off github.io also gets
+      # a CNAME file, so the domain survives every deployment.
+      - name: Render the page
+        env:
+          PAGES_URL: ${{ vars.PAGES_URL || steps.pages.outputs.base_url }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          url="${PAGES_URL%/}"
+          host="${url#*://}"; host="${host%%/*}"
+          if [[ "$host" != *.github.io ]]; then
+            echo "$host" > _site/CNAME
+          fi
+
+          stable=$(head -n 1 stable.txt || true)
+          nightly_date=$(jq -r '.[] | select(.tagName == "nightly") | .publishedAt' releases.json | cut -c1-10)
+          nightly_sha=''
+          if [[ -n "$nightly_date" ]]; then
+            nightly_sha=$(gh api "repos/$repo/git/ref/tags/nightly" --jq '.object.sha' | cut -c1-8)
+          fi
+
+          if [[ -n "$stable" ]]; then
+            cut='NOSTABLE'
+          else
+            cut='STABLE'
+          fi
+          sed -e "/<!-- $cut -->/,/<!-- \/$cut -->/d" site/index.html > _site/index.html
+          if [[ -z "$nightly_sha" ]]; then
+            sed -i '/<!-- NIGHTLY -->/,/<!-- \/NIGHTLY -->/d' _site/index.html
+          fi
+          sed -i -E \
+            -e '/<!-- \/?(STABLE|NOSTABLE|NIGHTLY) -->/d' \
+            -e "s|\{\{REPO\}\}|$repo|g" \
+            -e "s|\{\{PAGES_URL\}\}|$url|g" \
+            -e "s|\{\{STABLE_VERSION\}\}|${stable#v}|g" \
+            -e "s|\{\{NIGHTLY_DATE\}\}|$nightly_date|g" \
+            -e "s|\{\{NIGHTLY_SHA\}\}|$nightly_sha|g" \
+            _site/index.html
+          if grep -n '{{' _site/index.html; then
+            echo "::error::site/index.html has a placeholder this step does not fill"
+            exit 1
+          fi
+
+          cp branding/sweeppp.svg _site/
+          # The repository copy is the full-resolution screenshot; a page does
+          # not need 2 MB of it.
+          convert docs/images/main_screen.png -resize 1600x -strip _site/main_screen.png
+          touch _site/.nojekyll
+          ls -la _site
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

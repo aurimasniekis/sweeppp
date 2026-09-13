@@ -1,0 +1,57 @@
+# Sweep++ antennas -- the starter set
+#
+# Four ordinary antennas, so a fresh install has something to assign to a
+# connector before the operator has typed anything. None of these is a
+# recommendation: they are the shapes an antenna list tends to contain, with
+# the figures the usual specimen carries.
+#
+# Read-only. An entry in <configDir>/antennas/ carrying the same id shadows the
+# one here, which is what "edit a built-in" does -- deleting the copy restores
+# this one.
+#
+# `start` and `stop` accept a bare number in Hz or a suffixed string, so
+# 1.5e9, "1.5G" and "1500 MHz" are the same frequency written three ways.
+
+[[antenna]]
+id = "discone-25m-1g3"
+name = "Wideband discone"
+category = "Wideband"
+type = "discone"
+start = "25 MHz"
+stop = "1.3 GHz"
+gain_dbi = 0.0
+bias_t = false
+notes = "The default scanner antenna: no gain anywhere, some response everywhere."
+
+[[antenna]]
+id = "whip-70m-6g"
+name = "Telescopic whip"
+category = "Wideband"
+type = "whip"
+start = "70 MHz"
+stop = "6 GHz"
+gain_dbi = -3.0
+bias_t = false
+notes = "What ships in the box. Matched nowhere; useful for finding a signal, not for measuring one."
+
+[[antenna]]
+id = "patch-2g4-5g9"
+name = "Dual-band patch"
+category = "Wi-Fi"
+type = "patch"
+start = "2.4 GHz"
+stop = "5.9 GHz"
+gain_dbi = 8.0
+bias_t = false
+notes = "Directional. The gain is on boresight only."
+
+[[antenna]]
+id = "adsb-1090"
+name = "ADS-B active stick"
+category = "ADS-B"
+type = "collinear"
+start = "1050 MHz"
+stop = "1130 MHz"
+gain_dbi = 5.0
+bias_t = true
+notes = "Integrated LNA. Without bias-T on the port it is a short piece of wire."

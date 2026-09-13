@@ -1,0 +1,33 @@
+GLFW_ICON ICON "@SWEEPPP_APP_ID@.ico"
+// The .sweeps document icon, which register-sweeps.cmd points the file type
+// at as "sweeppp.exe",-2. Numbered rather than named so that lookup is by id,
+// and because named resources are enumerated before numbered ones -- so the
+// first icon, the one Explorer shows on the executable, stays GLFW_ICON.
+2 ICON "sweeps.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+FILEOS 0x4L
+FILETYPE 0x1L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "@SWEEPPP_AUTHOR@"
+            VALUE "Comments", "@PROJECT_HOMEPAGE_URL@"
+            VALUE "FileDescription", "@SWEEPPP_PRODUCT_NAME@"
+            VALUE "FileVersion", "@PROJECT_VERSION@"
+            VALUE "InternalName", "sweeppp"
+            VALUE "LegalCopyright", "@SWEEPPP_COPYRIGHT@. GPL-3.0-or-later."
+            VALUE "OriginalFilename", "sweeppp.exe"
+            VALUE "ProductName", "@SWEEPPP_PRODUCT_NAME@"
+            VALUE "ProductVersion", "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

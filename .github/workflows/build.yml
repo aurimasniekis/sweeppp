@@ -1,0 +1,1165 @@
+# Build, test and package Sweep++ on every platform it claims to support.
+#
+# One file rather than a workflow per platform, because both publishing jobs
+# have to consume artifacts produced by *this* run. That is what keeps a
+# tagged release carrying nothing but the run that built its tag -- by
+# construction rather than by review. The nightly is the same mechanism
+# pointed at a tag that moves, and is a prerelease so it never displaces a
+# versioned one as "Latest".
+#
+# The tree is built once per platform, in the release preset with tests forced
+# on, and that single tree feeds both ctest and the package. A second
+# tests-only configure would double every matrix entry's build time to cover
+# what the sanitizer jobs already cover.
+#
+# Pull requests are not here: they are pr.yml, which builds three of these nine
+# entries and packages none of them. Nothing a pull request can establish needs
+# a .deb built nine ways.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+# The release job raises this to write for itself alone.
+permissions:
+  contents: read
+
+# Never cancelled. A superseded push to main has still produced the artifacts a
+# tag would otherwise have to rebuild, and the nightly it feeds is serialised on
+# its own concurrency group rather than by throwing builds away.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Shared by the container bootstrap and the hosted-runner install, which run
+  # at different points -- the container has no git until the first of them has
+  # finished, so actions/checkout cannot come before it.
+  #
+  # libgl1-mesa-dev: third_party/gl/CMakeLists.txt does find_package(OpenGL
+  # REQUIRED). libgtk-3-dev: nativefiledialog-extended defaults to its GTK
+  # backend on Linux (NFD_PORTAL is OFF) and pkg-check-modules it as REQUIRED,
+  # and the snapshot's clipboard uses the same GTK. libcurl4-openssl-dev: the
+  # update check, which degrades to absent without it rather than failing --
+  # so a missing one here would ship silently.
+  # None of the three is pulled in by libglfw3-dev.
+  LINUX_PACKAGES: >-
+    ca-certificates curl git build-essential cmake ninja-build pkg-config dpkg-dev
+    libfftw3-dev libglfw3-dev libgl1-mesa-dev libgtk-3-dev libcurl4-openssl-dev
+    libhackrf-dev libbladerf-dev librtlsdr-dev libusb-1.0-0-dev librsvg2-bin
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 60
+    # A Windows failure must not hold up the other eight packages: the release
+    # jobs need this one to have concluded, and continue-on-error is what makes
+    # an experimental entry's failure a conclusion rather than a block.
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `name` is <platform>-<arch>, and the packages are named after it,
+          # so every asset says which distribution it was built on and which
+          # machine it runs on. Each Linux entry ships both shapes: a tarball
+          # for unpacking anywhere, and a .deb linked against that
+          # distribution's own libraries.
+          #
+          # Only distributions whose default GCC is 14 or newer are here.
+          # Several binaries use std::println and the tree uses std::expected,
+          # so GCC 13 and older cannot build it at all; Ubuntu 22.04 and Debian
+          # 12 are therefore absent rather than built against a third-party apt
+          # repository nobody installing the package would have.
+          #
+          # Ubuntu 24.04 is the exception that earns its place: it defaults to
+          # GCC 13, but 14 is in its own archive, so the compiler is pinned
+          # rather than added.
+          - name: ubuntu2404-amd64
+            runner: ubuntu-24.04
+            container: ''
+            apt: g++-14
+            cc: gcc-14
+            cxx: g++-14
+            deb: amd64
+          - name: ubuntu2404-aarch64
+            runner: ubuntu-24.04-arm
+            container: ''
+            apt: g++-14
+            cc: gcc-14
+            cxx: g++-14
+            deb: arm64
+          # Ubuntu 26.04 and Debian 13 default to GCC 14+, so no pin.
+          #
+          # Both run in a container on the 24.04 hosts rather than on a runner
+          # of their own: the ubuntu-26.04 label is still Preview and has no
+          # ARM counterpart, where a container gives both architectures from
+          # runners that are generally available.
+          #
+          # `deb` carries dpkg's spelling of the architecture because that is
+          # what goes in the Architecture: control field, where `aarch64` is
+          # not a legal value. The file name uses `aarch64` like every other
+          # asset; dpkg reads the control field and never the name, so
+          # `apt install ./sweeppp-...-aarch64.deb` installs the arm64 package.
+          - name: ubuntu2604-amd64
+            runner: ubuntu-24.04
+            container: 'ubuntu:26.04'
+            apt: ''
+            cc: ''
+            cxx: ''
+            deb: amd64
+          - name: ubuntu2604-aarch64
+            runner: ubuntu-24.04-arm
+            container: 'ubuntu:26.04'
+            apt: ''
+            cc: ''
+            cxx: ''
+            deb: arm64
+          - name: debian13-amd64
+            runner: ubuntu-24.04
+            container: 'debian:13-slim'
+            apt: ''
+            cc: ''
+            cxx: ''
+            deb: amd64
+          - name: debian13-aarch64
+            runner: ubuntu-24.04-arm
+            container: 'debian:13-slim'
+            apt: ''
+            cc: ''
+            cxx: ''
+            deb: arm64
+          - name: macos-arm
+            runner: macos-latest
+            container: ''
+            apt: ''
+            cc: ''
+            cxx: ''
+            deb: ''
+          - name: macos-intel
+            runner: macos-15-intel
+            container: ''
+            apt: ''
+            cc: ''
+            cxx: ''
+            deb: ''
+          - name: windows-x64
+            runner: windows-2025
+            container: ''
+            apt: ''
+            cc: ''
+            cxx: ''
+            deb: ''
+            experimental: true      # nothing has ever compiled this with cl.exe
+
+    env:
+      # Empty is falsy to CMake's compiler detection, so the unpinned entries
+      # get their platform default.
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+
+    steps:
+      # Before checkout: the image has neither git nor a compiler, and
+      # actions/checkout needs the former.
+      - name: Bootstrap container
+        if: matrix.container != ''
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends $LINUX_PACKAGES
+
+      - uses: actions/checkout@v7
+
+      # Checkout inside a container trips git's "detected dubious ownership"
+      # check, which breaks everything later that shells out to git.
+      - name: Trust the workspace
+        if: matrix.container != ''
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux' && matrix.container == ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $LINUX_PACKAGES ${{ matrix.apt }}
+
+      # Both images default to Xcode 16.4, whose libc++ has no <stop_token> and
+      # no std::jthread -- both of which this tree uses. Pinned rather than left
+      # to the image default so the toolchain is the one development happens on
+      # and does not drift when the default moves.
+      - name: Select Xcode
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="/Applications/Xcode_${XCODE_VERSION}.app"
+          if [[ ! -d "$app" ]]; then
+            echo "::error::$app is not on this image; available:"
+            ls -d /Applications/Xcode_*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$app"
+          c++ --version
+        env:
+          XCODE_VERSION: '26.3'
+
+      # CMake and Ninja are preinstalled on both macOS runners, so only the C
+      # libraries are missing.
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install fftw glfw hackrf libbladerf librtlsdr libusb
+
+      # --- Windows: MSVC, and each radio library from whoever ships it newest ---
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Building every FFTW precision with the full codelet set is minutes of
+      # work that never changes between runs.
+      #
+      # The key spells out what is installed rather than hashing this file:
+      # hashing meant every unrelated edit to the workflow threw away a cache
+      # that had nothing to do with the edit. Change the package list below,
+      # change this string.
+      # vcpkg's binary cache: every package it builds, archived under its ABI
+      # hash, and restored instead of rebuilt when the hash matches. Keyed on
+      # vcpkg's own commit, which is what the hash depends on, so a runner
+      # image with a newer port tree starts a fresh entry rather than
+      # restoring archives it cannot use; and on this file, so a changed
+      # package list saves a new entry on top of the one it restored.
+      #
+      # Restore and save as two steps, with the save right after the install:
+      # actions/cache alone saves only when the whole job succeeds, and on a
+      # job that failed at the build or the package -- as Windows did for a
+      # week -- that meant six minutes of fftw3 thrown away every run.
+      - name: vcpkg binary cache location
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archives="$GITHUB_WORKSPACE/.vcpkg-archives"
+          mkdir -p "$archives"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$(cygpath -m "$archives")" >> "$GITHUB_ENV"
+          # The port tree's commit, which is what every package's ABI hash
+          # depends on; the tool's version string is the fallback for an
+          # image that ships vcpkg without its .git.
+          commit=$(git -C "$VCPKG_INSTALLATION_ROOT" rev-parse --short=12 HEAD 2>/dev/null ||
+                   "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" version | head -1 | tr -cd 'A-Za-z0-9.-')
+          echo "VCPKG_COMMIT=$commit" >> "$GITHUB_ENV"
+
+      - name: Restore vcpkg binaries
+        if: runner.os == 'Windows'
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .vcpkg-archives
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: vcpkg-${{ env.VCPKG_COMMIT }}-
+
+      # fftw3's SIMD codelets are opt-in features in vcpkg, and none of them is
+      # on by default: a bare `fftw3:x64-windows` is scalar and single
+      # threaded, where every distribution's libfftw3-dev ships the full set.
+      # That alone was most of a 4.5x sweep-rate gap against the same machine
+      # running Linux. Each level is named rather than relying on avx2 to imply
+      # the ones below it, because vcpkg maps one feature to one ENABLE_ flag;
+      # FFTW picks between them at runtime by cpuid, so the build still runs on
+      # a machine without AVX2.
+      - name: vcpkg dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install
+          "fftw3[core,avx2,avx,sse2,sse,threads]:x64-windows"
+          glfw3:x64-windows pkgconf:x64-windows curl:x64-windows
+
+      - name: Save vcpkg binaries
+        if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .vcpkg-archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      # libhackrf from conda-forge, which is the same 2026.01.3 Homebrew ships,
+      # rather than from a bundle. Miniconda is already on the image, and conda
+      # is what resolves the split packaging: libhackrf carries the header and
+      # the import library, the DLL lives in libhackrf0, and that pulls in
+      # libusb and libwinpthread in turn.
+      #
+      # librtlsdr goes into the same environment, so that there is one
+      # libusb-1.0.dll: the one both radio libraries load, and the one the
+      # Fobos plugin -- which calls libusb itself -- links against.
+      - name: libhackrf and librtlsdr (conda-forge)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:CONDA\Scripts\conda.exe" create -y -p C:\sweeppp-hackrf `
+            -c conda-forge --override-channels libhackrf=2026.01.3 rtl-sdr=2.0.3
+          Get-ChildItem -Recurse C:\sweeppp-hackrf\Library\bin -Filter *.dll |
+            ForEach-Object { $_.FullName }
+
+      # libbladeRF from Nuand's own installer: 2025.10 is libbladeRF 2.6.0, the
+      # only source that has BLADERF_FORMAT_SC16_Q11_PACKED -- conda-forge is
+      # still on 2.5.0 and Debian and Ubuntu with it. It is an Inno Setup
+      # installer, whose payload 7-Zip sees as one opaque blob, so it is
+      # unpacked with innoextract rather than run: extraction needs no
+      # elevation and installs no USB drivers on a machine that has no radio.
+      - name: libbladeRF (Nuand 2025.10)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip" -OutFile innoextract.zip
+          7z x innoextract.zip -oC:\innoextract | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/Nuand/bladeRF/releases/download/2025.10/bladeRF-win-installer-2025.10.exe" -OutFile bladerf.exe
+          # Everything, with no --include filters. The filters are matched
+          # against the installer's own path separators, and a filter matching
+          # nothing extracts nothing and still exits 0 -- which is how an empty
+          # C:\bladeRF got all the way to a missing-header error in the compile.
+          C:\innoextract\innoextract.exe --extract --output-dir C:\bladeRF bladerf.exe
+          Get-ChildItem -Path C:\bladeRF -Recurse -File |
+            Where-Object { $_.Extension -in '.h', '.lib', '.dll' } |
+            ForEach-Object { $_.FullName }
+
+      # pkg_check_modules takes a .pc file at its word and never opens the
+      # paths in it, so a wrong prefix surfaces as a missing header in the
+      # middle of the build, ten minutes and one misleading error later. These
+      # are the files the hand-written radio .pc files below promise.
+      - name: Verify the radio libraries
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -uo pipefail
+          missing=0
+          for f in /c/bladeRF/app/include/libbladeRF.h \
+                   /c/bladeRF/app/x64/bladeRF.lib \
+                   /c/bladeRF/app/x64/bladeRF.dll \
+                   /c/sweeppp-hackrf/Library/include/libhackrf/hackrf.h \
+                   /c/sweeppp-hackrf/Library/lib/hackrf.lib \
+                   /c/sweeppp-hackrf/Library/bin/hackrf-0.dll \
+                   /c/sweeppp-hackrf/Library/include/rtl-sdr.h \
+                   /c/sweeppp-hackrf/Library/lib/rtlsdr.lib \
+                   /c/sweeppp-hackrf/Library/bin/rtlsdr.dll \
+                   /c/sweeppp-hackrf/Library/include/libusb-1.0/libusb.h \
+                   /c/sweeppp-hackrf/Library/lib/libusb-1.0.lib \
+                   /c/sweeppp-hackrf/Library/bin/libusb-1.0.dll; do
+            if [[ -f "$f" ]]; then
+              echo "ok       $f"
+            else
+              echo "::error::missing $f"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      # cmake/Dependencies.cmake finds fftw3f and every radio library through
+      # pkg_check_modules only. vcpkg ships no fftw3f.pc, Nuand's installer
+      # ships no .pc at all, and the ones inside conda packages name a prefix
+      # on the machine that built them -- the bladeRF one a -lbladeRF-2 that
+      # does not match the .lib beside it, too. Writing them all here keeps
+      # Dependencies.cmake platform-blind.
+      #
+      # Every path is written out in full, with no `prefix=` variable to expand.
+      # pkgconf on Windows defaults to --define-prefix, which *overrides* a .pc
+      # file's own `prefix` with one derived from where the .pc file itself
+      # sits. These live in <workspace>/.ci/pkgconfig, so `${includedir}` came
+      # back as <workspace>/include and the compile failed on a missing
+      # fftw3.h. PKG_CONFIG_DONT_DEFINE_PREFIX turns that behaviour off as
+      # well, belt and braces -- literal paths are what actually make it moot.
+      - name: pkg-config files
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          vcpkg=$(cygpath -m "$VCPKG_INSTALLATION_ROOT")/installed/x64-windows
+          pcdir=$(cygpath -m "$GITHUB_WORKSPACE")/.ci/pkgconfig
+          mkdir -p "$pcdir"
+
+          cat > "$pcdir/fftw3f.pc" <<EOF
+          Name: fftw3f
+          Description: FFTW3 single precision
+          Version: 3.3.10
+          Libs: -L$vcpkg/lib -lfftw3f
+          Cflags: -I$vcpkg/include
+          EOF
+
+          # conda installs the header as include/libhackrf/hackrf.h, and
+          # plugins/sdr-hackrf includes <hackrf.h>. The subdirectory in Cflags
+          # is what bridges the two.
+          cat > "$pcdir/libhackrf.pc" <<EOF
+          Name: libhackrf
+          Description: HackRF
+          Version: 2026.01.3
+          Libs: -LC:/sweeppp-hackrf/Library/lib -lhackrf
+          Cflags: -IC:/sweeppp-hackrf/Library/include/libhackrf
+          EOF
+
+          # The installer keeps headers and the 64-bit libraries in separate
+          # trees, so these two paths do not share a prefix.
+          cat > "$pcdir/libbladeRF.pc" <<EOF
+          Name: libbladeRF
+          Description: Nuand bladeRF
+          Version: 2.6.0
+          Libs: -LC:/bladeRF/app/x64 -lbladeRF
+          Cflags: -IC:/bladeRF/app/include
+          EOF
+
+          cat > "$pcdir/librtlsdr.pc" <<EOF
+          Name: librtlsdr
+          Description: RTL-SDR
+          Version: 2.0.3
+          Libs: -LC:/sweeppp-hackrf/Library/lib -lrtlsdr
+          Cflags: -IC:/sweeppp-hackrf/Library/include
+          EOF
+
+          # -llibusb-1.0, not -lusb-1.0: the import library is libusb-1.0.lib,
+          # and the Fobos sources name it that way in a #pragma as well.
+          cat > "$pcdir/libusb-1.0.pc" <<EOF
+          Name: libusb-1.0
+          Description: libusb
+          Version: 1.0.29
+          Libs: -LC:/sweeppp-hackrf/Library/lib -llibusb-1.0
+          Cflags: -IC:/sweeppp-hackrf/Library/include/libusb-1.0
+          EOF
+
+          for pc in "$pcdir"/*.pc; do echo "== $pc"; cat "$pc"; done
+
+          echo "PKG_CONFIG_PATH=$pcdir" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_DONT_DEFINE_PREFIX=1" >> "$GITHUB_ENV"
+
+      # --- Common from here on ---
+
+      # FetchContent's downloads, cached per platform. Cached in place rather
+      # than through FETCHCONTENT_BASE_DIR: the default is one tree per build
+      # directory, and two builds sharing one deps tree is the known failure.
+      - name: Cache fetched dependencies
+        uses: actions/cache@v6
+        with:
+          path: build/release/_deps
+          key: deps-${{ matrix.name }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      # The release preset sets SWEEPPP_BUILD_TESTS=OFF; a -D on the command
+      # line outranks a preset's cacheVariables, so one tree serves both ctest
+      # and the package.
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--preset release -DSWEEPPP_BUILD_TESTS=ON)
+          # Only a v* tag is a release; everything else this workflow builds
+          # ends up under the nightly pre-release, and is built as the
+          # nightly channel: a separate application, with its own name,
+          # identifier, icon and configuration directory, that installs
+          # beside a release. The three names are kept for the package steps,
+          # which spell them the same way CMakeLists.txt does.
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            channel=release; app=sweeppp; product="Sweep++"
+          else
+            channel=nightly; app=sweeppp-nightly; product="Sweep++ Nightly"
+          fi
+          args+=(-DSWEEPPP_CHANNEL="$channel")
+          {
+            echo "CHANNEL=$channel"
+            echo "APP_ID=$app"
+            echo "PRODUCT_NAME=$product"
+          } >> "$GITHUB_ENV"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            vcpkg=$(cygpath -m "$VCPKG_INSTALLATION_ROOT")
+            # The toolchain is for find_package(glfw3); pkgconf is named rather
+            # than searched for, because nothing on PATH is called pkg-config.
+            args+=(-DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake"
+                   -DPKG_CONFIG_EXECUTABLE="$vcpkg/installed/x64-windows/tools/pkgconf/pkgconf.exe")
+          fi
+          cmake "${args[@]}"
+
+      - name: Build
+        shell: bash
+        run: cmake --build --preset release
+
+      # The radio libraries are the ones vcpkg knows nothing about, so its
+      # applocal deployment -- which put glfw3.dll beside the executables and
+      # fftw3f.dll beside the plugin that needs it -- does not cover them.
+      #
+      # Beside the executables rather than beside the plugins: that is the
+      # first entry in the DLL search order, and it is also the shape the
+      # package below has, so ctest exercises the arrangement that ships.
+      # Without this the SDR plugins load with "The specified module could
+      # not be found" and every test in their suites fails. The Fobos plugin
+      # carries its libraries inside it and needs only libusb from here.
+      - name: Stage the radio libraries beside the binaries
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /c/sweeppp-hackrf/Library/bin/hackrf-0.dll \
+             /c/sweeppp-hackrf/Library/bin/rtlsdr.dll \
+             /c/sweeppp-hackrf/Library/bin/libusb-1.0.dll \
+             /c/sweeppp-hackrf/Library/bin/libwinpthread-1.dll \
+             /c/bladeRF/app/x64/bladeRF.dll \
+             build/release/dist/
+          ls -1 build/release/dist/*.dll
+
+      # --test-dir rather than --preset: there is no release test preset, and
+      # the ones that exist add nothing but --output-on-failure. Same reasoning
+      # as the Makefile's `test` target.
+      - name: Test
+        shell: bash
+        run: ctest --test-dir build/release --output-on-failure
+
+      # dist/ also holds the test executables, so binaries are copied by name.
+      # The layout is the one lib/libsweeppp/src/core/Paths.cpp walks up to
+      # find: resources/ beside the executable needs no install rules and no
+      # environment variables.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            pkgversion="$version"
+          else
+            base=$(sed -n 's/^[[:space:]]*VERSION[[:space:]]\{1,\}\([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | head -1)
+            version="${base}+${GITHUB_SHA:0:8}"
+            # The .deb's version alone carries the commit time, ahead of the
+            # commit: several nightlies sit in one apt component, and a hash
+            # does not order, so `apt install sweeppp-nightly` would pick one
+            # at random. UTC, because two committers' zones would not sort
+            # either. The archive name and the About box keep the plain form.
+            stamp=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M)
+            pkgversion="${base}+${stamp}.${GITHUB_SHA:0:8}"
+          fi
+
+          [[ "$RUNNER_OS" == "Windows" ]] && exe=".exe" || exe=""
+          name="sweeppp-${version}-${{ matrix.name }}"
+          stage="pkg/$name"
+          # Finished archives live apart from the staging tree so the upload
+          # can take the directory whole, however many of them a platform
+          # produces.
+          mkdir -p "$stage/plugins" "$stage/resources/fonts" pkg/artifacts
+
+          binaries="sweeppp sweeppp-cli sweeppp-server sweeps"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            # The GUI is an .app here rather than a bare executable, named
+            # after the product: "Sweep++.app", or "Sweep++ Nightly.app".
+            cp -R "build/release/dist/$PRODUCT_NAME.app" "$stage/"
+            binaries="sweeppp-cli sweeppp-server sweeps"
+          fi
+          for binary in $binaries; do
+            cp "build/release/dist/${binary}${exe}" "$stage/"
+          done
+          cp build/release/dist/plugins/sweeppp-plugin-* "$stage/plugins/"
+
+          cp -R resources/. "$stage/resources/"
+          # resources/fonts/ is empty in the repo -- git tracks no empty
+          # directories -- and the icon font is fetched, not committed. Without
+          # this the packaged GUI has no icons to find.
+          cp build/release/_deps/mdi_font-src/fonts/materialdesignicons-webfont.ttf \
+             "$stage/resources/fonts/"
+
+          # The bundle carries its own copy of both, and Paths looks inside it
+          # first. Not tidiness: an .app is a thing a person drags to
+          # /Applications, and one that reads its plugins from a sibling
+          # directory exits with "no FFT backend" the moment it is moved --
+          # which also makes it a file association that cannot open anything.
+          # The CLI tools beside it keep the copies they walk to, so the two
+          # layouts both work and neither depends on the other.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            app="$stage/$PRODUCT_NAME.app/Contents"
+            mkdir -p "$app/PlugIns"
+            cp build/release/dist/plugins/sweeppp-plugin-* "$app/PlugIns/"
+            cp -R resources/. "$app/Resources/"
+            mkdir -p "$app/Resources/fonts"
+            cp build/release/_deps/mdi_font-src/fonts/materialdesignicons-webfont.ttf \
+               "$app/Resources/fonts/"
+          fi
+
+          cp LICENSE THIRD_PARTY.md README.md "$stage/"
+          # The README opens with the mark, by relative path. Without this the
+          # copy inside the archive has a hole where it should be.
+          mkdir -p "$stage/branding"
+          cp branding/sweeppp.svg "$stage/branding/"
+
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            # No installer, so the file association is a script the operator
+            # runs if they want it. It resolves the executable beside itself,
+            # which is why it ships next to it rather than in a subdirectory.
+            # Taken from the build tree: CMake configures the channel's ProgId
+            # into it.
+            cp build/release/dist/register-sweeps.cmd "$stage/"
+            vcpkg_bin=$(cygpath -u "$VCPKG_INSTALLATION_ROOT")/installed/x64-windows/bin
+            # The libraries the binaries link from vcpkg -- libcurl is the
+            # update check's -- and whatever those load in turn, read off
+            # each DLL with dumpbin rather than listed here. The list was
+            # what broke: libcurl's zlib became z.dll with zlib 1.3.2, and a
+            # package step naming zlib1.dll failed on a file that no longer
+            # existed. Only DLLs vcpkg itself installed are followed; the
+            # system ones are the loader's business.
+            queue=(fftw3f.dll glfw3.dll libcurl.dll)
+            while ((${#queue[@]} > 0)); do
+              dll=${queue[0]}
+              queue=("${queue[@]:1}")
+              if [[ -f "$stage/$dll" ]]; then
+                continue
+              fi
+              cp "$vcpkg_bin/$dll" "$stage/"
+              while read -r dep; do
+                if [[ -f "$vcpkg_bin/$dep" ]]; then
+                  queue+=("$dep")
+                fi
+              done < <(dumpbin -nologo -dependents "$vcpkg_bin/$dll" | tr -d '\r' |
+                       sed -nE 's/^ +([^ ]+\.[dD][lL][lL])$/\1/p')
+            done
+            # hackrf-0.dll and rtlsdr.dll, and what conda pulled in behind
+            # them: libwinpthread, and the libusb that both of them and the
+            # Fobos plugin load.
+            cp /c/sweeppp-hackrf/Library/bin/hackrf-0.dll \
+               /c/sweeppp-hackrf/Library/bin/rtlsdr.dll \
+               /c/sweeppp-hackrf/Library/bin/libusb-1.0.dll \
+               /c/sweeppp-hackrf/Library/bin/libwinpthread-1.dll "$stage/"
+            cp /c/bladeRF/app/x64/bladeRF.dll "$stage/"
+            7z a -tzip "pkg/artifacts/${name}.zip" "./$stage" > /dev/null
+          else
+            tar -czf "pkg/artifacts/${name}.tar.gz" -C pkg "$name"
+          fi
+          echo "PKG_CLI=$stage/sweeppp-cli$exe" >> "$GITHUB_ENV"
+          # The .deb below is named after the same stem, so a distribution's
+          # two packages differ only in their extension.
+          echo "PKG_NAME=$name" >> "$GITHUB_ENV"
+          echo "PKG_VERSION=$pkgversion" >> "$GITHUB_ENV"
+
+      # The end-to-end assertion: it walks the plugin search path and the
+      # resources directory, so a package with either misplaced reports them
+      # missing instead of exiting 0. Run by path rather than from inside the
+      # directory, because Paths resolves against the executable's location and
+      # not the working directory -- which is the property being checked.
+      - name: Smoke-test the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `info` reports a plugin it could not load and still exits 0, so the
+          # exit status alone asserts nothing about the layout.
+          out=$("$PKG_CLI" info)
+          echo "$out"
+          if grep -q '(none found)' <<<"$out"; then
+            echo "::error::no plugins discovered from the packaged layout"; exit 1
+          fi
+          if grep -qE '^  \[!\]' <<<"$out"; then
+            echo "::error::a bundled plugin failed to load from the packaged layout"; exit 1
+          fi
+
+          # Running the CLI proves nothing about the GUI's own DLLs: libcurl is
+          # linked by the GUI alone, and the GUI cannot start on a runner with
+          # no display. So every import of every shipped binary is looked up
+          # instead. Plugins are checked against the package root, not their
+          # own folder, because LoadLibrary resolves a plugin's imports from
+          # the executable's directory.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            stage="$(dirname "$PKG_CLI")"
+            missing=0
+            for binary in "$stage"/*.exe "$stage"/*.dll "$stage"/plugins/*.dll; do
+              while read -r dll; do
+                # API sets are resolved by the loader, not found as files.
+                case "$dll" in [Aa][Pp][Ii]-[Mm][Ss]-*|[Ee][Xx][Tt]-[Mm][Ss]-*) continue ;; esac
+                if [[ ! -f "$stage/$dll" && ! -f "/c/Windows/System32/$dll" ]]; then
+                  echo "::error::$(basename "$binary") needs $dll, which the package does not carry"
+                  missing=1
+                fi
+              done < <(dumpbin -nologo -dependents "$binary" | tr -d '\r' |
+                       sed -nE 's/^ +([^ ]+\.[dD][lL][lL])$/\1/p')
+            done
+            (( missing == 0 )) || exit 1
+          fi
+
+          # The bundle is checked structurally rather than by running it: the
+          # runner has no display, so the GUI cannot get far enough to report
+          # what it found. What can go wrong here is the package step, and
+          # these are the two directories it has to have produced.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            app="$(dirname "$PKG_CLI")/$PRODUCT_NAME.app/Contents"
+            if ! compgen -G "$app/PlugIns/sweeppp-plugin-*" > /dev/null; then
+              echo "::error::the bundle carries no plugins; it would not start once moved"
+              exit 1
+            fi
+            if [[ ! -d "$app/Resources/themes" ]]; then
+              echo "::error::the bundle carries no resources"
+              exit 1
+            fi
+          fi
+
+      # One per Linux entry, each built against the libraries of the
+      # distribution it was built on -- rather than one package from the oldest
+      # glibc in the matrix, claimed to fit the rest. dpkg-shlibdeps below
+      # reads the dependencies off these binaries, so every package declares
+      # the sonames that its own distribution actually ships.
+      #
+      # The layout is the one the binaries already look in, so this needs no
+      # install() rules and no source change: plugins go to the multiarch
+      # directory that PluginSearchPath puts ahead of /usr/lib precisely
+      # because that is where a .deb lands, and resources to /usr/share, which
+      # Paths finds by walking up from /usr/bin.
+      #
+      # Every path carries the app id -- "sweeppp", or "sweeppp-nightly" --
+      # and so does the package name, which is what lets a nightly install
+      # beside a release: dpkg refuses two packages that own the same file.
+      # The binaries inside the nightly are renamed to match, so
+      # /usr/bin/sweeppp-nightly-cli sits beside /usr/bin/sweeppp-cli, and
+      # each finds its own resources and plugins because the id it looks
+      # under was compiled in.
+      #
+      # Version: is PKG_VERSION from the Package step -- on main, the base
+      # version with the commit time in it, so pages.yml can serve several
+      # nightlies from one apt component.
+      - name: Debian package
+        if: matrix.deb != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          triplet=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+          app="$APP_ID"
+          suffix="${app#sweeppp}"    # "" or "-nightly"
+          root="pkg/deb"
+          rm -rf "$root"
+          install -d "$root/DEBIAN" "$root/usr/bin" \
+                     "$root/usr/lib/$triplet/$app/plugins" \
+                     "$root/usr/share/$app/resources/fonts" \
+                     "$root/usr/share/applications" \
+                     "$root/usr/share/mime/packages" \
+                     "$root/usr/share/doc/$app"
+
+          install -m755 build/release/dist/sweeppp "$root/usr/bin/$app"
+          install -m755 build/release/dist/sweeppp-cli "$root/usr/bin/$app-cli"
+          install -m755 build/release/dist/sweeppp-server "$root/usr/bin/$app-server"
+          install -m755 build/release/dist/sweeps "$root/usr/bin/sweeps$suffix"
+          # 644: a shared object is not an executable, and lintian says so.
+          install -m644 build/release/dist/plugins/sweeppp-plugin-*.so \
+                        "$root/usr/lib/$triplet/$app/plugins/"
+
+          cp -R resources/. "$root/usr/share/$app/resources/"
+          install -m644 build/release/_deps/mdi_font-src/fonts/materialdesignicons-webfont.ttf \
+                        "$root/usr/share/$app/resources/fonts/"
+
+          install -m644 LICENSE "$root/usr/share/doc/$app/copyright"
+          install -m644 THIRD_PARTY.md README.md "$root/usr/share/doc/$app/"
+
+          # The Fobos libraries are compiled into their plugin rather than
+          # installed, so nothing else would give udev their rule and a Fobos
+          # SDR would open only as root. Numbered to sort ahead of
+          # 73-seat-late.rules, which is what turns the uaccess tag into
+          # permission for the logged-in user. librtlsdr's own package already
+          # ships the rule for its dongles. Named after the package so two
+          # channels ship two identical copies rather than fight over one.
+          install -d "$root/usr/lib/udev/rules.d"
+          install -m644 build/release/_deps/libfobos-src/fobos-sdr.rules \
+                        "$root/usr/lib/udev/rules.d/73-$app-fobos-sdr.rules"
+
+          # hicolor is where every desktop environment looks, and the app id
+          # is the name the desktop entry and the window's WM_CLASS both use.
+          # The SVG is the source of the mark -- the channel's own, which is
+          # what the binary was configured with; the PNG ladder is for the
+          # environments that do not render scalable icons.
+          svg="branding/$app.svg"
+          install -d "$root/usr/share/icons/hicolor/scalable/apps"
+          install -m644 "$svg" "$root/usr/share/icons/hicolor/scalable/apps/$app.svg"
+          # Below 32 the ++ closes up into a smudge and the nightly lettering
+          # into a bar, so the small sizes are rendered without them. Each is a
+          # group marked class="detail", closed on a line of its own.
+          sed '/<g class="detail"/,/<\/g>/d' "$svg" > pkg/icon-small.svg
+          for size in 16 24 32 48 64 128 256; do
+            [[ $size -lt 32 ]] && src=pkg/icon-small.svg || src="$svg"
+            install -d "$root/usr/share/icons/hicolor/${size}x${size}/apps"
+            rsvg-convert -w "$size" -h "$size" "$src" \
+              -o "$root/usr/share/icons/hicolor/${size}x${size}/apps/$app.png"
+            chmod 644 "$root/usr/share/icons/hicolor/${size}x${size}/apps/$app.png"
+          done
+
+          # The document icon for .sweeps files, under mimetypes/, which is a
+          # separate ladder from apps/: a file manager looking up the icon
+          # for application-x-sweeps does not fall back to the application's
+          # own. The same artwork for every channel, but prefixed with the
+          # app id and pointed at by the <icon> in the MIME package below, so
+          # the two channels' packages do not both claim one file.
+          docsvg=branding/sweeps.svg
+          docicon="$app-sweeps"
+          sed '/<g class="detail"/,/<\/g>/d' "$docsvg" > pkg/docicon-small.svg
+          install -d "$root/usr/share/icons/hicolor/scalable/mimetypes"
+          install -m644 "$docsvg" "$root/usr/share/icons/hicolor/scalable/mimetypes/$docicon.svg"
+          for size in 16 24 32 48 64 128 256; do
+            [[ $size -lt 32 ]] && src=pkg/docicon-small.svg || src="$docsvg"
+            install -d "$root/usr/share/icons/hicolor/${size}x${size}/mimetypes"
+            rsvg-convert -w "$size" -h "$size" "$src" \
+              -o "$root/usr/share/icons/hicolor/${size}x${size}/mimetypes/$docicon.png"
+            chmod 644 "$root/usr/share/icons/hicolor/${size}x${size}/mimetypes/$docicon.png"
+          done
+
+          # %f, and one file: the binary treats a bare path argument as a
+          # session to open, and opening two would need two processes.
+          cat > "$root/usr/share/applications/$app.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=$PRODUCT_NAME
+          GenericName=Spectrum Analyser
+          Comment=SDR sweeping and spectrum analysis
+          Exec=$app %f
+          Icon=$app
+          Terminal=false
+          Categories=HamRadio;Science;Utility;
+          MimeType=application/x-sweeps;
+          StartupWMClass=$app
+          EOF
+
+          # The type itself. A desktop entry claiming a MIME type nothing has
+          # defined associates with nothing: shared-mime-info is where the
+          # extension and the magic live, and the magic is what makes a
+          # .sweeps recognised when it has been renamed.
+          #
+          # "SWPP" at offset 0 is the container's magic, and the byte after the
+          # four-byte version that follows it is not part of the match -- see
+          # lib/libsweepsfile/sweeps-format-v1.md.
+          #
+          # Both channels define the same type. With both installed the merged
+          # database keeps one definition's icon, so a .sweeps file wears
+          # whichever mark won; the association itself is unaffected.
+          cat > "$root/usr/share/mime/packages/$app.xml" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+            <mime-type type="application/x-sweeps">
+              <comment>Sweep++ session</comment>
+              <glob pattern="*.sweeps"/>
+              <magic priority="60">
+                <match type="string" value="SWPP" offset="0"/>
+              </magic>
+              <icon name="$docicon"/>
+            </mime-type>
+          </mime-info>
+          EOF
+
+          # Read off the binaries rather than written by hand, so the soname
+          # packages are the ones this build actually linked against and track
+          # a dependency bump on their own.
+          #
+          # dpkg-shlibdeps expects to be run inside a source package, and a
+          # stub control satisfies it. That stub lives beside the package root
+          # rather than inside it: `debian` and `DEBIAN` are the same directory
+          # on a case-insensitive filesystem, so cleaning one up removed the
+          # other, and nothing that is not part of the package belongs under
+          # its root anyway.
+          depdir="pkg/shlibdeps"
+          rm -rf "$depdir"
+          install -d "$depdir/debian"
+          echo "Source: sweeppp" > "$depdir/debian/control"
+          depends=$(cd "$depdir" && dpkg-shlibdeps -O --ignore-missing-info \
+                      ../deb/usr/bin/* ../deb/usr/lib/"$triplet"/"$app"/plugins/*.so 2>/dev/null |
+                    sed -n 's/^shlibs:Depends=//p') || true
+          rm -rf "$depdir"
+          if [[ -z "$depends" ]]; then
+            echo "::error::dpkg-shlibdeps produced no dependencies"
+            exit 1
+          fi
+          # The two that are not read off a binary: both ship dpkg triggers, and
+          # those triggers are what turn the installed MIME package and desktop
+          # entry into a working association. Without them the files land and
+          # nothing looks at them until something else happens to run the
+          # update tools.
+          echo "Depends: $depends, shared-mime-info, desktop-file-utils"
+
+          cat > "$root/DEBIAN/control" <<EOF
+          Package: $app
+          Version: $PKG_VERSION
+          Architecture: ${{ matrix.deb }}
+          Maintainer: Aurimas Niekis <aurimas@niekis.lt>
+          Homepage: https://github.com/aurimasniekis/sweeppp
+          Section: hamradio
+          Priority: optional
+          Depends: $depends, shared-mime-info, desktop-file-utils
+          Description: SDR sweeping and spectrum analysis platform${suffix:+ ($CHANNEL build)}
+           Multi-device input, selectable FFT backends, a spectrum and waterfall
+           UI, a scrollable and replayable session history, remote headless
+           operation, and a plugin ecosystem.
+          EOF
+
+          deb="pkg/artifacts/${PKG_NAME}.deb"
+          dpkg-deb --build --root-owner-group "$root" "$deb"
+          dpkg-deb --info "$deb"
+
+      # Installed for real, because a layout that is merely plausible is what
+      # every previous packaging bug here looked like. `info` walks the plugin
+      # search path and the resources directory, so it fails if either landed
+      # somewhere the binaries do not look.
+      - name: Install the .deb and run it
+        if: matrix.deb != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The container images are already root and have no sudo installed.
+          sudo=''
+          [[ $(id -u) -eq 0 ]] || sudo='sudo'
+          $sudo apt-get install -y "$PWD/pkg/artifacts/${PKG_NAME}.deb"
+          cd /    # nothing of the build tree within reach
+          out=$("$APP_ID-cli" info)
+          echo "$out"
+          if grep -q '(none found)' <<<"$out"; then
+            echo "::error::the installed package discovers no plugins"; exit 1
+          fi
+          if grep -qE '^  \[!\]' <<<"$out"; then
+            echo "::error::a plugin installed by the package failed to load"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sweeppp-${{ matrix.name }}
+          path: pkg/artifacts
+          if-no-files-found: error
+
+  # A rolling pre-release carrying the newest main build.
+  #
+  # Deliberately a separate job from `release` below, which stays tag-only.
+  # The guarantee that a versioned release carries nothing but the run that
+  # built its tag is unchanged; this publishes somewhere else, under a tag
+  # that moves, and as a prerelease -- so GitHub never shows it as "Latest"
+  # and a `v*` release keeps that spot.
+  #
+  # Recreated rather than appended to, because `gh release edit` cannot move a
+  # tag onto the commit that was actually built and appending would leave every
+  # previous night's assets stacked behind the current ones. Its predecessor is
+  # not thrown away with it: it is retagged `nightly-<short-sha>` first, so a
+  # regression can be bisected against the builds either side of it.
+  nightly:
+    name: nightly release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    # One at a time: two pushes in quick succession would otherwise race
+    # between archiving the old release and creating the new one, and could
+    # leave no `nightly` at all.
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # How many archived nightlies outlive the prune below.
+      NIGHTLY_KEEP: '5'
+    steps:
+      # No `name:`, so this is every artifact of this run and nothing else --
+      # the same scoping the tagged release relies on.
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Renamed to fixed names so "the latest nightly" is a URL that can go in
+      # a script, instead of one that changes with every commit. Which build it
+      # is stays in the release notes and in each package's own metadata -- the
+      # .deb still declares its real version, only the filename is stable.
+      - name: Give the assets stable names
+        run: |
+          set -euo pipefail
+          cd dist
+          # One rule for every asset, .deb included, now that a .deb is named
+          # after the same stem as the tarball beside it. The version token is
+          # `0.1.0+abc12345` and contains no dash of its own, so `[^-]+` stops
+          # exactly where the platform name begins.
+          for f in *; do
+            new=$(sed -E 's/^sweeppp-[^-]+-/sweeppp-nightly-/' <<<"$f")
+            [[ "$f" == "$new" ]] || mv "$f" "$new"
+          done
+          ls -l
+
+      # Archiving and publishing are one step on purpose. Between the moment
+      # the old release gives up the `nightly` name and the moment the new one
+      # takes it there is no release called `nightly`, and a step boundary is
+      # somewhere that window can widen.
+      #
+      # --repo throughout, because this job never checks the repository out --
+      # it only needs the artifacts -- and gh otherwise works out which
+      # repository it is talking to by shelling out to git.
+      - name: Archive the previous nightly and publish this one
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+
+          archive=''
+          if gh release view nightly --repo "$repo" >/dev/null 2>&1; then
+            # The git ref rather than the release's targetCommitish: the ref is
+            # what the tag actually resolves to, where targetCommitish is only
+            # what was asked for -- a branch name, if anyone ever made one of
+            # these by hand.
+            ref=$(gh api "repos/$repo/git/ref/tags/nightly")
+            prev=$(jq -r '.object.sha' <<<"$ref")
+            # gh leaves a lightweight tag, so object.sha is the commit. An
+            # annotated one -- what `git tag -a nightly` would leave -- points
+            # at a tag object and needs one more hop.
+            if [[ "$(jq -r '.object.type' <<<"$ref")" == tag ]]; then
+              prev=$(gh api "repos/$repo/git/tags/$prev" --jq '.object.sha')
+            fi
+            archive="nightly-${prev:0:8}"
+
+            # Re-running this workflow on a commit that is already the nightly,
+            # or re-running the job after it got as far as the rename, would
+            # ask one tag to hold two releases. The old release is a duplicate
+            # of what is about to be published, so it goes rather than moves.
+            if [[ "$prev" == "$GITHUB_SHA" ]] ||
+               gh release view "$archive" --repo "$repo" >/dev/null 2>&1; then
+              echo "::notice::$archive already covers ${prev:0:8}; discarding the old nightly"
+              gh release delete nightly --yes --cleanup-tag --repo "$repo"
+              archive=''
+            elif ! gh api "repos/$repo/git/ref/tags/$archive" >/dev/null 2>&1; then
+              # The tag is laid down by the run that built that commit, at the
+              # end of this step, and cannot be laid down here: GitHub refuses
+              # to create a ref at an object from an older push. 404, whatever
+              # the token's permissions -- measured against this repository,
+              # where the same call succeeds for a commit from the most recent
+              # push and fails for one eleven days old.
+              #
+              # So a nightly published before that step existed, or one whose
+              # tag has gone missing, is dropped rather than taking the whole
+              # release down with it.
+              echo "::warning::no $archive tag to move the old nightly onto; discarding it"
+              gh release delete nightly --yes --cleanup-tag --repo "$repo"
+              archive=''
+            fi
+          else
+            echo "no nightly release to archive"
+          fi
+
+          if [[ -n "$archive" ]]; then
+            # A plain rename onto a tag that is already there, which is the
+            # only shape the API unambiguously supports -- and now the only one
+            # available, since the ref cannot be created at this point.
+            #
+            # No --notes: gh sends only the flags it is given, so the body --
+            # which already names the commit in full -- is left as it was.
+            gh release edit nightly --repo "$repo" \
+              --tag "$archive" --title "Nightly ${prev:0:8}"
+            gh api -X DELETE "repos/$repo/git/refs/tags/nightly"
+          fi
+
+          # Both belt and braces and the repair path for a run that died
+          # mid-rotation: a `nightly` tag with no release behind it. It has to
+          # be gone before the create below, because --target is documented as
+          # "unused if the Git tag already exists" -- the release would be
+          # published against the *old* commit, silently and with a zero exit
+          # status.
+          if gh api "repos/$repo/git/ref/tags/nightly" >/dev/null 2>&1; then
+            gh api -X DELETE "repos/$repo/git/refs/tags/nightly"
+          fi
+
+          cat > notes.md <<EOF
+          Rolling build of \`main\`, replaced on every push. The one it replaces is
+          kept as \`nightly-<short-sha>\`; the $NIGHTLY_KEEP most recent are retained, so a
+          regression can be bisected against the builds either side of it.
+
+          Not a supported release -- use a \`v*\` tag for that. Installs as
+          Sweep++ Nightly, alongside a release.
+
+          **Commit:** \`$GITHUB_SHA\`
+          **Built:** $(date -u +'%Y-%m-%d %H:%M') UTC
+
+          macOS binaries are neither signed nor notarised. Gatekeeper will quarantine
+          them: open once, then System Settings → Privacy & Security → Open Anyway;
+          or \`xattr -dr com.apple.quarantine "Sweep++ Nightly.app"\`
+          EOF
+
+          gh release create nightly dist/* \
+            --repo "$repo" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Nightly $(date -u +%Y-%m-%d)" \
+            --notes-file notes.md
+
+          # Asserted rather than assumed: a nightly sitting on the wrong commit
+          # is the one failure the ordering above exists to prevent, and it is
+          # invisible in every exit status.
+          #
+          # Waited for rather than read once: the tag is laid down as part of
+          # creating the release, and for a moment afterwards the refs API
+          # can still answer 404 -- which took a run down right after a
+          # successful create.
+          landed=''
+          for _ in $(seq 1 10); do
+            if landed=$(gh api "repos/$repo/git/ref/tags/nightly" --jq '.object.sha' 2>/dev/null); then
+              break
+            fi
+            sleep 3
+          done
+          if [[ "$landed" != "$GITHUB_SHA" ]]; then
+            echo "::error::nightly landed on $landed, not $GITHUB_SHA"
+            exit 1
+          fi
+
+          # The tag the next run will move this release onto when it replaces
+          # it. Laid down now because now is the only time it can be: this
+          # commit is what was just pushed, and a ref created at an older
+          # object is refused.
+          #
+          # A warning rather than a failure. The nightly is published and
+          # correct by this point; all that is lost is the ability to keep this
+          # particular build once the next one lands, and stopping the job here
+          # would not save it.
+          tag="nightly-${GITHUB_SHA:0:8}"
+          if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag is already there"
+          elif ! gh api "repos/$repo/git/refs" \
+                 -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA" >/dev/null; then
+            echo "::warning::could not tag $tag; this build will not be kept when it is replaced"
+          fi
+
+      # Separate step, and after the publish: a pruning failure must not be
+      # able to take the release down with it.
+      - name: Keep the most recent archives
+        run: |
+          set -euo pipefail
+          # publishedAt, never createdAt: a release's createdAt is the *commit*
+          # date of its target rather than the moment it was published, so on a
+          # merge of older work the two orders disagree.
+          #
+          # The pattern is this step's entire safety argument. `nightly` has no
+          # trailing hash and `v1.2.3` does not begin with the word, so neither
+          # the rolling release nor any version can match it however many
+          # releases come back.
+          #
+          # Newest first out of jq, and the count taken off in the shell: the
+          # filter then holds no number, and `tail -n +N` is one obvious thing
+          # rather than a slice index that has to be reasoned about.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+              --json tagName,publishedAt \
+              --jq '[.[] | select(.tagName | test("^nightly-[0-9a-f]{8}$"))]
+                    | sort_by(.publishedAt) | reverse | .[].tagName' |
+            tail -n "+$((NIGHTLY_KEEP + 1))" |
+            while read -r tag; do
+              echo "pruning $tag"
+              gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY"
+            done
+
+  # Tag runs only. Two independent guarantees that a non-tag build never
+  # reaches a release: this `if:`, and download-artifact without a `name:`
+  # being scoped to the current run by definition.
+  #
+  # `needs: [build]` is still satisfied when the experimental entries fail,
+  # because continue-on-error makes their conclusion success -- so Windows
+  # delays neither the release nor the other eight packages.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true

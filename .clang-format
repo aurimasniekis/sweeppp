@@ -1,0 +1,24 @@
+# Formatted with clang-format 22. The tool's output moves between major
+# versions, so another one reports differences that are nothing to do with the
+# tree -- `make format-check` is only meaningful against this one, and CI
+# installs it rather than using the distribution's.
+Language:        Cpp
+BasedOnStyle:    LLVM
+Standard:        Latest
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+ColumnLimit:     100
+AccessModifierOffset: -4
+PointerAlignment: Left
+DerivePointerAlignment: false
+NamespaceIndentation: None
+FixNamespaceComments: true
+SortIncludes:    CaseSensitive
+IncludeBlocks:   Regroup
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+AlwaysBreakTemplateDeclarations: Yes
+SpaceAfterTemplateKeyword: true

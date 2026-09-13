@@ -1,0 +1,33 @@
+@PACKAGE_INIT@
+
+# No find_dependency() call, and that is the point: libsweepsfile has no
+# dependencies. `expected` is either the standard library's or the copy vendored
+# into `sweeps/vendor/`, and either way it installs with the headers -- so
+# resolving this package can never fail on something that is not here.
+
+include("${CMAKE_CURRENT_LIST_DIR}/sweepsfile-targets.cmake")
+
+# A C-only consumer -- the audience `sweeps/sweeps.h` exists for -- would
+# otherwise fail to link.
+#
+# The library is C++ however it is built. A static archive of C++ objects
+# carries no record of the runtime it needs, so CMake supplies it from
+# IMPORTED_LINK_INTERFACE_LANGUAGES "CXX" (which the export sets) plus
+# CMAKE_CXX_IMPLICIT_LINK_LIBRARIES -- and that second variable is empty unless
+# CXX is an enabled language in the consuming project. `project(app C)` then
+# links with the C driver and fails on `operator new` and `__cxa_throw`, at link
+# time, with nothing pointing at the cause.
+#
+# Enabling the language here rather than asking every C consumer to remember it
+# keeps `find_package(sweepsfile)` a single line from C as well as from C++. A
+# shared build needs none of this -- the runtime is recorded in the library's own
+# load commands -- so the check is on the type rather than unconditional.
+if(NOT CMAKE_CXX_COMPILER_LOADED)
+    get_target_property(_sweepsfile_type sweeps::sweepsfile TYPE)
+    if(_sweepsfile_type STREQUAL "STATIC_LIBRARY")
+        enable_language(CXX)
+    endif()
+    unset(_sweepsfile_type)
+endif()
+
+check_required_components(sweepsfile)

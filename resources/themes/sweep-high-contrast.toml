@@ -1,0 +1,68 @@
+# Sweep++ theme -- Sweep High Contrast
+#
+# For direct sunlight, a laptop outdoors, or a cheap external panel.
+#
+# The problem this solves: in bright ambient light a display's effective
+# contrast collapses at the bottom of its range, and every surface below about
+# #202020 reads as the same black. A palette whose panels, headers and buttons
+# sit within a few values of each other looks refined indoors and becomes one
+# flat sheet outdoors, with the edges of controls simply invisible.
+#
+# So the surfaces are lifted well off black, the steps between them are wide,
+# borders approach mid-grey, and body text is pure white. It gives up some
+# visual polish to stay usable where the standard dark theme washes out.
+
+[theme]
+name = "Sweep High Contrast"
+base = "dark"
+
+[theme.chrome]
+window_background = "#0A0C10"
+panel_background  = "#1E2530"
+header_background = "#2E3846"
+text              = "#FFFFFF"
+text_dim          = "#C8D2E0"
+accent            = "#64ABFF"
+accent_hover      = "#8FC4FF"
+# Borders carry the layout when fills stop being distinguishable.
+border            = "#7A8AA3"
+separator         = "#4A5768"
+button            = "#3E4A5C"
+button_hover      = "#4F5D72"
+button_active     = "#61708A"
+start             = "#3BE07A"
+stop              = "#FF5F5F"
+record            = "#FF5F5F"
+ok                = "#3BE07A"
+warning           = "#FFC53D"
+danger            = "#FF6B6B"
+rounding          = 3.0
+border_size       = 1.0
+
+[theme.spectrum]
+# Pure black behind the traces: here the contrast that matters is trace against
+# background, not surface against surface.
+background = "#000000"
+grid       = "#4A5768"
+axis_text  = "#E4EAF2"
+
+trace_live = "#3BE07A"
+trace_max  = "#FF5F5F"
+trace_min  = "#64ABFF"
+trace_avg  = "#FFC53D"
+
+cursor      = "#FFFFFF"
+marker      = "#C3D0E0"
+marker_text = "#FFFFFF"
+selection   = "#64ABFF"
+
+contribution_alpha = 0.22
+# A 1.4 px line disappears against glare.
+trace_thickness = 1.9
+fill_colormap   = "spectral"
+# Lighter than the dark theme's, so the fill does not compete with the trace
+# sitting on top of it.
+fill_alpha      = 0.40
+
+[theme.waterfall]
+colormap = "spectral"

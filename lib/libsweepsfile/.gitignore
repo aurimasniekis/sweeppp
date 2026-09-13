@@ -1,0 +1,11 @@
+# Build trees produced by this directory's own Makefile. Anchored here rather
+# than added to the repository root, because this library is meant to be usable
+# on its own -- including when it is the whole checkout.
+/build/
+
+# Python bytecode and packaging output from the ctypes binding.
+__pycache__/
+*.py[cod]
+/python/build/
+/python/dist/
+/python/*.egg-info/

@@ -1,0 +1,36 @@
+# Build trees
+/build/
+/out/
+
+# Where the CI packaging step stages and archives a release layout. Running
+# those same commands by hand is how you check a package before tagging.
+/pkg/
+# ...and where the Windows job writes the pkg-config files it has to supply
+# itself, because neither vcpkg nor PothosSDR ships them.
+/.ci/
+
+# Vendored dependency downloads (FETCHCONTENT_BASE_DIR).
+# Kept out of the repo on purpose: pins live in cmake/Dependencies.cmake, and
+# the sources are re-fetchable from those pins.
+/.deps/
+
+# Tooling
+compile_commands.json
+.cache/
+.clangd/
+/.vscode/
+/.idea/
+
+# Platform noise
+.DS_Store
+
+# Local sessions and captures produced while developing
+*.sweeps
+# ...but the conformance suite's frozen reference file is a source artefact.
+# Without this negation the golden is silently absent and the byte-identity
+# test is theatre.
+!lib/libsweepsfile/tests/data/*.sweeps
+*.iq
+*.cf32
+*.cs8
+*.cs16

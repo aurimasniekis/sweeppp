@@ -1,0 +1,478 @@
+# Sweep++ channels -- Wi-Fi
+#
+# Channel centres from the IEEE 802.11 channel plans. Which of them are legal
+# where you are is a national question: the 5 GHz DFS sub-bands and the whole
+# of 6 GHz differ by region, and this file lists the plan rather than a
+# permission.
+#
+# Widths are the 20 MHz base channel. A link bonded to 40, 80 or 160 MHz
+# occupies its centre channel and its neighbours.
+#
+# A user file of the same [channels].id in the config directory replaces this
+# one outright.
+
+[channels]
+id = "wifi"
+name = "Wi-Fi"
+description = "802.11 channels, 2.4 through 6 GHz"
+width = "20 MHz"
+
+[channels.colors]
+ghz24 = "#3B82F6"
+ghz5 = "#6366F1"
+ghz6 = "#8B5CF6"
+halow = "#0EA5E9"
+
+[[group]]
+id = "24"
+name = "2.4 GHz"
+color = "ghz24"
+default = true
+description = "On by default: it is the band most often being investigated"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 1"
+  center = "2412 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 2"
+  center = "2417 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 3"
+  center = "2422 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 4"
+  center = "2427 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 5"
+  center = "2432 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 6"
+  center = "2437 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 7"
+  center = "2442 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 8"
+  center = "2447 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 9"
+  center = "2452 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 10"
+  center = "2457 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 11"
+  center = "2462 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 12"
+  center = "2467 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 13"
+  center = "2472 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 2.4G ch 14"
+  center = "2484 MHz"
+
+[[group]]
+id = "5"
+name = "5 GHz"
+color = "ghz5"
+
+[[group]]
+id = "5/unii1"
+name = "UNII-1"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 36"
+  center = "5180 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 40"
+  center = "5200 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 44"
+  center = "5220 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 48"
+  center = "5240 MHz"
+
+[[group]]
+id = "5/unii2a"
+name = "UNII-2A (DFS)"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 52"
+  center = "5260 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 56"
+  center = "5280 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 60"
+  center = "5300 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 64"
+  center = "5320 MHz"
+
+[[group]]
+id = "5/unii2c"
+name = "UNII-2C (DFS)"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 100"
+  center = "5500 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 104"
+  center = "5520 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 108"
+  center = "5540 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 112"
+  center = "5560 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 116"
+  center = "5580 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 120"
+  center = "5600 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 124"
+  center = "5620 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 128"
+  center = "5640 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 132"
+  center = "5660 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 136"
+  center = "5680 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 140"
+  center = "5700 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 144"
+  center = "5720 MHz"
+
+[[group]]
+id = "5/unii3"
+name = "UNII-3"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 149"
+  center = "5745 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 153"
+  center = "5765 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 157"
+  center = "5785 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 161"
+  center = "5805 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 5G ch 165"
+  center = "5825 MHz"
+
+[[group]]
+id = "6"
+name = "6 GHz"
+color = "ghz6"
+
+[[group]]
+id = "6/unii5"
+name = "UNII-5"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 1"
+  center = "5955 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 5"
+  center = "5975 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 9"
+  center = "5995 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 13"
+  center = "6015 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 17"
+  center = "6035 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 21"
+  center = "6055 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 25"
+  center = "6075 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 29"
+  center = "6095 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 33"
+  center = "6115 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 37"
+  center = "6135 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 41"
+  center = "6155 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 45"
+  center = "6175 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 49"
+  center = "6195 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 53"
+  center = "6215 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 57"
+  center = "6235 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 61"
+  center = "6255 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 65"
+  center = "6275 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 69"
+  center = "6295 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 73"
+  center = "6315 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 77"
+  center = "6335 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 81"
+  center = "6355 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 85"
+  center = "6375 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 89"
+  center = "6395 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 93"
+  center = "6415 MHz"
+
+[[group]]
+id = "6/unii6"
+name = "UNII-6"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 97"
+  center = "6435 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 101"
+  center = "6455 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 105"
+  center = "6475 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 109"
+  center = "6495 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 113"
+  center = "6515 MHz"
+
+[[group]]
+id = "6/unii7"
+name = "UNII-7"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 117"
+  center = "6535 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 121"
+  center = "6555 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 125"
+  center = "6575 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 129"
+  center = "6595 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 133"
+  center = "6615 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 137"
+  center = "6635 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 141"
+  center = "6655 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 145"
+  center = "6675 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 149"
+  center = "6695 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 153"
+  center = "6715 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 157"
+  center = "6735 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 161"
+  center = "6755 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 165"
+  center = "6775 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 169"
+  center = "6795 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 173"
+  center = "6815 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 177"
+  center = "6835 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 181"
+  center = "6855 MHz"
+
+[[group]]
+id = "6/unii8"
+name = "UNII-8"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 185"
+  center = "6875 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 189"
+  center = "6895 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 193"
+  center = "6915 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 197"
+  center = "6935 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 201"
+  center = "6955 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 205"
+  center = "6975 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 209"
+  center = "6995 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 213"
+  center = "7015 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 217"
+  center = "7035 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 221"
+  center = "7055 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 225"
+  center = "7075 MHz"
+
+  [[group.channel]]
+  name = "Wi-Fi 6G ch 229"
+  center = "7095 MHz"
+
+[[group]]
+id = "halow"
+name = "HaLow (802.11ah)"
+color = "halow"
+
+  [[group.channel]]
+  name = "HaLow EU"
+  start = "863 MHz"
+  stop = "868 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "HaLow US"
+  start = "902 MHz"
+  stop = "928 MHz"
+  type = "band"

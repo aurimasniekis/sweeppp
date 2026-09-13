@@ -1,0 +1,21 @@
+# Sanitizer ignore list for vendored third-party code.
+#
+# Only entries with a specific, understood justification belong here. Silencing
+# a sanitizer in our own code is never the right fix.
+#
+# Matched on the source directory's own name rather than on a path under
+# .deps/, because each build tree now fetches into .deps/<tree>/ and a pattern
+# anchored one level up would quietly stop matching -- leaving the sanitizers
+# noisy again with nothing to say why.
+
+# FFTW computes codelet strides as pointer arithmetic on a null base when a
+# buffer is unused, which UBSan's pointer-overflow check flags. It is
+# technically undefined but harmless, long-standing upstream, and the offsets
+# are never dereferenced. Without this, every FFT-touching test drowns our own
+# UBSan output in hundreds of identical vendored reports.
+src:*/fftw3-src/*
+
+# Dear ImGui and ImPlot use their own arena allocators and some deliberate
+# type punning that the sanitizers cannot reason about.
+src:*/imgui-src/*
+src:*/implot-src/*

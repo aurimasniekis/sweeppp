@@ -1,0 +1,84 @@
+# Sweep++ theme -- Sweep Dark
+#
+# A theme only has to state what it changes: `base` selects the built-in to
+# start from, and every key below is optional. That is what keeps a
+# hand-written theme short and stops it breaking when new keys are added.
+#
+# Copy this file into your config directory to override it:
+#   macOS   ~/Library/Application Support/sweeppp/themes/
+#   Linux   ~/.config/sweeppp/themes/
+#   Windows %APPDATA%\sweeppp\themes\
+#
+# A user file replaces the built-in of the same name.
+
+[theme]
+name = "Sweep Dark"
+base = "dark"
+
+# The steps between surface levels are deliberately wide. In bright ambient
+# light the display's effective contrast collapses at the bottom of its range,
+# and everything below roughly #202020 reads as the same black -- so a palette
+# whose surfaces sit within a few values of each other becomes one flat sheet
+# outdoors. See sweep-high-contrast.toml if this is still not enough.
+[theme.chrome]
+window_background = "#12161C"
+panel_background  = "#1B212A"
+header_background = "#262E3A"
+text              = "#F5F7FA"
+text_dim          = "#B0BCCC"
+accent            = "#4D9BFF"
+accent_hover      = "#7AB4FF"
+# Borders carry the layout when fills lose their separation to glare.
+border            = "#55637A"
+separator         = "#3A4556"
+button            = "#333D4D"
+button_hover      = "#414D61"
+button_active     = "#4F5D75"
+start             = "#2FBF5F"
+stop              = "#E5484D"
+record            = "#E5484D"
+ok                = "#3DDC84"
+warning           = "#FFB020"
+danger            = "#FF5A5A"
+rounding          = 4.0
+border_size       = 1.0
+
+[theme.spectrum]
+# Black, not merely dark. The plots are one continuous surface across the
+# window, so anything lighter reads as a panel sitting on top of it -- and it
+# costs contrast at the bottom of the colour map, where the noise floor lives.
+background = "#000000"
+# Grid lines were effectively invisible in daylight at #232833, and they are
+# what lets a level be read off the plot without placing a marker.
+grid       = "#38414F"
+axis_text  = "#B0BCCC"
+
+# One colour per trace. Chosen to stay distinguishable where two traces
+# overlap, which they constantly do.
+trace_live = "#4ADE80"
+trace_max  = "#EF4444"
+trace_min  = "#60A5FA"
+trace_avg  = "#FBBF24"
+
+# Neutral rather than a hue of their own: a marker points at the measurement
+# instead of being one, and it is drawn over allocation chips in every colour a
+# plugin felt like. The selected marker is the bright one; the rest are dimmer.
+cursor      = "#FFFFFF"
+marker      = "#9FB0C4"
+marker_text = "#F8FAFC"
+selection   = "#3B82F6"
+
+contribution_alpha = 0.18
+trace_thickness = 1.4
+
+# The gradient fill under the live trace. Independent of the waterfall's
+# colormap -- they often match, but need not.
+fill_colormap = "midnight"
+# A soft wash under the trace, not a second display competing with it: the
+# shape of the trace is the measurement, the fill is context.
+fill_alpha    = 0.28
+
+[theme.waterfall]
+# Near-black through the bottom quarter, so an empty band reads as empty
+# rather than as a wash of colour.
+colormap = "midnight"

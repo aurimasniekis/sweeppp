@@ -1,0 +1,593 @@
+# Everything a pull request has to pass, and nothing that publishes.
+#
+# Separate from build.yml because the two answer different questions. build.yml
+# asks whether a commit packages correctly on all nine platforms, and its answer
+# is what a release carries. This asks whether a change is sound, on the three
+# entries that between them cover the three standard libraries -- libstdc++ with
+# GCC, libc++ with Apple Clang, MSVC -- plus the checks that catch what a passing
+# ctest does not.
+#
+# The sanitizer and libsweepsfile jobs live here rather than in build.yml
+# because what they establish is only actionable before a merge. That leaves a
+# commit pushed straight to main uncovered by them; requiring a pull request to
+# main in branch protection is what closes that, rather than a second copy of
+# both jobs drifting out of step with these.
+
+name: pr
+
+on:
+  pull_request:
+    branches: [main]
+
+# A fork's run gets a read-only token whatever this says. Spelling it out makes
+# the same true of a branch pull request, where it is not automatic.
+permissions:
+  contents: read
+
+# Superseded pull request runs are pointless: the only result anyone reads is
+# the one for the head commit.
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # build.yml's list, minus nothing: a pull request builds the same tree, and a
+  # dependency that is missing here is a failure that does not reproduce there.
+  LINUX_PACKAGES: >-
+    ca-certificates curl git build-essential cmake ninja-build pkg-config dpkg-dev
+    libfftw3-dev libglfw3-dev libgl1-mesa-dev libgtk-3-dev libcurl4-openssl-dev
+    libhackrf-dev libbladerf-dev librtlsdr-dev libusb-1.0-0-dev librsvg2-bin
+
+jobs:
+  # The real gate on a newcomer's first pull request is the repository setting
+  # -- Settings > Actions > General > "Require approval for first-time
+  # contributors" -- which stops the run before a single job is scheduled and
+  # which nothing in a pull request can reach.
+  #
+  # This pair is the same policy written where a reader can see it, and it is
+  # deliberately not load-bearing: on a `pull_request` event the workflow file
+  # that runs is the one in the merge commit, so a fork can edit these two jobs
+  # out of the file it is running. They make the wait visible and give a
+  # maintainer somewhere to approve from; they are not a boundary.
+  gate:
+    name: contributor check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      trusted: ${{ steps.check.outputs.trusted }}
+    steps:
+      - id: check
+        env:
+          # Read through the environment rather than interpolated into the
+          # script: the value is GitHub's own enum and cannot be set by the
+          # author, but a `${{ }}` inside a shell body is a habit worth not
+          # having.
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+        run: |
+          # CONTRIBUTOR is "has had a pull request merged here before", which is
+          # the existing contributor this is meant to let through. The two below
+          # it -- FIRST_TIME_CONTRIBUTOR and FIRST_TIMER -- are the ones worth
+          # a look before they run anything.
+          case "$ASSOCIATION" in
+            OWNER | MEMBER | COLLABORATOR | CONTRIBUTOR) trusted=true ;;
+            *)                                          trusted=false ;;
+          esac
+          echo "$ASSOCIATION -> trusted=$trusted"
+          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
+
+  # Waits here until a maintainer approves, provided a `pr-approval`
+  # environment with required reviewers exists. Without one the environment is
+  # created on first use with no protection rules and this passes straight
+  # through -- so creating it is a setup step, not an optional extra.
+  approve:
+    name: maintainer approval
+    needs: [gate]
+    if: needs.gate.outputs.trusted != 'true'
+    environment: pr-approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: echo "approved"
+
+  # `always()` because `approve` is skipped for a trusted author, and a skipped
+  # dependency would otherwise skip everything behind it.
+  lint:
+    name: lint
+    needs: [gate, approve]
+    if: always() && (needs.gate.outputs.trusted == 'true' || needs.approve.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Pinned, and not to the distribution's own. clang-format's output moves
+      # between major versions: .clang-format is tuned against 22, Ubuntu 24.04
+      # ships 18, and the two disagree about this tree -- so the default would
+      # fail the check on code that is formatted correctly. tools/format.sh
+      # takes the binary from here.
+      CLANG_FORMAT_VERSION: '22'
+      CLANG_FORMAT: clang-format-22
+    steps:
+      - uses: actions/checkout@v7
+
+      # The apt.llvm.org repository added by hand rather than through their
+      # llvm.sh, which installs a whole toolchain -- clang, lld, lldb -- for a
+      # job that needs one formatting binary.
+      - name: clang-format from apt.llvm.org
+        run: |
+          set -euo pipefail
+          codename=$(lsb_release -cs)
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /usr/share/keyrings/apt-llvm.asc > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/apt-llvm.asc] http://apt.llvm.org/$codename/ llvm-toolchain-$codename-$CLANG_FORMAT_VERSION main" |
+            sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "clang-format-$CLANG_FORMAT_VERSION"
+          "$CLANG_FORMAT" --version
+
+      - name: Formatting
+        run: make format-check
+
+      # Not folded into the step above: the two fail for unrelated reasons, and
+      # a contributor should see both at once rather than one per push.
+      - name: Licence headers
+        if: '!cancelled()'
+        run: make check-headers
+
+  build:
+    name: ${{ matrix.name }}
+    needs: [gate, approve]
+    if: always() && (needs.gate.outputs.trusted == 'true' || needs.approve.result == 'success')
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    # windows-x64 carries build.yml's flag with it: nothing has ever compiled
+    # this tree with cl.exe, and until something does, gating every pull request
+    # on it blocks them for a reason no pull request caused.
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Three of build.yml's nine, named the same so a failure here and a
+          # failure there are recognisably the same entry. The other six differ
+          # from one of these only in which distribution's libraries they link
+          # against, which is what packaging establishes and a pull request
+          # does not.
+          - name: ubuntu2404-amd64
+            runner: ubuntu-24.04
+            apt: g++-14
+            cc: gcc-14
+            cxx: g++-14
+          - name: macos-arm
+            runner: macos-latest
+            apt: ''
+            cc: ''
+            cxx: ''
+          - name: windows-x64
+            runner: windows-2025
+            apt: ''
+            cc: ''
+            cxx: ''
+            experimental: true
+
+    env:
+      # Empty is falsy to CMake's compiler detection, so the unpinned entries
+      # get their platform default.
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $LINUX_PACKAGES ${{ matrix.apt }}
+
+      # Both images default to Xcode 16.4, whose libc++ has no <stop_token> and
+      # no std::jthread -- both of which this tree uses. Pinned rather than left
+      # to the image default so the toolchain is the one development happens on
+      # and does not drift when the default moves.
+      - name: Select Xcode
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="/Applications/Xcode_${XCODE_VERSION}.app"
+          if [[ ! -d "$app" ]]; then
+            echo "::error::$app is not on this image; available:"
+            ls -d /Applications/Xcode_*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$app"
+          c++ --version
+        env:
+          XCODE_VERSION: '26.3'
+
+      # CMake and Ninja are preinstalled on both macOS runners, so only the C
+      # libraries are missing.
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install fftw glfw hackrf libbladerf librtlsdr libusb
+
+      # --- Windows: MSVC, and each radio library from whoever ships it newest ---
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Building every FFTW precision with the full codelet set is minutes of
+      # work that never changes between runs.
+      #
+      # The key spells out what is installed rather than hashing this file:
+      # hashing meant every unrelated edit to the workflow threw away a cache
+      # that had nothing to do with the edit. Change the package list below,
+      # change this string.
+      # vcpkg's binary cache, shared with build.yml: same location, same key
+      # prefix, so a pull request restores what the last main build saved.
+      # See build.yml for why it is keyed and saved the way it is.
+      - name: vcpkg binary cache location
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archives="$GITHUB_WORKSPACE/.vcpkg-archives"
+          mkdir -p "$archives"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$(cygpath -m "$archives")" >> "$GITHUB_ENV"
+          # The port tree's commit, which is what every package's ABI hash
+          # depends on; the tool's version string is the fallback for an
+          # image that ships vcpkg without its .git.
+          commit=$(git -C "$VCPKG_INSTALLATION_ROOT" rev-parse --short=12 HEAD 2>/dev/null ||
+                   "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" version | head -1 | tr -cd 'A-Za-z0-9.-')
+          echo "VCPKG_COMMIT=$commit" >> "$GITHUB_ENV"
+
+      - name: Restore vcpkg binaries
+        if: runner.os == 'Windows'
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .vcpkg-archives
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-${{ hashFiles('.github/workflows/pr.yml') }}
+          restore-keys: vcpkg-${{ env.VCPKG_COMMIT }}-
+
+      # fftw3's SIMD codelets are opt-in features in vcpkg, and none of them is
+      # on by default: a bare `fftw3:x64-windows` is scalar and single
+      # threaded, where every distribution's libfftw3-dev ships the full set.
+      # That alone was most of a 4.5x sweep-rate gap against the same machine
+      # running Linux. Each level is named rather than relying on avx2 to imply
+      # the ones below it, because vcpkg maps one feature to one ENABLE_ flag;
+      # FFTW picks between them at runtime by cpuid, so the build still runs on
+      # a machine without AVX2.
+      - name: vcpkg dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install
+          "fftw3[core,avx2,avx,sse2,sse,threads]:x64-windows"
+          glfw3:x64-windows pkgconf:x64-windows curl:x64-windows
+
+      - name: Save vcpkg binaries
+        if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .vcpkg-archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      # libhackrf from conda-forge, which is the same 2026.01.3 Homebrew ships,
+      # rather than from a bundle. Miniconda is already on the image, and conda
+      # is what resolves the split packaging: libhackrf carries the header and
+      # the import library, the DLL lives in libhackrf0, and that pulls in
+      # libusb and libwinpthread in turn.
+      #
+      # librtlsdr goes into the same environment, so that there is one
+      # libusb-1.0.dll: the one both radio libraries load, and the one the
+      # Fobos plugin -- which calls libusb itself -- links against.
+      - name: libhackrf and librtlsdr (conda-forge)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:CONDA\Scripts\conda.exe" create -y -p C:\sweeppp-hackrf `
+            -c conda-forge --override-channels libhackrf=2026.01.3 rtl-sdr=2.0.3
+          Get-ChildItem -Recurse C:\sweeppp-hackrf\Library\bin -Filter *.dll |
+            ForEach-Object { $_.FullName }
+
+      # libbladeRF from Nuand's own installer: 2025.10 is libbladeRF 2.6.0, the
+      # only source that has BLADERF_FORMAT_SC16_Q11_PACKED -- conda-forge is
+      # still on 2.5.0 and Debian and Ubuntu with it. It is an Inno Setup
+      # installer, whose payload 7-Zip sees as one opaque blob, so it is
+      # unpacked with innoextract rather than run: extraction needs no
+      # elevation and installs no USB drivers on a machine that has no radio.
+      - name: libbladeRF (Nuand 2025.10)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip" -OutFile innoextract.zip
+          7z x innoextract.zip -oC:\innoextract | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/Nuand/bladeRF/releases/download/2025.10/bladeRF-win-installer-2025.10.exe" -OutFile bladerf.exe
+          # Everything, with no --include filters. The filters are matched
+          # against the installer's own path separators, and a filter matching
+          # nothing extracts nothing and still exits 0 -- which is how an empty
+          # C:\bladeRF got all the way to a missing-header error in the compile.
+          C:\innoextract\innoextract.exe --extract --output-dir C:\bladeRF bladerf.exe
+          Get-ChildItem -Path C:\bladeRF -Recurse -File |
+            Where-Object { $_.Extension -in '.h', '.lib', '.dll' } |
+            ForEach-Object { $_.FullName }
+
+      # pkg_check_modules takes a .pc file at its word and never opens the
+      # paths in it, so a wrong prefix surfaces as a missing header in the
+      # middle of the build, ten minutes and one misleading error later. These
+      # are the files the hand-written radio .pc files below promise.
+      - name: Verify the radio libraries
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -uo pipefail
+          missing=0
+          for f in /c/bladeRF/app/include/libbladeRF.h \
+                   /c/bladeRF/app/x64/bladeRF.lib \
+                   /c/bladeRF/app/x64/bladeRF.dll \
+                   /c/sweeppp-hackrf/Library/include/libhackrf/hackrf.h \
+                   /c/sweeppp-hackrf/Library/lib/hackrf.lib \
+                   /c/sweeppp-hackrf/Library/bin/hackrf-0.dll \
+                   /c/sweeppp-hackrf/Library/include/rtl-sdr.h \
+                   /c/sweeppp-hackrf/Library/lib/rtlsdr.lib \
+                   /c/sweeppp-hackrf/Library/bin/rtlsdr.dll \
+                   /c/sweeppp-hackrf/Library/include/libusb-1.0/libusb.h \
+                   /c/sweeppp-hackrf/Library/lib/libusb-1.0.lib \
+                   /c/sweeppp-hackrf/Library/bin/libusb-1.0.dll; do
+            if [[ -f "$f" ]]; then
+              echo "ok       $f"
+            else
+              echo "::error::missing $f"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      # cmake/Dependencies.cmake finds fftw3f and every radio library through
+      # pkg_check_modules only. vcpkg ships no fftw3f.pc, Nuand's installer
+      # ships no .pc at all, and the ones inside conda packages name a prefix
+      # on the machine that built them -- the bladeRF one a -lbladeRF-2 that
+      # does not match the .lib beside it, too. Writing them all here keeps
+      # Dependencies.cmake platform-blind.
+      #
+      # Every path is written out in full, with no `prefix=` variable to expand.
+      # pkgconf on Windows defaults to --define-prefix, which *overrides* a .pc
+      # file's own `prefix` with one derived from where the .pc file itself
+      # sits. These live in <workspace>/.ci/pkgconfig, so `${includedir}` came
+      # back as <workspace>/include and the compile failed on a missing
+      # fftw3.h. PKG_CONFIG_DONT_DEFINE_PREFIX turns that behaviour off as
+      # well, belt and braces -- literal paths are what actually make it moot.
+      - name: pkg-config files
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          vcpkg=$(cygpath -m "$VCPKG_INSTALLATION_ROOT")/installed/x64-windows
+          pcdir=$(cygpath -m "$GITHUB_WORKSPACE")/.ci/pkgconfig
+          mkdir -p "$pcdir"
+
+          cat > "$pcdir/fftw3f.pc" <<EOF
+          Name: fftw3f
+          Description: FFTW3 single precision
+          Version: 3.3.10
+          Libs: -L$vcpkg/lib -lfftw3f
+          Cflags: -I$vcpkg/include
+          EOF
+
+          # conda installs the header as include/libhackrf/hackrf.h, and
+          # plugins/sdr-hackrf includes <hackrf.h>. The subdirectory in Cflags
+          # is what bridges the two.
+          cat > "$pcdir/libhackrf.pc" <<EOF
+          Name: libhackrf
+          Description: HackRF
+          Version: 2026.01.3
+          Libs: -LC:/sweeppp-hackrf/Library/lib -lhackrf
+          Cflags: -IC:/sweeppp-hackrf/Library/include/libhackrf
+          EOF
+
+          # The installer keeps headers and the 64-bit libraries in separate
+          # trees, so these two paths do not share a prefix.
+          cat > "$pcdir/libbladeRF.pc" <<EOF
+          Name: libbladeRF
+          Description: Nuand bladeRF
+          Version: 2.6.0
+          Libs: -LC:/bladeRF/app/x64 -lbladeRF
+          Cflags: -IC:/bladeRF/app/include
+          EOF
+
+          cat > "$pcdir/librtlsdr.pc" <<EOF
+          Name: librtlsdr
+          Description: RTL-SDR
+          Version: 2.0.3
+          Libs: -LC:/sweeppp-hackrf/Library/lib -lrtlsdr
+          Cflags: -IC:/sweeppp-hackrf/Library/include
+          EOF
+
+          # -llibusb-1.0, not -lusb-1.0: the import library is libusb-1.0.lib,
+          # and the Fobos sources name it that way in a #pragma as well.
+          cat > "$pcdir/libusb-1.0.pc" <<EOF
+          Name: libusb-1.0
+          Description: libusb
+          Version: 1.0.29
+          Libs: -LC:/sweeppp-hackrf/Library/lib -llibusb-1.0
+          Cflags: -IC:/sweeppp-hackrf/Library/include/libusb-1.0
+          EOF
+
+          for pc in "$pcdir"/*.pc; do echo "== $pc"; cat "$pc"; done
+
+          echo "PKG_CONFIG_PATH=$pcdir" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_DONT_DEFINE_PREFIX=1" >> "$GITHUB_ENV"
+
+      # --- Common from here on ---
+
+      # FetchContent's downloads, cached per platform. Cached in place rather
+      # than through FETCHCONTENT_BASE_DIR: the default is one tree per build
+      # directory, and two builds sharing one deps tree is the known failure.
+      #
+      # A separate key from build.yml's: this is a different preset in a
+      # different directory. A pull request restores main's copy of its own key
+      # and writes only into the merge ref's scope, which nothing but a re-run
+      # of that pull request can read back.
+      - name: Cache fetched dependencies
+        uses: actions/cache@v6
+        with:
+          path: build/dev/_deps
+          key: deps-pr-${{ matrix.name }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      # The dev preset, not release: it is the one a contributor ran locally,
+      # it has the tests and the warnings on without being told, and nothing
+      # here is packaged, so the optimisation level that ships is build.yml's
+      # business.
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--preset dev)
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            vcpkg=$(cygpath -m "$VCPKG_INSTALLATION_ROOT")
+            # The toolchain is for find_package(glfw3); pkgconf is named rather
+            # than searched for, because nothing on PATH is called pkg-config.
+            args+=(-DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake"
+                   -DPKG_CONFIG_EXECUTABLE="$vcpkg/installed/x64-windows/tools/pkgconf/pkgconf.exe")
+          fi
+          cmake "${args[@]}"
+
+      - name: Build
+        shell: bash
+        run: cmake --build --preset dev
+
+      # The radio libraries are the ones vcpkg knows nothing about, so its
+      # applocal deployment -- which put glfw3.dll beside the executables and
+      # fftw3f.dll beside the plugin that needs it -- does not cover them.
+      #
+      # Beside the executables rather than beside the plugins: that is the
+      # first entry in the DLL search order, and it is also the shape the
+      # package below has, so ctest exercises the arrangement that ships.
+      # Without this the SDR plugins load with "The specified module could
+      # not be found" and every test in their suites fails. The Fobos plugin
+      # carries its libraries inside it and needs only libusb from here.
+      - name: Stage the radio libraries beside the binaries
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /c/sweeppp-hackrf/Library/bin/hackrf-0.dll \
+             /c/sweeppp-hackrf/Library/bin/rtlsdr.dll \
+             /c/sweeppp-hackrf/Library/bin/libusb-1.0.dll \
+             /c/sweeppp-hackrf/Library/bin/libwinpthread-1.dll \
+             /c/bladeRF/app/x64/bladeRF.dll \
+             build/dev/dist/
+          ls -1 build/dev/dist/*.dll
+
+      # --test-dir rather than --preset: there is no release test preset, and
+      # the ones that exist add nothing but --output-on-failure. Same reasoning
+      # as the Makefile's `test` target.
+      - name: Test
+        shell: bash
+        run: ctest --test-dir build/dev --output-on-failure
+
+
+  # Clang, not GCC: cmake/Sanitizers.cmake passes -fsanitize-ignorelist=, which
+  # is a Clang-only option -- g++ rejects it outright. g++-14 is installed
+  # alongside so Clang has a libstdc++ with <print> and <expected>.
+  #
+  # Clang 19 is the floor, and the runner image stops at 18.1.3, so it comes
+  # from apt.llvm.org. libstdc++ gates <expected> and <format> on
+  # `__cpp_concepts >= 202002L`; Clang only started reporting that in 19, when
+  # P0848R3 landed. Clang 18 therefore compiles this tree with no std::expected
+  # at all -- which never showed up on macOS, because libc++ gates neither
+  # header on that macro.
+  #
+  # The asan/tsan presets turn the GUI and server off but leave plugins on, so
+  # FFTW and the radio libraries are still needed; GLFW and GTK are not.
+  sanitizers:
+    name: ${{ matrix.preset }}
+    needs: [gate, approve]
+    if: always() && (needs.gate.outputs.trusted == 'true' || needs.approve.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan, tsan]
+    env:
+      CLANG_VERSION: '19'
+      CC: clang-19
+      CXX: clang++-19
+      # tests/CMakeLists.txt attaches these to the ctest cases, but
+      # doctest_discover_tests() runs the binary once at *build* time to
+      # enumerate cases, and that run gets none of them. macOS ASan has no leak
+      # detector, so this has never shown up locally; on Linux it fails the
+      # build step rather than a test. Same values as the ctest properties, so
+      # whichever wins, the tests see the same thing.
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=0
+      TSAN_OPTIONS: halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v7
+
+      # The hosted images run with 32 bits of mmap randomisation, which is more
+      # than the sanitizers' shadow mappings can accommodate -- ASan and TSan
+      # abort with an unexpected-memory-mapping error before reaching main().
+      # Not available inside a container, which is one reason these jobs are
+      # not containerised.
+      - name: Lower ASLR entropy for the sanitizer runtimes
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 cmake ninja-build pkg-config lsb-release wget software-properties-common gnupg \
+            libfftw3-dev libhackrf-dev libbladerf-dev librtlsdr-dev libusb-1.0-0-dev
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh "$CLANG_VERSION"
+          "$CXX" --version
+
+      - name: Cache fetched dependencies
+        uses: actions/cache@v6
+        with:
+          path: build/${{ matrix.preset }}/_deps
+          key: deps-pr-${{ matrix.preset }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      # Warnings are errors here alone: on a sanitizer job a new warning is
+      # signal, whereas on a matrix job it would be a blocked release.
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DSWEEPPP_WERROR=ON
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+  # libsweepsfile is MIT, dependency-free and meant to be usable by projects
+  # that have never heard of Sweep++, so it is checked the way such a consumer
+  # would build it: standalone, with none of the parent's include paths,
+  # doctest or CMAKE_CXX_STANDARD. `check` is test + cxx23 + python, covering
+  # C++17, C++23, the shared build, the ctypes binding and the install
+  # round-trips.
+  sweepsfile:
+    name: libsweepsfile standalone
+    needs: [gate, approve]
+    if: always() && (needs.gate.outputs.trusted == 'true' || needs.approve.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 cmake ninja-build python3
+
+      - name: Check
+        run: make -C lib/libsweepsfile check

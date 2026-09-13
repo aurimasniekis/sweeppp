@@ -1,0 +1,56 @@
+# Sweep++ theme -- Sweep Light
+#
+# For bright rooms and for screenshots that will be printed. Trace colours are
+# darker than the dark theme's: the same hues on white wash out.
+
+[theme]
+name = "Sweep Light"
+base = "light"
+
+[theme.chrome]
+window_background = "#F5F6F8"
+panel_background  = "#FFFFFF"
+header_background = "#ECEFF3"
+text              = "#111418"
+text_dim          = "#5B6472"
+accent            = "#2563EB"
+accent_hover      = "#3B82F6"
+border            = "#D3D8E0"
+separator         = "#E2E6EC"
+button            = "#E8ECF1"
+button_hover      = "#DDE3EA"
+button_active     = "#CFD7E1"
+start             = "#16A34A"
+stop              = "#DC2626"
+record            = "#DC2626"
+ok                = "#16A34A"
+warning           = "#D97706"
+danger            = "#DC2626"
+rounding          = 4.0
+border_size       = 1.0
+
+[theme.spectrum]
+background = "#FFFFFF"
+grid       = "#DFE4EA"
+axis_text  = "#5B6472"
+
+trace_live = "#15803D"
+trace_max  = "#B91C1C"
+trace_min  = "#1D4ED8"
+trace_avg  = "#B45309"
+
+cursor      = "#0B1220"
+marker      = "#4B5563"
+marker_text = "#111418"
+selection   = "#2563EB"
+
+contribution_alpha = 0.14
+trace_thickness = 1.4
+
+# A perceptually uniform map on a light background: equal steps in level look
+# like equal steps in brightness, so the palette does not invent structure.
+fill_colormap = "meadow"
+fill_alpha    = 0.35
+
+[theme.waterfall]
+colormap = "meadow"

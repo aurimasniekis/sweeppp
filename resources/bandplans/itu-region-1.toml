@@ -1,0 +1,254 @@
+# Sweep++ band plan -- ITU Region 1 (Europe, Africa, Middle East, northern Asia)
+#
+# Allocations are indicative and simplified for display. National regulations
+# differ; this is a navigation aid, not a legal reference.
+#
+# A user file of the same name in the config directory replaces this one.
+#
+# Each [[band]] takes name, start, stop, group, and optionally:
+#
+#   description  a sentence, shown when the marker's chip is hovered
+#   type         "band" (the default), "channel" or "spot"
+#
+# The type is what tells a wide allocation apart from a specific channel inside
+# it, and the host draws the three differently. A "spot" is one frequency -- a
+# beacon, a repeater output -- and gives no stop.
+
+[bandplan]
+name = "ITU Region 1"
+description = "Common allocations across Europe, Africa and the Middle East"
+region = "ITU-1"
+
+# Colours group bands by service, so a glance at the spectrum tells you what
+# kind of thing you are looking at rather than only its name.
+[bandplan.colors]
+"Broadcasting"    = "#8B5CF6"
+"Amateur"         = "#22C55E"
+"Mobile"          = "#3B82F6"
+"ISM"             = "#F59E0B"
+"Aeronautical"    = "#EF4444"
+"Maritime"        = "#06B6D4"
+"Satellite"       = "#EC4899"
+"Radionavigation" = "#84CC16"
+"Public safety"   = "#F97316"
+
+[[band]]
+name = "Longwave broadcast"
+start = "148.5 kHz"
+stop = "283.5 kHz"
+group = "Broadcasting"
+
+[[band]]
+name = "Mediumwave broadcast"
+start = "526.5 kHz"
+stop = "1606.5 kHz"
+group = "Broadcasting"
+
+[[band]]
+name = "160 m amateur"
+start = "1.81 MHz"
+stop = "2.0 MHz"
+group = "Amateur"
+
+[[band]]
+name = "80 m amateur"
+start = "3.5 MHz"
+stop = "3.8 MHz"
+group = "Amateur"
+
+[[band]]
+name = "49 m broadcast"
+start = "5.9 MHz"
+stop = "6.2 MHz"
+group = "Broadcasting"
+
+[[band]]
+name = "40 m amateur"
+start = "7.0 MHz"
+stop = "7.2 MHz"
+group = "Amateur"
+
+[[band]]
+name = "31 m broadcast"
+start = "9.4 MHz"
+stop = "9.9 MHz"
+group = "Broadcasting"
+
+[[band]]
+name = "25 m broadcast"
+start = "11.6 MHz"
+stop = "12.1 MHz"
+group = "Broadcasting"
+
+[[band]]
+name = "20 m amateur"
+start = "14.0 MHz"
+stop = "14.35 MHz"
+group = "Amateur"
+
+[[band]]
+name = "CB"
+start = "26.965 MHz"
+stop = "27.405 MHz"
+group = "Public safety"
+
+[[band]]
+name = "10 m amateur"
+start = "28.0 MHz"
+stop = "29.7 MHz"
+group = "Amateur"
+
+[[band]]
+name = "6 m amateur"
+start = "50 MHz"
+stop = "52 MHz"
+group = "Amateur"
+
+[[band]]
+name = "FM broadcast"
+start = "87.5 MHz"
+stop = "108 MHz"
+group = "Broadcasting"
+description = "VHF Band II. The easiest signal to find when checking a receiver works."
+
+[[band]]
+name = "Air band"
+start = "108 MHz"
+stop = "137 MHz"
+group = "Aeronautical"
+description = "AM voice and navigation aids."
+
+[[band]]
+name = "2 m amateur"
+start = "144 MHz"
+stop = "146 MHz"
+group = "Amateur"
+
+[[band]]
+name = "Marine VHF"
+start = "156 MHz"
+stop = "162.05 MHz"
+group = "Maritime"
+
+[[band]]
+name = "DAB Band III"
+start = "174 MHz"
+stop = "240 MHz"
+group = "Broadcasting"
+
+[[band]]
+name = "70 cm amateur"
+start = "430 MHz"
+stop = "440 MHz"
+group = "Amateur"
+
+[[band]]
+name = "PMR446"
+start = "446.0 MHz"
+stop = "446.2 MHz"
+group = "Public safety"
+
+[[band]]
+name = "DVB-T UHF"
+start = "470 MHz"
+stop = "694 MHz"
+group = "Broadcasting"
+
+[[band]]
+name = "700 MHz mobile"
+start = "694 MHz"
+stop = "790 MHz"
+group = "Mobile"
+
+[[band]]
+name = "800 MHz mobile"
+start = "791 MHz"
+stop = "862 MHz"
+group = "Mobile"
+
+[[band]]
+name = "868 MHz SRD"
+start = "863 MHz"
+stop = "870 MHz"
+group = "ISM"
+description = "Short-range devices: sensors, meters, LoRa, remote controls."
+
+[[band]]
+name = "GSM 900"
+start = "880 MHz"
+stop = "960 MHz"
+group = "Mobile"
+
+[[band]]
+name = "GNSS L1"
+start = "1559 MHz"
+stop = "1610 MHz"
+group = "Radionavigation"
+description = "GPS L1, Galileo E1, GLONASS L1. Protected; anything visible here is worth investigating."
+
+[[band]]
+name = "Iridium / Inmarsat"
+start = "1610 MHz"
+stop = "1660.5 MHz"
+group = "Satellite"
+
+[[band]]
+name = "GSM 1800"
+start = "1710 MHz"
+stop = "1880 MHz"
+group = "Mobile"
+
+[[band]]
+name = "DECT"
+start = "1880 MHz"
+stop = "1900 MHz"
+group = "Public safety"
+
+[[band]]
+name = "UMTS 2100"
+start = "1920 MHz"
+stop = "2170 MHz"
+group = "Mobile"
+
+[[band]]
+name = "2.4 GHz ISM"
+start = "2400 MHz"
+stop = "2483.5 MHz"
+group = "ISM"
+description = "Wi-Fi, Bluetooth, microwave ovens, video senders. The busiest band you will see."
+
+[[band]]
+name = "2.6 GHz mobile"
+start = "2500 MHz"
+stop = "2690 MHz"
+group = "Mobile"
+
+[[band]]
+name = "3.5 GHz 5G"
+start = "3400 MHz"
+stop = "3800 MHz"
+group = "Mobile"
+
+[[band]]
+name = "5 GHz U-NII-1"
+start = "5150 MHz"
+stop = "5250 MHz"
+group = "ISM"
+
+[[band]]
+name = "5 GHz U-NII-2"
+start = "5250 MHz"
+stop = "5350 MHz"
+group = "ISM"
+
+[[band]]
+name = "5 GHz U-NII-2e"
+start = "5470 MHz"
+stop = "5725 MHz"
+group = "ISM"
+
+[[band]]
+name = "5.8 GHz ISM"
+start = "5725 MHz"
+stop = "5875 MHz"
+group = "ISM"

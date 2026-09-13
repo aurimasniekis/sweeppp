@@ -1,0 +1,924 @@
+# Sweep++ channels -- LoRa, the ISM bands and RC links
+#
+# LoRaWAN channels are the default channel plans from the regional parameters;
+# a network may add channels of its own, and which regional plan applies is a
+# national question. The SRD and ISM entries are the shared allocations those
+# channels sit inside, so a signal can be placed even when it belongs to none
+# of the named plans.
+#
+# The RC-link entries are hopping systems: they occupy their whole range a few
+# hundred microseconds at a time rather than sitting on one channel, which is
+# why they are written as bands.
+#
+# A user file of the same [channels].id in the config directory replaces this
+# one outright.
+
+[channels]
+id = "lora-ism-rc"
+name = "LoRa and ISM"
+description = "LoRaWAN channel plans, the SRD and ISM bands, and RC links"
+
+[channels.colors]
+lora = "#22C55E"
+ism = "#84CC16"
+rc = "#EAB308"
+
+[[group]]
+id = "lorawan"
+name = "LoRaWAN"
+color = "lora"
+width = "125 kHz"
+
+[[group]]
+id = "lorawan/eu868"
+name = "EU868"
+
+  [[group.channel]]
+  name = "EU868 867.1"
+  center = "867.1 MHz"
+
+  [[group.channel]]
+  name = "EU868 867.3"
+  center = "867.3 MHz"
+
+  [[group.channel]]
+  name = "EU868 867.5"
+  center = "867.5 MHz"
+
+  [[group.channel]]
+  name = "EU868 867.7"
+  center = "867.7 MHz"
+
+  [[group.channel]]
+  name = "EU868 867.9"
+  center = "867.9 MHz"
+
+  [[group.channel]]
+  name = "EU868 868.1"
+  center = "868.1 MHz"
+
+  [[group.channel]]
+  name = "EU868 868.3"
+  center = "868.3 MHz"
+
+  [[group.channel]]
+  name = "EU868 868.5"
+  center = "868.5 MHz"
+
+  [[group.channel]]
+  name = "EU868 RX2 869.525"
+  center = "869.525 MHz"
+
+[[group]]
+id = "lorawan/eu433"
+name = "EU433"
+
+  [[group.channel]]
+  name = "EU433 433.175"
+  center = "433.175 MHz"
+
+  [[group.channel]]
+  name = "EU433 433.375"
+  center = "433.375 MHz"
+
+  [[group.channel]]
+  name = "EU433 433.575"
+  center = "433.575 MHz"
+
+[[group]]
+id = "lorawan/in865"
+name = "IN865"
+
+  [[group.channel]]
+  name = "IN865 865.062"
+  center = "865.062 MHz"
+
+  [[group.channel]]
+  name = "IN865 865.403"
+  center = "865.403 MHz"
+
+  [[group.channel]]
+  name = "IN865 865.985"
+  center = "865.985 MHz"
+
+[[group]]
+id = "lorawan/as923"
+name = "AS923"
+
+  [[group.channel]]
+  name = "AS923 923.2"
+  center = "923.2 MHz"
+
+  [[group.channel]]
+  name = "AS923 923.4"
+  center = "923.4 MHz"
+
+[[group]]
+id = "lorawan/us915"
+name = "US915"
+
+[[group]]
+id = "lorawan/us915/up125"
+name = "Uplink 125 kHz"
+
+  [[group.channel]]
+  name = "US915 up ch 0"
+  center = "902.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 1"
+  center = "902.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 2"
+  center = "902.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 3"
+  center = "902.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 4"
+  center = "903.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 5"
+  center = "903.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 6"
+  center = "903.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 7"
+  center = "903.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 8"
+  center = "903.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 9"
+  center = "904.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 10"
+  center = "904.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 11"
+  center = "904.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 12"
+  center = "904.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 13"
+  center = "904.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 14"
+  center = "905.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 15"
+  center = "905.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 16"
+  center = "905.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 17"
+  center = "905.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 18"
+  center = "905.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 19"
+  center = "906.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 20"
+  center = "906.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 21"
+  center = "906.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 22"
+  center = "906.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 23"
+  center = "906.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 24"
+  center = "907.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 25"
+  center = "907.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 26"
+  center = "907.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 27"
+  center = "907.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 28"
+  center = "907.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 29"
+  center = "908.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 30"
+  center = "908.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 31"
+  center = "908.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 32"
+  center = "908.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 33"
+  center = "908.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 34"
+  center = "909.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 35"
+  center = "909.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 36"
+  center = "909.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 37"
+  center = "909.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 38"
+  center = "909.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 39"
+  center = "910.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 40"
+  center = "910.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 41"
+  center = "910.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 42"
+  center = "910.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 43"
+  center = "910.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 44"
+  center = "911.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 45"
+  center = "911.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 46"
+  center = "911.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 47"
+  center = "911.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 48"
+  center = "911.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 49"
+  center = "912.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 50"
+  center = "912.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 51"
+  center = "912.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 52"
+  center = "912.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 53"
+  center = "912.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 54"
+  center = "913.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 55"
+  center = "913.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 56"
+  center = "913.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 57"
+  center = "913.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 58"
+  center = "913.9 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 59"
+  center = "914.1 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 60"
+  center = "914.3 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 61"
+  center = "914.5 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 62"
+  center = "914.7 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 63"
+  center = "914.9 MHz"
+
+[[group]]
+id = "lorawan/us915/up500"
+name = "Uplink 500 kHz"
+width = "500 kHz"
+
+  [[group.channel]]
+  name = "US915 up ch 64"
+  center = "903 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 65"
+  center = "904.6 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 66"
+  center = "906.2 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 67"
+  center = "907.8 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 68"
+  center = "909.4 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 69"
+  center = "911 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 70"
+  center = "912.6 MHz"
+
+  [[group.channel]]
+  name = "US915 up ch 71"
+  center = "914.2 MHz"
+
+[[group]]
+id = "lorawan/us915/down"
+name = "Downlink 500 kHz"
+width = "500 kHz"
+
+  [[group.channel]]
+  name = "US915 dn ch 0"
+  center = "923.3 MHz"
+
+  [[group.channel]]
+  name = "US915 dn ch 1"
+  center = "923.9 MHz"
+
+  [[group.channel]]
+  name = "US915 dn ch 2"
+  center = "924.5 MHz"
+
+  [[group.channel]]
+  name = "US915 dn ch 3"
+  center = "925.1 MHz"
+
+  [[group.channel]]
+  name = "US915 dn ch 4"
+  center = "925.7 MHz"
+
+  [[group.channel]]
+  name = "US915 dn ch 5"
+  center = "926.3 MHz"
+
+  [[group.channel]]
+  name = "US915 dn ch 6"
+  center = "926.9 MHz"
+
+  [[group.channel]]
+  name = "US915 dn ch 7"
+  center = "927.5 MHz"
+
+[[group]]
+id = "lorawan/au915"
+name = "AU915"
+
+[[group]]
+id = "lorawan/au915/up125"
+name = "Uplink 125 kHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 0"
+  center = "915.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 1"
+  center = "915.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 2"
+  center = "915.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 3"
+  center = "915.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 4"
+  center = "916 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 5"
+  center = "916.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 6"
+  center = "916.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 7"
+  center = "916.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 8"
+  center = "916.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 9"
+  center = "917 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 10"
+  center = "917.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 11"
+  center = "917.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 12"
+  center = "917.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 13"
+  center = "917.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 14"
+  center = "918 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 15"
+  center = "918.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 16"
+  center = "918.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 17"
+  center = "918.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 18"
+  center = "918.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 19"
+  center = "919 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 20"
+  center = "919.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 21"
+  center = "919.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 22"
+  center = "919.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 23"
+  center = "919.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 24"
+  center = "920 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 25"
+  center = "920.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 26"
+  center = "920.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 27"
+  center = "920.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 28"
+  center = "920.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 29"
+  center = "921 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 30"
+  center = "921.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 31"
+  center = "921.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 32"
+  center = "921.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 33"
+  center = "921.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 34"
+  center = "922 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 35"
+  center = "922.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 36"
+  center = "922.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 37"
+  center = "922.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 38"
+  center = "922.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 39"
+  center = "923 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 40"
+  center = "923.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 41"
+  center = "923.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 42"
+  center = "923.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 43"
+  center = "923.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 44"
+  center = "924 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 45"
+  center = "924.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 46"
+  center = "924.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 47"
+  center = "924.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 48"
+  center = "924.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 49"
+  center = "925 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 50"
+  center = "925.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 51"
+  center = "925.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 52"
+  center = "925.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 53"
+  center = "925.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 54"
+  center = "926 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 55"
+  center = "926.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 56"
+  center = "926.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 57"
+  center = "926.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 58"
+  center = "926.8 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 59"
+  center = "927 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 60"
+  center = "927.2 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 61"
+  center = "927.4 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 62"
+  center = "927.6 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 63"
+  center = "927.8 MHz"
+
+[[group]]
+id = "lorawan/au915/up500"
+name = "Uplink 500 kHz"
+width = "500 kHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 64"
+  center = "915.9 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 65"
+  center = "917.5 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 66"
+  center = "919.1 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 67"
+  center = "920.7 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 68"
+  center = "922.3 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 69"
+  center = "923.9 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 70"
+  center = "925.5 MHz"
+
+  [[group.channel]]
+  name = "AU915 up ch 71"
+  center = "927.1 MHz"
+
+[[group]]
+id = "lorawan/au915/down"
+name = "Downlink 500 kHz"
+width = "500 kHz"
+
+  [[group.channel]]
+  name = "AU915 dn ch 0"
+  center = "923.3 MHz"
+
+  [[group.channel]]
+  name = "AU915 dn ch 1"
+  center = "923.9 MHz"
+
+  [[group.channel]]
+  name = "AU915 dn ch 2"
+  center = "924.5 MHz"
+
+  [[group.channel]]
+  name = "AU915 dn ch 3"
+  center = "925.1 MHz"
+
+  [[group.channel]]
+  name = "AU915 dn ch 4"
+  center = "925.7 MHz"
+
+  [[group.channel]]
+  name = "AU915 dn ch 5"
+  center = "926.3 MHz"
+
+  [[group.channel]]
+  name = "AU915 dn ch 6"
+  center = "926.9 MHz"
+
+  [[group.channel]]
+  name = "AU915 dn ch 7"
+  center = "927.5 MHz"
+
+[[group]]
+id = "srd"
+name = "SRD and ISM"
+color = "ism"
+
+  [[group.channel]]
+  name = "433 MHz ISM"
+  start = "433.05 MHz"
+  stop = "434.79 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "868 MHz SRD"
+  start = "863 MHz"
+  stop = "870 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "915 MHz ISM"
+  start = "902 MHz"
+  stop = "928 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "2.4 GHz ISM"
+  start = "2400 MHz"
+  stop = "2483.5 MHz"
+  type = "band"
+
+[[group]]
+id = "pmr446"
+name = "PMR446"
+color = "ism"
+width = "12.5 kHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 1"
+  center = "446.006 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 2"
+  center = "446.019 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 3"
+  center = "446.031 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 4"
+  center = "446.044 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 5"
+  center = "446.056 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 6"
+  center = "446.069 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 7"
+  center = "446.081 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 8"
+  center = "446.094 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 9"
+  center = "446.106 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 10"
+  center = "446.119 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 11"
+  center = "446.131 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 12"
+  center = "446.144 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 13"
+  center = "446.156 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 14"
+  center = "446.169 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 15"
+  center = "446.181 MHz"
+
+  [[group.channel]]
+  name = "PMR446 ch 16"
+  center = "446.194 MHz"
+
+[[group]]
+id = "rc"
+name = "RC links"
+color = "rc"
+
+  [[group.channel]]
+  name = "ExpressLRS 868 (EU)"
+  start = "863 MHz"
+  stop = "870 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "ExpressLRS 915 (FCC)"
+  start = "902 MHz"
+  stop = "928 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "ExpressLRS 2.4"
+  start = "2400 MHz"
+  stop = "2480 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "Crossfire 868 (EU)"
+  start = "863 MHz"
+  stop = "870 MHz"
+  type = "band"
+
+  [[group.channel]]
+  name = "Crossfire 915 (FCC)"
+  start = "902 MHz"
+  stop = "928 MHz"
+  type = "band"
