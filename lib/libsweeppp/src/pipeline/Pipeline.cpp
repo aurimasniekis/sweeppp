@@ -35,6 +35,7 @@ std::string_view toString(ThrottleMode mode) noexcept {
 
 Pipeline::Pipeline(FrameBus& frameBus, Telemetry& telemetry, EventBus& eventBus)
     : m_frameBus(frameBus), m_telemetry(telemetry), m_eventBus(eventBus) {
+    m_correctionBits.store(CorrectionSettings{}.toBits(), std::memory_order_relaxed);
 }
 
 Pipeline::~Pipeline() {
@@ -438,7 +439,14 @@ void Pipeline::processBlock(IqBlock& block, std::uint32_t workerIndex) {
     const auto hop = static_cast<std::size_t>(std::max(
         1.0, static_cast<double>(fftSize) * (1.0 - std::clamp(m_config.overlap, 0.0, 0.95))));
 
-    const float clipped = dsp::clippedFraction(block.data(), block.format, block.frames);
+    // One pass over the block for both the clipping check and the DC offset.
+    // The mean is taken over the whole block rather than per transform: a
+    // block is a few milliseconds and the leak is steady over that, while a
+    // per-transform mean would chase whatever signal happened to be in each
+    // window.
+    const dsp::BlockStats stats = dsp::blockStats(block.data(), block.format, block.frames);
+    const bool removeDc =
+        CorrectionSettings::fromBits(m_correctionBits.load(std::memory_order_relaxed)).dcRemoval;
 
     std::uint32_t transforms = 0;
     for (std::size_t offset = 0; offset + fftSize <= block.frames; offset += hop) {
@@ -446,8 +454,13 @@ void Pipeline::processBlock(IqBlock& block, std::uint32_t workerIndex) {
 
         // Convert and window in one pass -- see dsp/Convert.hpp for why these
         // are fused rather than sequential.
-        dsp::convertAndWindow(input, block.format, m_window.coefficients(), worker.input.data(),
-                              fftSize);
+        if (removeDc) {
+            dsp::convertAndWindow(input, block.format, m_window.coefficients(), worker.input.data(),
+                                  fftSize, stats.mean);
+        } else {
+            dsp::convertAndWindow(input, block.format, m_window.coefficients(), worker.input.data(),
+                                  fftSize);
+        }
 
         m_plan->execute(worker.input.data(), worker.output.data());
 
@@ -465,7 +478,7 @@ void Pipeline::processBlock(IqBlock& block, std::uint32_t workerIndex) {
         ++transforms;
 
         if (worker.accumulated >= m_config.averageCount) {
-            publishFrame(block, worker.accumulator, worker.accumulated, clipped);
+            publishFrame(block, worker.accumulator, worker.accumulated, stats.clippedFraction);
             worker.accumulated = 0;
         }
     }
@@ -548,8 +561,40 @@ void Pipeline::publishFrame(const IqBlock& block, const std::vector<float>& bins
     frame->binWidthHz = sampleRate / static_cast<double>(bins.size());
     frame->startHz = centerHz - sampleRate * 0.5;
 
+    // On the frame's own copy of the bins, once the tuning it was taken at is
+    // known: the mask for an absolute spur depends on the centre, and the
+    // worker's accumulator is about to be reused.
+    const CorrectionSettings corrections =
+        CorrectionSettings::fromBits(m_correctionBits.load(std::memory_order_relaxed));
+    if ((corrections.flatten || corrections.spurMask) && m_corrections) {
+        applyCorrections(frame->binsDbfs, centerHz, sampleRate, *m_corrections, corrections,
+                         m_correctionScratch);
+    }
+
     m_telemetry.process().framesPublished.fetch_add(1, std::memory_order_relaxed);
     m_frameBus.publish(frame);
+}
+
+void Pipeline::setCorrectionSettings(CorrectionSettings settings) noexcept {
+    m_correctionBits.store(settings.toBits(), std::memory_order_relaxed);
+}
+
+CorrectionSettings Pipeline::correctionSettings() const noexcept {
+    return CorrectionSettings::fromBits(m_correctionBits.load(std::memory_order_relaxed));
+}
+
+void Pipeline::setCorrections(std::shared_ptr<const CorrectionSet> set) {
+    // Under the publish lock rather than the config lock: the set is only
+    // ever read inside publishFrame, and the scratch built from the old set
+    // has to go with it.
+    const std::lock_guard lock(m_publishMutex);
+    m_corrections = std::move(set);
+    m_correctionScratch.reset();
+}
+
+std::shared_ptr<const CorrectionSet> Pipeline::corrections() const {
+    const std::lock_guard lock(m_publishMutex);
+    return m_corrections;
 }
 
 void Pipeline::setTuning(double centerHz, double spanHz, double sampleRate) noexcept {

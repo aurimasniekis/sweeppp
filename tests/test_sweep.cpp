@@ -4,6 +4,7 @@
 #include "ReferenceFft.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <doctest/doctest.h>
 #include <filesystem>
@@ -518,6 +519,73 @@ TEST_CASE("sweep engine emits partial frames as steps land") {
 
     CHECK(engine.passCount() >= 1);
     CHECK(telemetry.process().retunes.load() > 0);
+}
+
+TEST_CASE("the step observer sees exactly the frames that were stitched") {
+    // The learner reads the sweep through this hook, and what it must not see
+    // is a frame the engine threw away: one taken while the synthesiser was
+    // still moving would put a smear of the previous step into the floor.
+    registerReferenceFftBackend();
+    registerBuiltinSdrDevices();
+
+    auto device = SdrDeviceManager::instance().open("synthetic", "");
+    REQUIRE(device.has_value());
+    REQUIRE((*device)->setParameter("sample_rate", SdrValue{8e6}).has_value());
+
+    SweepPlan plan;
+    plan.segments = {SweepSegment{.startHz = 100e6, .stopHz = 140e6}};
+    plan.sampleRate = 8e6;
+    plan.rbwHz = 100e3;
+    plan.applyMode(SweepMode::Fast);
+
+    FrameBus pipelineBus;
+    FrameBus sweptBus;
+    Telemetry telemetry;
+    EventBus events;
+
+    SweepEngine engine(sweptBus, telemetry, events);
+    REQUIRE(engine.configure(plan, backend(), **device).has_value());
+    pipelineBus.subscribe(&engine);
+
+    std::atomic<std::uint64_t> observed{0};
+    std::atomic<bool> misattributed{false};
+    engine.setStepObserver([&](const SpectrumFrame& frame, const SweepStep& step) {
+        observed.fetch_add(1, std::memory_order_relaxed);
+        // Every frame arrives with the step it was matched to, and the match
+        // is by the frame's own centre.
+        if (std::abs(frame.config.centerHz - step.centerHz) > plan.sampleRate * 0.25) {
+            misattributed.store(true, std::memory_order_relaxed);
+        }
+    });
+
+    Pipeline pipeline(pipelineBus, telemetry, events);
+    REQUIRE(pipeline
+                .configure(backend(), PipelineConfig{.fftSize = engine.schedule().fftSize,
+                                                     .window = plan.window,
+                                                     .workerCount = 2,
+                                                     .targetFrameRate = 0.0})
+                .has_value());
+    pipeline.setTuning(100e6, 8e6, 8e6);
+
+    REQUIRE(pipeline
+                .start(**device, StreamConfig{.framesPerBlock = 32'768,
+                                              .blockCount = 32,
+                                              .format = (*device)->nativeFormat()})
+                .has_value());
+    REQUIRE(engine.start(**device, pipeline).has_value());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+    engine.stop();
+    pipeline.stop();
+
+    const SweepEngine::FrameAccounting frames = engine.frameAccounting();
+    CHECK(frames.stitched > 0);
+    CHECK(observed.load() == frames.stitched);
+    CHECK_FALSE(misattributed.load());
+
+    // Removable, so a finished learn leaves nothing on the bus thread.
+    engine.setStepObserver({});
 }
 
 TEST_CASE("a frame is stitched by its own centre, not by the current step" *

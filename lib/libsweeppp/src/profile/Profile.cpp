@@ -85,6 +85,10 @@ std::optional<SdrValue> readValue(const ::toml::node& node) {
     analysis.insert_or_assign("every_nth", static_cast<std::int64_t>(self.pipeline.everyNth));
     analysis.insert_or_assign("average", static_cast<std::int64_t>(self.pipeline.averageCount));
     analysis.insert_or_assign("frame_rate", self.pipeline.targetFrameRate);
+    analysis.insert_or_assign("dc_removal", self.corrections.dcRemoval);
+    analysis.insert_or_assign("flatten", self.corrections.flatten);
+    analysis.insert_or_assign("spur_mask", self.corrections.spurMask);
+    analysis.insert_or_assign("auto_spurs", self.corrections.autoSpurs);
 
     ::toml::table& display = toml_util::ensureTable(root, "display");
     display.insert_or_assign("theme", self.view.themeName);
@@ -245,6 +249,16 @@ Result<Profile> Profile::load(const std::filesystem::path& path) {
         toml_util::getInt(*table, "analysis.average", defaults.averageCount));
     profile.pipeline.targetFrameRate =
         toml_util::getDouble(*table, "analysis.frame_rate", defaults.targetFrameRate);
+
+    const CorrectionSettings correctionDefaults;
+    profile.corrections.dcRemoval =
+        toml_util::getBool(*table, "analysis.dc_removal", correctionDefaults.dcRemoval);
+    profile.corrections.flatten =
+        toml_util::getBool(*table, "analysis.flatten", correctionDefaults.flatten);
+    profile.corrections.spurMask =
+        toml_util::getBool(*table, "analysis.spur_mask", correctionDefaults.spurMask);
+    profile.corrections.autoSpurs =
+        toml_util::getBool(*table, "analysis.auto_spurs", correctionDefaults.autoSpurs);
 
     const ui::ViewSettings viewDefaults;
     profile.view.themeName = toml_util::getString(*table, "display.theme", viewDefaults.themeName);

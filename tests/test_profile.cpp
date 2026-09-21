@@ -62,6 +62,8 @@ TEST_CASE("a profile round-trips every part of a configuration") {
     saved.pipeline.overlap = 0.5;
     saved.pipeline.averageCount = 4;
 
+    saved.corrections = {.dcRemoval = false, .flatten = true, .spurMask = false, .autoSpurs = true};
+
     saved.view.themeName = "High Contrast";
     saved.view.yMinDb = -120.0F;
     saved.view.yMaxDb = -20.0F;
@@ -122,6 +124,13 @@ TEST_CASE("a profile round-trips every part of a configuration") {
     CHECK(loaded->pipeline.fftSize == 8192);
     CHECK(loaded->pipeline.overlap == doctest::Approx(0.5));
     CHECK(loaded->pipeline.averageCount == 4);
+
+    // Each switch is checked against a value that differs from its default,
+    // so a load that silently fell back to the defaults would fail here.
+    CHECK_FALSE(loaded->corrections.dcRemoval);
+    CHECK(loaded->corrections.flatten);
+    CHECK_FALSE(loaded->corrections.spurMask);
+    CHECK(loaded->corrections.autoSpurs);
 
     CHECK(loaded->view.themeName == "High Contrast");
     CHECK(loaded->view.yMinDb == doctest::Approx(-120.0F));

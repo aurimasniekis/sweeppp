@@ -37,6 +37,7 @@ sweeppp-cli <command> [options]
 | Command               | Does                                                                     |
 |-----------------------|--------------------------------------------------------------------------|
 | [`sweep`](#sweep)     | Sweep or tune, and write the spectrum as CSV.                            |
+| [`calibrate`](#calibrate) | Learn the receiver's floor and spurs, with the antenna off.          |
 | [`record`](#record)   | Record to a `.sweeps` file.                                              |
 | [`replay`](#replay)   | Play a `.sweeps` file back as CSV.                                       |
 | [`info`](#info)       | Describe this build (FFT engines, radios, plugins), or a `.sweeps` file. |
@@ -91,6 +92,10 @@ Options can be written as `--option value` or `--option=value`. A word with no
 | `--overlap <fraction>` |                 | Overlap between FFTs, 0 to 0.95.                                             |
 | `--average <n>`        | `1`             | FFTs averaged per output frame.                                              |
 | `--workers <n>`        | `0`             | Analysis threads; 0 means all cores but two.                                 |
+| `--no-dc-removal`      |                 | Keep the LO spike. DC removal is on by default.                              |
+| `--flatten`            |                 | Subtract the learned floor shape. Needs a calibration.                       |
+| `--spur-mask`          |                 | Interpolate across the learned spurs. Needs a calibration.                   |
+| `--calibration <file>` | the radio's own | Calibration file to read, or for `calibrate` to write.                       |
 
 **Throughput**
 
@@ -181,11 +186,33 @@ bin.
 `--stats` prints, when the run ends, the sample rate held, samples dropped and
 where, and for a sweep, how much of the range was measured.
 
+`--flatten` and `--spur-mask` apply the calibration `calibrate` wrote. The
+floor is skipped, with a warning, when a gain, bandwidth or sample rate differs
+from when it was learned; the spur mask still applies.
+
 From a source checkout, `make sweep ARGS="…"` builds and runs a 5-second
 synthetic sweep with `--stats`:
 
 ```sh
 make sweep ARGS="--start 88M --stop 108M --rbw 10k"
+```
+
+### `calibrate`
+
+Learns what the receiver shows with no antenna connected, and writes it to the
+radio's calibration file under the config folder (or `--calibration <file>`).
+
+- **With `--start` and `--stop`** it sweeps: one pass for the floor and the
+  LO-offset spurs, then eight more through them for spurs at fixed frequencies.
+- **Without them** it stays on `--center` for 200 frames.
+
+Takes the same source and analysis options as `sweep`. Use the sample rate,
+gain and bandwidth you will sweep with: the floor is only applied while they
+match.
+
+```sh
+sweeppp-cli calibrate --device bladerf --start 2300M --stop 3400M --sample-rate 61.44M
+sweeppp-cli sweep --device bladerf --start 2300M --stop 3400M --flatten --spur-mask -o out.csv
 ```
 
 ### `record`
@@ -302,4 +329,5 @@ A placeholder for a future web interface. It prints its version and exits.
 
 `sweeppp-cli` uses the same [config folder](user-guide.md#where-settings-are-stored)
 as the GUI: plugins and plugin settings, antennas and antenna assignments (for
-`--route-antennas`), and the log file `sweeppp.log`.
+`--route-antennas`), calibrations under `calibration/`, and the log file
+`sweeppp.log`.

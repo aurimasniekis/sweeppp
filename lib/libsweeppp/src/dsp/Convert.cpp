@@ -373,17 +373,36 @@ void convertFromComplexFloat(const float* input, SampleFormat format, std::byte*
     });
 }
 
-void convertAndWindow(const std::byte* input, SampleFormat format, std::span<const float> window,
-                      std::complex<float>* output, std::size_t frames) noexcept {
+namespace {
+
+/// One body for both public forms. The DC branch is a compile-time choice so
+/// each instantiation stays a flat loop: with it, one subtract folds into the
+/// multiply as a fused multiply-add; without it, nothing is added at all.
+template <bool kRemoveDc>
+void convertAndWindowImpl(const std::byte* input, SampleFormat format,
+                          std::span<const float> window, std::complex<float>* output,
+                          std::size_t frames, std::complex<float> dcOffset) noexcept {
     const std::size_t count = std::min(frames, window.size());
     const float* coefficients = window.data();
 
     // One pass: read, scale, window, write. Each instantiation is a flat loop
     // with no inner conditionals so the vectoriser can take it.
     visitFormat(format, [&]<typename C>(C) noexcept {
-        for (std::size_t i = 0; i < count; ++i) {
-            const float w = coefficients[i] * C::kScale;
-            output[i] = {C::load(input, 2 * i) * w, C::load(input, 2 * i + 1) * w};
+        if constexpr (kRemoveDc) {
+            // The offset arrives normalised; `load` yields raw units, so it is
+            // scaled back once here rather than every sample scaled forward.
+            const float dcRe = dcOffset.real() / C::kScale;
+            const float dcIm = dcOffset.imag() / C::kScale;
+            for (std::size_t i = 0; i < count; ++i) {
+                const float w = coefficients[i] * C::kScale;
+                output[i] = {(C::load(input, 2 * i) - dcRe) * w,
+                             (C::load(input, 2 * i + 1) - dcIm) * w};
+            }
+        } else {
+            for (std::size_t i = 0; i < count; ++i) {
+                const float w = coefficients[i] * C::kScale;
+                output[i] = {C::load(input, 2 * i) * w, C::load(input, 2 * i + 1) * w};
+            }
         }
     });
 
@@ -392,6 +411,48 @@ void convertAndWindow(const std::byte* input, SampleFormat format, std::span<con
     for (std::size_t i = count; i < frames; ++i) {
         output[i] = {0.0F, 0.0F};
     }
+}
+
+} // namespace
+
+void convertAndWindow(const std::byte* input, SampleFormat format, std::span<const float> window,
+                      std::complex<float>* output, std::size_t frames) noexcept {
+    convertAndWindowImpl<false>(input, format, window, output, frames, {});
+}
+
+void convertAndWindow(const std::byte* input, SampleFormat format, std::span<const float> window,
+                      std::complex<float>* output, std::size_t frames,
+                      std::complex<float> dcOffset) noexcept {
+    convertAndWindowImpl<true>(input, format, window, output, frames, dcOffset);
+}
+
+BlockStats blockStats(const std::byte* input, SampleFormat format, std::size_t frames) noexcept {
+    if (frames == 0) {
+        return {};
+    }
+
+    // Double accumulators: a 262144-frame block of 16-bit samples sums past
+    // what a float carries without losing the low bits the mean lives in.
+    double sumRe = 0.0;
+    double sumIm = 0.0;
+    std::size_t clipped = 0;
+    visitFormat(format, [&]<typename C>(C) noexcept {
+        for (std::size_t i = 0; i < frames; ++i) {
+            const float re = C::load(input, 2 * i);
+            const float im = C::load(input, 2 * i + 1);
+            sumRe += static_cast<double>(re);
+            sumIm += static_cast<double>(im);
+            if (std::fabs(re) >= C::kClip || std::fabs(im) >= C::kClip) {
+                ++clipped;
+            }
+        }
+        const double scale = static_cast<double>(C::kScale) / static_cast<double>(frames);
+        sumRe *= scale;
+        sumIm *= scale;
+    });
+
+    return {.clippedFraction = static_cast<float>(clipped) / static_cast<float>(frames),
+            .mean = {static_cast<float>(sumRe), static_cast<float>(sumIm)}};
 }
 
 float meanPower(const std::byte* input, SampleFormat format, std::size_t frames) noexcept {

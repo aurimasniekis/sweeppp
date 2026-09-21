@@ -17,6 +17,8 @@ It runs on macOS, Linux and Windows.
 
 - Sweep a range much wider than your radio can see in one go. Sweep++ tunes
   step by step and stitches the pieces into one picture.
+- Learn the receiver's own hump and spurs once, with the antenna off, and have
+  them removed from every sweep.
 - A live spectrum with max hold, min hold and average traces.
 - A scrolling waterfall that keeps full detail when you zoom in.
 - Zoom and pan with the mouse.

@@ -561,6 +561,15 @@ void SweepEngine::onFrame(const SpectrumFramePtr& frame) noexcept {
     m_stitchedFrames.fetch_add(1, std::memory_order_relaxed);
     stitch(*frame, step);
 
+    StepObserver observer;
+    {
+        const std::lock_guard lock(m_gridMutex);
+        observer = m_stepObserver;
+    }
+    if (observer) {
+        observer(*frame, step);
+    }
+
     // Only a frame from the step being collected right now can end its dwell.
     // Frames for earlier steps are still arriving -- the pipeline runs several
     // steps behind at speed -- and letting one of those satisfy the current
@@ -569,6 +578,11 @@ void SweepEngine::onFrame(const SpectrumFramePtr& frame) noexcept {
     if (*stepIndex == m_currentStep.load(std::memory_order_acquire)) {
         m_stepSatisfied.store(true, std::memory_order_release);
     }
+}
+
+void SweepEngine::setStepObserver(StepObserver observer) {
+    const std::lock_guard lock(m_gridMutex);
+    m_stepObserver = std::move(observer);
 }
 
 std::optional<std::size_t> SweepEngine::findStep(double centerHz) const {

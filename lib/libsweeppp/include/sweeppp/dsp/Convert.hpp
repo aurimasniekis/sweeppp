@@ -46,6 +46,32 @@ void convertFromComplexFloat(const float* input, SampleFormat format, std::byte*
 void convertAndWindow(const std::byte* input, SampleFormat format, std::span<const float> window,
                       std::complex<float>* output, std::size_t frames) noexcept;
 
+/// The same pass with a DC offset subtracted before the window multiply.
+///
+/// `dcOffset` is in normalised units, as `blockStats` reports it. The
+/// subtraction happens in the format's own raw units so the loop stays one
+/// fused multiply-add per component and still vectorises. A carrier sitting
+/// exactly on the LO is removed along with the receiver's own leak -- there is
+/// no way to tell the two apart from one block -- which is the trade-off of
+/// turning this on.
+void convertAndWindow(const std::byte* input, SampleFormat format, std::span<const float> window,
+                      std::complex<float>* output, std::size_t frames,
+                      std::complex<float> dcOffset) noexcept;
+
+/// What one pass over a block can say about it before it is converted.
+struct BlockStats {
+    /// Fraction of samples at or beyond full scale; see `clippedFraction`.
+    float clippedFraction = 0.0F;
+    /// Mean I and Q in normalised units: the receiver's DC offset, which a
+    /// direct-conversion tuner leaks into every block as a spike at its LO.
+    std::complex<float> mean{0.0F, 0.0F};
+};
+
+/// Clipping and mean in one pass. The pipeline reads both per block, and two
+/// passes over a 100 MS/s stream would touch memory twice for two numbers.
+[[nodiscard]] BlockStats blockStats(const std::byte* input, SampleFormat format,
+                                    std::size_t frames) noexcept;
+
 /// Mean power of a native-format block, without converting it.
 ///
 /// Used for the settle-detection heuristic and for a cheap overload check on

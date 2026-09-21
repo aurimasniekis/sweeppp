@@ -151,6 +151,14 @@ Status AppState::initialise() {
     m_pipeline = std::make_unique<Pipeline>(m_pipelineBus, m_telemetry, m_events);
     m_sweepEngine = std::make_unique<SweepEngine>(m_displayBus, m_telemetry, m_events);
 
+    // The learners read the sweep through the engine's hook and advance on
+    // its passes. Both are wired once, here, and decide per frame whether
+    // anything is listening.
+    m_sweepEngine->setStepObserver(
+        [this](const SpectrumFrame& frame, const SweepStep&) { observeStep(frame); });
+    m_events.subscribe<SweepPassEvent>(
+        [this](const SweepPassEvent&) { m_passesSeen.fetch_add(1, std::memory_order_relaxed); });
+
     // Two buses in series: the pipeline emits per-step frames, the sweep
     // engine stitches them, and everything downstream binds to the stitched
     // one. In fixed-tune mode the engine is bypassed and the pipeline
@@ -366,6 +374,7 @@ Profile AppState::currentProfile(const std::string& name, PluginState plugins) c
     profile.sweepPlan = m_sweepPlan;
     profile.sweeping = m_sweeping;
     profile.pipeline = m_pipelineConfig;
+    profile.corrections = m_correctionSettings;
     profile.view = m_view;
     profile.waterfallFraction = m_waterfallFraction;
 
@@ -410,6 +419,7 @@ Status AppState::applyProfile(const Profile& profile, DeviceHandling devices) {
 
     m_pipelineConfig = profile.pipeline;
     m_sweeping = profile.sweeping;
+    setCorrectionSettings(profile.corrections);
 
     std::string trouble;
 
@@ -711,6 +721,8 @@ void AppState::adoptDevice(std::unique_ptr<ISdrDevice> device) {
                                        .deviceId = info.id,
                                        .label = info.label,
                                        .serial = info.serial});
+
+    loadCalibration();
 }
 
 void AppState::closeDevice() {
@@ -721,6 +733,7 @@ void AppState::closeDevice() {
                                        .deviceId = m_device->info().id,
                                        .reason = "closed by operator"});
     m_device.reset();
+    loadCalibration();
 }
 
 Status AppState::applyPipelineConfig(const PipelineConfig& config) {
@@ -1050,6 +1063,7 @@ Status AppState::start() {
         setError(configured.error().describe());
         return configured;
     }
+    pushCorrectionSettings();
 
     const double sampleRate =
         asDouble(m_device->getParameter("sample_rate").value_or(SdrValue{20e6}));
@@ -1095,6 +1109,7 @@ Status AppState::start() {
     // Here rather than only in applySweepPlan, so pressing Start also settles
     // the panel onto what the radio agreed to.
     adoptEffectivePlan();
+    beginAutoSpurs();
 
     // Retention begins with acquisition, not when the operator asks for it.
     // "Save what I have been watching" cannot be answered by a writer created
@@ -1109,6 +1124,11 @@ Status AppState::start() {
 }
 
 void AppState::stop() {
+    // A learn measures a running radio; without one there is nothing to
+    // finish, and the settings it borrowed go back.
+    abortLearning();
+    endAutoSpurs();
+
     if (m_sweepEngine) {
         m_sweepEngine->stop();
     }
@@ -1317,11 +1337,37 @@ std::uint64_t AppState::sessionLines() const noexcept {
 void AppState::onFrame(const SpectrumFramePtr& frame) noexcept {
     // Runs on a pipeline thread. Parks the frame and returns -- anything more
     // would put UI work on the acquisition path.
-    const std::lock_guard lock(m_frameMutex);
-    m_pendingFrame = frame;
+    {
+        const std::lock_guard lock(m_frameMutex);
+        m_pendingFrame = frame;
+    }
+
+    // What a learn takes from this bus: at a fixed tune, every frame; while
+    // sweeping, the first pass completed wholly through the LO-offset set.
+    // One pass over the bins, or a pointer copy -- nothing heavier.
+    const std::lock_guard lock(m_learnMutex);
+    if (!m_learn) {
+        return;
+    }
+    if (m_learn->phase == LearnRun::Phase::Fixed) {
+        m_learn->learner.addFrame(frame->binsDbfs, frame->config.centerHz);
+    } else if (m_learn->phase == LearnRun::Phase::Absolute && frame->passComplete &&
+               frame->sweepPass > m_learn->installedAtPass) {
+        // The grid as one wide frame: its span for the sample rate and its
+        // middle for the centre, so the offsets come back as frequencies.
+        CorrectionLearner& grid = m_learn->gridLearner;
+        if (grid.binCount() != frame->binCount()) {
+            grid.begin(frame->binCount(),
+                       frame->binWidthHz * static_cast<double>(frame->binCount()), false);
+        }
+        grid.addFrame(frame->binsDbfs, frame->centerHz());
+    }
 }
 
 void AppState::pumpFrames() {
+    advanceLearning();
+    updateAutoSpurs();
+
     SpectrumFramePtr frame;
     {
         const std::lock_guard lock(m_frameMutex);
@@ -1377,6 +1423,11 @@ void AppState::pumpFrames() {
         // strings, which is nothing four times a second and real work sixty.
         PluginManager::instance().setProfile(currentProfile("current", PluginState::Omit));
 
+        // Whether the learned floor still applies, on the same cadence: a
+        // gain change reaches the device through several paths, and this is
+        // the one place that sees the result of all of them.
+        refreshFloorStaleness();
+
         // Device health is read here rather than by the panel that shows it.
         //
         // Each of these is a USB control transfer, so polling them per frame
@@ -1414,6 +1465,460 @@ void AppState::pumpFrames() {
     }
 
     m_telemetry.render().framesRendered.fetch_add(1, std::memory_order_relaxed);
+}
+
+// ---- receiver corrections ---------------------------------------------------
+
+CalibrationContext AppState::currentContext() const {
+    if (!m_device) {
+        return {};
+    }
+    return calibrationContextFor(*m_device, m_correctionSettings.dcRemoval);
+}
+
+CorrectionSettings AppState::effectiveCorrectionSettings() const noexcept {
+    CorrectionSettings settings = m_correctionSettings;
+    if (m_learn) {
+        // A learn measures the receiver as it is, so the corrections it is
+        // about to replace stay out of the data. The scan for fixed spurs
+        // runs through the LO-offset set it just produced, because what it
+        // looks for is what that set leaves behind.
+        const bool throughLoSet = m_learn->phase == LearnRun::Phase::Absolute;
+        settings.flatten = throughLoSet;
+        settings.spurMask = throughLoSet;
+    }
+    return settings;
+}
+
+void AppState::pushCorrectionSettings() {
+    if (m_pipeline) {
+        m_pipeline->setCorrectionSettings(effectiveCorrectionSettings());
+    }
+}
+
+void AppState::setCorrectionSettings(const CorrectionSettings& settings) {
+    const bool dcRemovalWas = m_correctionSettings.dcRemoval;
+    const bool autoSpursWere = m_correctionSettings.autoSpurs;
+    m_correctionSettings = settings;
+    pushCorrectionSettings();
+
+    // DC removal is part of the context a floor was learned in.
+    if (dcRemovalWas != settings.dcRemoval) {
+        installCorrections();
+    }
+    if (autoSpursWere != settings.autoSpurs) {
+        if (settings.autoSpurs) {
+            beginAutoSpurs();
+        } else {
+            endAutoSpurs();
+        }
+    }
+}
+
+const CorrectionSet* AppState::corrections() const noexcept {
+    return m_corrections ? &*m_corrections : nullptr;
+}
+
+std::size_t AppState::spurCount() const noexcept {
+    return m_corrections ? m_corrections->spurs.size() : 0;
+}
+
+std::size_t AppState::automaticSpurCount() const noexcept {
+    if (!m_corrections) {
+        return 0;
+    }
+    return static_cast<std::size_t>(std::ranges::count_if(
+        m_corrections->spurs, [](const SpurEntry& e) { return e.automatic; }));
+}
+
+void AppState::loadCalibration() {
+    m_corrections.reset();
+    m_floorStaleReason.clear();
+
+    if (m_device) {
+        const std::filesystem::path path = CorrectionSet::pathFor(m_device->info());
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec)) {
+            if (auto loaded = CorrectionSet::load(path)) {
+                m_corrections = std::move(*loaded);
+                logInfo("calibration", "{}: floor over {} points, {} spurs, learned {}",
+                        path.filename().string(), m_corrections->floor.levelDb.size(),
+                        m_corrections->spurs.size(), m_corrections->learnedAt);
+            } else {
+                logWarn("calibration", "{}: {}", path.string(), loaded.error().describe());
+            }
+        }
+    }
+
+    installCorrections();
+}
+
+void AppState::installCorrections() {
+    if (!m_pipeline) {
+        return;
+    }
+    if (!m_corrections || !m_device) {
+        m_floorStaleReason.clear();
+        m_pipeline->setCorrections(nullptr);
+        return;
+    }
+
+    // A copy, so the set the pipeline reads never changes under it and the
+    // stale floor can be left out of what it sees while staying on record.
+    auto installed = std::make_shared<CorrectionSet>(*m_corrections);
+    m_floorStaleReason.clear();
+    if (!installed->floor.empty()) {
+        m_floorStaleReason = installed->context.firstDifference(currentContext());
+        if (!m_floorStaleReason.empty()) {
+            installed->floor = {};
+        }
+    }
+    m_pipeline->setCorrections(std::move(installed));
+}
+
+void AppState::refreshFloorStaleness() {
+    if (!m_corrections || m_corrections->floor.empty() || !m_device) {
+        return;
+    }
+    if (m_corrections->context.firstDifference(currentContext()) != m_floorStaleReason) {
+        installCorrections();
+    }
+}
+
+Status AppState::startLearning() {
+    if (!running() || !m_device) {
+        return fail(ErrorCode::Unavailable, "start acquisition before learning");
+    }
+    if (m_learn) {
+        return fail(ErrorCode::AlreadyExists, "a learn is already running");
+    }
+
+    const bool sweeping = m_sweeping && m_sweepEngine->running();
+    const std::size_t fftSize =
+        sweeping ? m_sweepEngine->schedule().fftSize : m_pipeline->config().fftSize;
+    const double sampleRate =
+        sweeping ? m_sweepEngine->plan().sampleRate
+                 : asDouble(m_device->getParameter(kSampleRateKey).value_or(SdrValue{0.0}));
+    if (fftSize == 0 || sampleRate <= 0.0) {
+        return fail(ErrorCode::Unavailable, "no grid to learn against");
+    }
+
+    {
+        const std::lock_guard lock(m_learnMutex);
+        LearnRun& run = m_learn.emplace();
+        run.phase = sweeping ? LearnRun::Phase::LoOffsets : LearnRun::Phase::Fixed;
+        run.savedSettings = m_correctionSettings;
+        run.context = currentContext();
+        run.passesHandled = m_passesSeen.load(std::memory_order_relaxed);
+        run.learner.begin(fftSize, sampleRate, sweeping);
+    }
+    pushCorrectionSettings();
+
+    m_toasts.info(sweeping ? std::format("Learning receiver corrections over the next {} "
+                                         "passes. Keep the antenna disconnected.",
+                                         learnPasses())
+                           : std::format("Learning receiver corrections from the next {} "
+                                         "frames. Keep the antenna disconnected.",
+                                         kLearnFrames),
+                  monotonicNs());
+    return ok();
+}
+
+std::string AppState::learningLabel() const {
+    const std::lock_guard lock(m_learnMutex);
+    if (!m_learn) {
+        return {};
+    }
+    switch (m_learn->phase) {
+    case LearnRun::Phase::LoOffsets:
+        return "learning the floor and LO-offset spurs";
+    case LearnRun::Phase::Absolute:
+        return std::format("scanning for fixed spurs, pass {} of {}",
+                           m_learn->gridLearner.frameCount() + 1, LearnParameters{}.absolutePasses);
+    case LearnRun::Phase::Fixed:
+        return std::format("learning, {} of {} frames", m_learn->learner.frameCount(),
+                           kLearnFrames);
+    }
+    return {};
+}
+
+std::size_t AppState::learnPasses() noexcept {
+    // One for the floor and the LO-offset spurs, the rest through them, plus
+    // the one under way when the button is pressed.
+    return LearnParameters{}.absolutePasses + 2;
+}
+
+void AppState::cancelLearning() {
+    if (m_learn) {
+        abortLearning();
+        m_toasts.info("Learning cancelled", monotonicNs());
+    }
+}
+
+void AppState::observeStep(const SpectrumFrame& frame) noexcept {
+    const std::lock_guard lock(m_learnMutex);
+    if (m_learn) {
+        if (m_learn->phase == LearnRun::Phase::LoOffsets) {
+            m_learn->learner.addFrame(frame.binsDbfs, frame.config.centerHz);
+        }
+    } else if (m_autoLearner) {
+        m_autoLearner->addFrame(frame.binsDbfs, frame.config.centerHz);
+    }
+}
+
+void AppState::advanceLearning() {
+    if (!m_learn) {
+        return;
+    }
+    LearnRun& run = *m_learn;
+
+    switch (run.phase) {
+    case LearnRun::Phase::LoOffsets: {
+        const std::uint64_t passes = m_passesSeen.load(std::memory_order_relaxed);
+        if (passes == run.passesHandled) {
+            return;
+        }
+        run.passesHandled = passes;
+
+        // The pass that was under way when the learn began only contributed
+        // its remainder. Half the steps is enough for the per-bin statistics
+        // -- every step measures every local bin -- and less than that waits
+        // for the next pass.
+        CorrectionLearner learner;
+        {
+            const std::lock_guard lock(m_learnMutex);
+            learner = run.learner;
+        }
+        const std::size_t steps = m_sweepEngine->schedule().steps.size();
+        if (learner.frameCount() < std::max<std::size_t>(1, steps / 2)) {
+            return;
+        }
+
+        run.floor = learner.floorShape();
+        run.loSpurs = learner.loSpurs();
+
+        // Installed now, so the next pass is measured through them and what
+        // it still shows is at a fixed frequency.
+        CorrectionSet interim;
+        interim.context = run.context;
+        interim.floor = run.floor;
+        interim.spurs = run.loSpurs;
+        m_corrections = std::move(interim);
+        installCorrections();
+
+        if (!m_sweepEngine->plan().continuous) {
+            m_toasts.warning("One-shot plan: fixed-frequency spurs were not scanned. Learn on a "
+                             "continuous sweep to find them.",
+                             monotonicNs());
+            finishLearning({});
+            return;
+        }
+
+        {
+            const std::lock_guard lock(m_learnMutex);
+            run.phase = LearnRun::Phase::Absolute;
+            run.installedAtPass = m_sweepEngine->passCount();
+            run.gridLearner = {};
+        }
+        pushCorrectionSettings();
+        m_toasts.info(std::format("Floor and {} LO-offset spur(s) learned; scanning the next "
+                                  "{} passes for fixed spurs",
+                                  run.loSpurs.size(), LearnParameters{}.absolutePasses),
+                      monotonicNs());
+        return;
+    }
+
+    case LearnRun::Phase::Absolute: {
+        CorrectionLearner grid;
+        {
+            const std::lock_guard lock(m_learnMutex);
+            if (run.gridLearner.frameCount() < LearnParameters{}.absolutePasses) {
+                return;
+            }
+            grid = run.gridLearner;
+        }
+        finishLearning(grid.loSpurs());
+        return;
+    }
+
+    case LearnRun::Phase::Fixed: {
+        CorrectionLearner learner;
+        {
+            const std::lock_guard lock(m_learnMutex);
+            if (run.learner.frameCount() < kLearnFrames) {
+                return;
+            }
+            learner = run.learner;
+        }
+        run.floor = learner.floorShape();
+        run.loSpurs = learner.loSpurs();
+        finishLearning({});
+        return;
+    }
+    }
+}
+
+void AppState::finishLearning(const std::vector<SpurEntry>& absoluteSpurs) {
+    LearnRun run;
+    {
+        const std::lock_guard lock(m_learnMutex);
+        run = std::move(*m_learn);
+        m_learn.reset();
+    }
+
+    CorrectionSet set;
+    set.context = run.context;
+    set.floor = std::move(run.floor);
+    set.spurs = std::move(run.loSpurs);
+    const std::size_t loCount = set.spurs.size();
+    set.spurs.insert(set.spurs.end(), absoluteSpurs.begin(), absoluteSpurs.end());
+    set.learnedAt = formatWallClockIso8601(wallClockNs());
+
+    std::string savedAs;
+    if (m_device) {
+        const std::filesystem::path path = CorrectionSet::pathFor(m_device->info());
+        if (auto saved = set.save(path); !saved) {
+            m_toasts.error(
+                std::format("could not save the calibration: {}", saved.error().describe()),
+                monotonicNs());
+        } else {
+            savedAs = path.filename().string();
+        }
+    }
+
+    m_corrections = std::move(set);
+
+    // Learning is a request to use the result: the switches come back as
+    // they were, with these two on.
+    m_correctionSettings = run.savedSettings;
+    m_correctionSettings.flatten = true;
+    m_correctionSettings.spurMask = true;
+    pushCorrectionSettings();
+    installCorrections();
+    beginAutoSpurs();
+
+    m_toasts.success(
+        std::format("Corrections learned: floor over {} points, {} LO-offset and "
+                    "{} fixed spur(s){}",
+                    m_corrections->floor.levelDb.size(), loCount, absoluteSpurs.size(),
+                    savedAs.empty() ? std::string{} : std::format(", saved as {}", savedAs)),
+        monotonicNs());
+}
+
+void AppState::abortLearning() {
+    if (!m_learn) {
+        return;
+    }
+    CorrectionSettings saved;
+    {
+        const std::lock_guard lock(m_learnMutex);
+        saved = m_learn->savedSettings;
+        m_learn.reset();
+    }
+    m_correctionSettings = saved;
+    pushCorrectionSettings();
+
+    // An interim set may have gone in after the first phase; what is on disk
+    // is what stands.
+    loadCalibration();
+}
+
+void AppState::beginAutoSpurs() {
+    if (!m_correctionSettings.autoSpurs || !m_sweeping || !running() || !m_sweepEngine ||
+        !m_sweepEngine->running()) {
+        return;
+    }
+    const std::lock_guard lock(m_learnMutex);
+    m_autoLearner.emplace();
+    m_autoLearner->begin(m_sweepEngine->schedule().fftSize, m_sweepEngine->plan().sampleRate, true);
+    m_autoPassesHandled = m_passesSeen.load(std::memory_order_relaxed);
+}
+
+void AppState::endAutoSpurs() {
+    const std::lock_guard lock(m_learnMutex);
+    m_autoLearner.reset();
+}
+
+void AppState::updateAutoSpurs() {
+    if (!m_autoLearner || m_learn) {
+        return;
+    }
+    const std::uint64_t passes = m_passesSeen.load(std::memory_order_relaxed);
+    if (passes == m_autoPassesHandled) {
+        return;
+    }
+    m_autoPassesHandled = passes;
+
+    // One pass at a time: the minimum over a pass is what tells a spur from
+    // a signal, and the next pass starts from nothing.
+    CorrectionLearner learner;
+    {
+        const std::lock_guard lock(m_learnMutex);
+        learner = *m_autoLearner;
+        m_autoLearner->begin(learner.binCount(), learner.sampleRate(), true);
+    }
+    if (learner.frameCount() == 0 || learner.binCount() == 0) {
+        return;
+    }
+
+    const std::vector<SpurEntry> found = learner.loSpurs();
+    if (found.empty()) {
+        return;
+    }
+
+    if (!m_corrections) {
+        m_corrections.emplace();
+        m_corrections->context = currentContext();
+    }
+
+    // Additive: the data this saw was already masked, so anything it found
+    // is something the mask does not yet cover.
+    const double binWidthHz = learner.sampleRate() / static_cast<double>(learner.binCount());
+    std::size_t added = 0;
+    for (SpurEntry spur : found) {
+        const bool covered =
+            std::ranges::any_of(m_corrections->spurs, [&](const SpurEntry& existing) {
+                return existing.kind == SpurKind::LoOffset &&
+                       std::abs(existing.hz - spur.hz) <=
+                           (existing.widthHz + spur.widthHz) * 0.5 + binWidthHz;
+            });
+        if (covered) {
+            continue;
+        }
+        spur.automatic = true;
+        m_corrections->spurs.push_back(spur);
+        ++added;
+    }
+
+    if (added > 0) {
+        installCorrections();
+        logInfo("calibration", "{} LO-offset spur(s) added automatically", added);
+    }
+}
+
+void AppState::clearAutoSpurs() {
+    if (!m_corrections) {
+        return;
+    }
+    std::erase_if(m_corrections->spurs, [](const SpurEntry& e) { return e.automatic; });
+    installCorrections();
+}
+
+void AppState::clearCorrections() {
+    abortLearning();
+    if (m_device) {
+        const std::filesystem::path path = CorrectionSet::pathFor(m_device->info());
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        if (ec) {
+            m_toasts.error(std::format("could not remove {}: {}", path.string(), ec.message()),
+                           monotonicNs());
+        }
+    }
+    m_corrections.reset();
+    m_floorStaleReason.clear();
+    installCorrections();
+    beginAutoSpurs();
 }
 
 std::vector<std::vector<float>> AppState::takePendingWaterfallLines() {

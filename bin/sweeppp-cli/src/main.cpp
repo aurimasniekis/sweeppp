@@ -20,6 +20,8 @@
 #include <sweeppp/core/Telemetry.hpp>
 #include <sweeppp/core/Toml.hpp>
 #include <sweeppp/core/Version.hpp>
+#include <sweeppp/correction/CorrectionLearner.hpp>
+#include <sweeppp/correction/Corrections.hpp>
 #include <sweeppp/fft/FftBackendManager.hpp>
 #include <sweeppp/history/IFrameSource.hpp>
 #include <sweeppp/history/SessionReader.hpp>
@@ -501,35 +503,16 @@ void printStatsSummary(const TelemetrySnapshot& live, const TelemetrySnapshot& s
     std::println("  rate error            {:.2f}%", rateError * 100.0);
 }
 
-int runSweep(const Options& options) {
-    registerBuiltinsAndPlugins();
-
-    Log::setLevel(options.verbose ? LogLevel::Debug
-                  : options.quiet ? LogLevel::Warn
-                                  : LogLevel::Info);
-
-    // Buses and the plugin scope before the radio, because destruction runs in
-    // reverse: a device a plugin driver handed out carries a vtable in that
-    // plugin's image, so the scope withdrawing it must outlive the device.
-    // Plugins see the same frames and the same events the GUI does. Without
-    // this a frame-processor facet would be listed as having no bus to attach
-    // to, which is true of `info` and would be a lie here.
-    FrameBus frameBus;
-    Telemetry telemetry;
-    EventBus eventBus;
-    installLoggingSubscribers(eventBus);
-    const PluginScope pluginScope{frameBus, eventBus};
-
-    auto backend = FftBackendManager::instance().acquireOrDefault(options.fftBackend);
-    if (!backend) {
-        std::println(stderr, "sweeppp-cli: {}", backend.error().describe());
-        return 1;
-    }
-
+/// Opens the radio the options name, selects its port and applies every
+/// parameter they carry. Null after printing why, so a caller returns 1.
+///
+/// Shared by `sweep` and `calibrate`: a calibration is only applied while the
+/// radio is set the way it was learned, so the two must set it the same way.
+std::unique_ptr<ISdrDevice> openConfiguredDevice(const Options& options) {
     auto device = SdrDeviceManager::instance().openSpecifier(options.device);
     if (!device) {
         std::println(stderr, "sweeppp-cli: {}", device.error().describe());
-        return 1;
+        return nullptr;
     }
 
     // The port before anything else: gain and bandwidth are per-connector on
@@ -538,7 +521,7 @@ int runSweep(const Options& options) {
     if (!options.rxPort.empty()) {
         if (auto selected = (*device)->selectRxPort(options.rxPort); !selected) {
             std::println(stderr, "sweeppp-cli: {}", selected.error().describe());
-            return 1;
+            return nullptr;
         }
     }
 
@@ -567,12 +550,51 @@ int runSweep(const Options& options) {
 
     if (!applyParameter("sample_rate", std::format("{}", options.sampleRate)) ||
         !applyParameter("center_hz", std::format("{}", options.centerHz))) {
-        return 1;
+        return nullptr;
     }
     for (const auto& [key, value] : options.deviceParameters) {
         if (!applyParameter(key, value)) {
-            return 1;
+            return nullptr;
         }
+    }
+
+    return std::move(*device);
+}
+
+/// The calibration file a run reads or writes: the one named, or the radio's.
+std::filesystem::path calibrationPathFor(const Options& options, const ISdrDevice& device) {
+    return options.calibrationPath.empty() ? CorrectionSet::pathFor(device.info())
+                                           : std::filesystem::path(options.calibrationPath);
+}
+
+int runSweep(const Options& options) {
+    registerBuiltinsAndPlugins();
+
+    Log::setLevel(options.verbose ? LogLevel::Debug
+                  : options.quiet ? LogLevel::Warn
+                                  : LogLevel::Info);
+
+    // Buses and the plugin scope before the radio, because destruction runs in
+    // reverse: a device a plugin driver handed out carries a vtable in that
+    // plugin's image, so the scope withdrawing it must outlive the device.
+    // Plugins see the same frames and the same events the GUI does. Without
+    // this a frame-processor facet would be listed as having no bus to attach
+    // to, which is true of `info` and would be a lie here.
+    FrameBus frameBus;
+    Telemetry telemetry;
+    EventBus eventBus;
+    installLoggingSubscribers(eventBus);
+    const PluginScope pluginScope{frameBus, eventBus};
+
+    auto backend = FftBackendManager::instance().acquireOrDefault(options.fftBackend);
+    if (!backend) {
+        std::println(stderr, "sweeppp-cli: {}", backend.error().describe());
+        return 1;
+    }
+
+    auto device = openConfiguredDevice(options);
+    if (!device) {
+        return 1;
     }
 
     auto window = windowTypeFromString(options.window);
@@ -655,7 +677,7 @@ int runSweep(const Options& options) {
 
         sweepEngine = std::make_unique<SweepEngine>(frameBus, telemetry, eventBus);
         if (auto configured =
-                sweepEngine->configure(plan, **backend, **device, antennas, assignments, switchers);
+                sweepEngine->configure(plan, **backend, *device, antennas, assignments, switchers);
             !configured) {
             std::println(stderr, "sweeppp-cli: {}", configured.error().describe());
             return 1;
@@ -693,6 +715,36 @@ int runSweep(const Options& options) {
     }
 
     pipeline.setTuning(options.centerHz, options.sampleRate, options.sampleRate);
+
+    pipeline.setCorrectionSettings(CorrectionSettings{.dcRemoval = options.dcRemoval,
+                                                      .flatten = options.flatten,
+                                                      .spurMask = options.spurMask,
+                                                      .autoSpurs = false});
+    if (options.flatten || options.spurMask) {
+        const std::filesystem::path path = calibrationPathFor(options, *device);
+        auto loaded = CorrectionSet::load(path);
+        if (!loaded) {
+            std::println(stderr, "sweeppp-cli: {}", loaded.error().describe());
+            return 1;
+        }
+        auto corrections = std::make_shared<CorrectionSet>(std::move(*loaded));
+
+        // The floor is only what it was measured at; a differing setting
+        // leaves it out and says so once. The spurs stay: a reference
+        // harmonic does not move with the gain.
+        if (options.flatten && !corrections->floor.empty()) {
+            const std::string stale = corrections->context.firstDifference(
+                calibrationContextFor(*device, options.dcRemoval));
+            if (!stale.empty()) {
+                std::println(stderr,
+                             "sweeppp-cli: the learned floor is not applied: '{}' differs from "
+                             "when it was learned",
+                             stale);
+                corrections->floor = {};
+            }
+        }
+        pipeline.setCorrections(std::move(corrections));
+    }
 
     std::ofstream fileStream;
     std::ostream* out = &std::cout;
@@ -737,19 +789,19 @@ int runSweep(const Options& options) {
                                                2048, 262'144)
                      : 262'144,
         .blockCount = 64,
-        .format = (*device)->nativeFormat(),
+        .format = device->nativeFormat(),
     };
 
     std::signal(SIGINT, handleInterrupt);
 
     const std::uint64_t startedNs = monotonicNs();
-    if (auto started = pipeline.start(**device, streamConfig); !started) {
+    if (auto started = pipeline.start(*device, streamConfig); !started) {
         std::println(stderr, "sweeppp-cli: {}", started.error().describe());
         return 1;
     }
 
     if (sweeping) {
-        if (auto started = sweepEngine->start(**device, pipeline); !started) {
+        if (auto started = sweepEngine->start(*device, pipeline); !started) {
             pipeline.stop();
             std::println(stderr, "sweeppp-cli: {}", started.error().describe());
             return 1;
@@ -770,7 +822,7 @@ int runSweep(const Options& options) {
         }
     } else if (!options.quiet) {
         std::println(stderr, "sweeping {} at {} S/s, {} point {} window ({} RBW) for {}",
-                     (*device)->info().label, toml_util::formatFrequencyShort(options.sampleRate),
+                     device->info().label, toml_util::formatFrequencyShort(options.sampleRate),
                      fftSize, toString(*window),
                      toml_util::formatFrequencyShort(options.sampleRate * 1.5 /
                                                      static_cast<double>(fftSize)),
@@ -856,6 +908,305 @@ int runSweep(const Options& options) {
     }
 
     return csv.failures() == 0 ? 0 : 1;
+}
+
+/// Feeds the learner at a fixed tune, and while sweeping feeds a learner of
+/// the stitched grid with each pass completed wholly through the LO-offset
+/// set.
+class CalibrationConsumer final : public IFrameConsumer {
+public:
+    CalibrationConsumer(CorrectionLearner& learner, std::mutex& mutex, bool sweeping)
+        : m_learner(learner), m_mutex(mutex), m_sweeping(sweeping) {}
+
+    void onFrame(const SpectrumFramePtr& frame) noexcept override {
+        const std::lock_guard lock(m_mutex);
+        if (!m_sweeping) {
+            m_learner.addFrame(frame->binsDbfs, frame->config.centerHz);
+        } else if (frame->passComplete && frame->sweepPass > m_acceptAfterPass) {
+            if (m_grid.binCount() != frame->binCount()) {
+                m_grid.begin(frame->binCount(),
+                             frame->binWidthHz * static_cast<double>(frame->binCount()), false);
+            }
+            m_grid.addFrame(frame->binsDbfs, frame->centerHz());
+        }
+    }
+
+    [[nodiscard]] std::string_view consumerName() const noexcept override { return "calibration"; }
+
+    /// Only a pass begun after this one counts.
+    void acceptAfterPass(std::uint64_t pass) {
+        const std::lock_guard lock(m_mutex);
+        m_acceptAfterPass = pass;
+        m_grid = {};
+    }
+
+    [[nodiscard]] std::size_t passesSeen() const {
+        const std::lock_guard lock(m_mutex);
+        return m_grid.frameCount();
+    }
+
+    [[nodiscard]] CorrectionLearner grid() const {
+        const std::lock_guard lock(m_mutex);
+        return m_grid;
+    }
+
+private:
+    CorrectionLearner& m_learner;
+    std::mutex& m_mutex;
+    bool m_sweeping;
+    std::uint64_t m_acceptAfterPass = 0;
+    CorrectionLearner m_grid;
+};
+
+/// Sleeps in short steps until `done` or the operator interrupts.
+[[nodiscard]] bool waitUntil(const std::function<bool()>& done) {
+    while (!g_interrupted.load()) {
+        if (done()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
+}
+
+/// The learn the GUI's button runs, headless: the same source and analysis
+/// setup as `sweep`, the engine's step observer while sweeping and the bus
+/// at a fixed tune, and the result written where `sweep --flatten` reads it.
+int runCalibrate(const Options& options) {
+    registerBuiltinsAndPlugins();
+
+    Log::setLevel(options.verbose ? LogLevel::Debug
+                  : options.quiet ? LogLevel::Warn
+                                  : LogLevel::Info);
+
+    FrameBus frameBus;
+    Telemetry telemetry;
+    EventBus eventBus;
+    installLoggingSubscribers(eventBus);
+    const PluginScope pluginScope{frameBus, eventBus};
+
+    auto backend = FftBackendManager::instance().acquireOrDefault(options.fftBackend);
+    if (!backend) {
+        std::println(stderr, "sweeppp-cli: {}", backend.error().describe());
+        return 1;
+    }
+
+    auto device = openConfiguredDevice(options);
+    if (!device) {
+        return 1;
+    }
+
+    auto window = windowTypeFromString(options.window);
+    if (!window) {
+        std::println(stderr, "sweeppp-cli: {}", window.error().describe());
+        return 1;
+    }
+
+    const bool sweeping = options.startHz > 0.0 && options.stopHz > options.startHz;
+
+    std::uint32_t fftSize = options.fftSize;
+    if (!sweeping && options.rbwHz > 0.0) {
+        const auto desired = static_cast<std::size_t>(options.sampleRate / options.rbwHz);
+        fftSize = static_cast<std::uint32_t>((*backend)->snapSize(desired));
+    }
+
+    CorrectionLearner learner;
+    std::mutex learnerMutex;
+
+    FrameBus pipelineBus;
+    std::unique_ptr<SweepEngine> sweepEngine;
+    double sampleRate = options.sampleRate;
+
+    if (sweeping) {
+        SweepPlan plan;
+        plan.name = "calibrate";
+        plan.segments = {SweepSegment{.startHz = options.startHz, .stopHz = options.stopHz}};
+        plan.applyMode(SweepMode::Fast);
+        plan.sampleRate = options.sampleRate;
+        plan.window = *window;
+        plan.windowBeta = 8.6;
+        if (options.rbwHz > 0.0) {
+            plan.rbwHz = options.rbwHz;
+        }
+        if (options.averageCount > 1) {
+            plan.averageCount = options.averageCount;
+        }
+
+        sweepEngine = std::make_unique<SweepEngine>(frameBus, telemetry, eventBus);
+        if (auto configured = sweepEngine->configure(plan, **backend, *device); !configured) {
+            std::println(stderr, "sweeppp-cli: {}", configured.error().describe());
+            return 1;
+        }
+        fftSize = sweepEngine->schedule().fftSize;
+        sampleRate = sweepEngine->plan().sampleRate;
+        pipelineBus.subscribe(sweepEngine.get());
+
+        sweepEngine->setStepObserver([&](const SpectrumFrame& frame, const SweepStep&) {
+            const std::lock_guard lock(learnerMutex);
+            learner.addFrame(frame.binsDbfs, frame.config.centerHz);
+        });
+    }
+
+    learner.begin(fftSize, sampleRate, sweeping);
+
+    CalibrationConsumer consumer(learner, learnerMutex, sweeping);
+    frameBus.subscribe(&consumer);
+
+    const PipelineConfig pipelineConfig{
+        .fftSize = fftSize,
+        .window = *window,
+        .windowBeta = 8.6,
+        .overlap = options.overlap,
+        .workerCount = options.workerCount,
+        .throttleMode = options.throttle == "every-nth"     ? ThrottleMode::EveryNth
+                        : options.throttle == "all-samples" ? ThrottleMode::AllSamples
+                                                            : ThrottleMode::Auto,
+        .everyNth = options.everyNth,
+        .averageCount = options.averageCount,
+        .planQuality = FftPlanQuality::Balanced,
+        .targetFrameRate = sweeping ? 0.0 : 30.0,
+        .dbfsToDbmOffset = 0.0,
+    };
+
+    Pipeline pipeline(sweeping ? pipelineBus : frameBus, telemetry, eventBus);
+    if (auto configured = pipeline.configure(**backend, pipelineConfig); !configured) {
+        std::println(stderr, "sweeppp-cli: {}", configured.error().describe());
+        return 1;
+    }
+    pipeline.setTuning(options.centerHz, options.sampleRate, options.sampleRate);
+
+    // Measured as the receiver is: nothing but DC removal, which is part of
+    // the context the result is bound to.
+    pipeline.setCorrectionSettings(CorrectionSettings{
+        .dcRemoval = options.dcRemoval, .flatten = false, .spurMask = false, .autoSpurs = false});
+
+    const StreamConfig streamConfig{
+        .framesPerBlock =
+            sweeping ? std::clamp<std::size_t>(static_cast<std::size_t>(fftSize) *
+                                                   std::max(sweepEngine->plan().averageCount, 1U),
+                                               2048, 262'144)
+                     : 262'144,
+        .blockCount = 64,
+        .format = device->nativeFormat(),
+    };
+
+    std::signal(SIGINT, handleInterrupt);
+
+    if (auto started = pipeline.start(*device, streamConfig); !started) {
+        std::println(stderr, "sweeppp-cli: {}", started.error().describe());
+        return 1;
+    }
+    if (sweeping) {
+        if (auto started = sweepEngine->start(*device, pipeline); !started) {
+            pipeline.stop();
+            std::println(stderr, "sweeppp-cli: {}", started.error().describe());
+            return 1;
+        }
+    }
+
+    CorrectionSet set;
+    set.context = calibrationContextFor(*device, options.dcRemoval);
+
+    const auto stopAll = [&] {
+        if (sweepEngine) {
+            sweepEngine->stop();
+        }
+        pipeline.stop();
+    };
+
+    std::size_t loCount = 0;
+    if (sweeping) {
+        const std::size_t absolutePasses = LearnParameters{}.absolutePasses;
+        if (!options.quiet) {
+            std::println(stderr,
+                         "calibrating {} to {} in {} steps: pass 1 of {}, floor and "
+                         "LO-offset spurs",
+                         toml_util::formatFrequencyShort(options.startHz),
+                         toml_util::formatFrequencyShort(options.stopHz),
+                         sweepEngine->schedule().steps.size(), absolutePasses + 1);
+        }
+
+        // The engine starts at step 0, so its first completed pass is a whole
+        // one.
+        if (!waitUntil([&] { return sweepEngine->passCount() >= 2; })) {
+            stopAll();
+            std::println(stderr, "sweeppp-cli: interrupted");
+            return 1;
+        }
+        {
+            const std::lock_guard lock(learnerMutex);
+            set.floor = learner.floorShape();
+            set.spurs = learner.loSpurs();
+        }
+        loCount = set.spurs.size();
+
+        // Pass 2 is measured through what pass 1 found; whatever it still
+        // shows is at a fixed frequency. Only a pass begun after the set went
+        // in was measured through it throughout.
+        pipeline.setCorrections(std::make_shared<CorrectionSet>(set));
+        pipeline.setCorrectionSettings(CorrectionSettings{
+            .dcRemoval = options.dcRemoval, .flatten = true, .spurMask = true, .autoSpurs = false});
+        consumer.acceptAfterPass(sweepEngine->passCount());
+        if (!options.quiet) {
+            std::println(stderr,
+                         "  floor over {} points, {} LO-offset spur(s); {} more passes "
+                         "for fixed spurs",
+                         set.floor.levelDb.size(), loCount, absolutePasses);
+        }
+
+        if (!waitUntil([&] { return consumer.passesSeen() >= absolutePasses; })) {
+            stopAll();
+            std::println(stderr, "sweeppp-cli: interrupted");
+            return 1;
+        }
+        const std::vector<SpurEntry> absolute = consumer.grid().loSpurs();
+        set.spurs.insert(set.spurs.end(), absolute.begin(), absolute.end());
+    } else {
+        constexpr std::size_t kFrames = 200;
+        if (!options.quiet) {
+            std::println(stderr, "calibrating {} at {}: {} frames",
+                         toml_util::formatFrequencyShort(options.centerHz),
+                         toml_util::formatFrequencyShort(options.sampleRate), kFrames);
+        }
+        if (!waitUntil([&] {
+                const std::lock_guard lock(learnerMutex);
+                return learner.frameCount() >= kFrames;
+            })) {
+            stopAll();
+            std::println(stderr, "sweeppp-cli: interrupted");
+            return 1;
+        }
+        const std::lock_guard lock(learnerMutex);
+        set.floor = learner.floorShape();
+        set.spurs = learner.loSpurs();
+    }
+
+    stopAll();
+    if (sweepEngine) {
+        sweepEngine->setStepObserver({});
+    }
+
+    set.learnedAt = formatWallClockIso8601(wallClockNs());
+    const std::filesystem::path path = calibrationPathFor(options, *device);
+    if (auto saved = set.save(path); !saved) {
+        std::println(stderr, "sweeppp-cli: {}", saved.error().describe());
+        return 1;
+    }
+
+    std::println("calibration written to {}", path.string());
+    std::println("  floor              {} points over {} S/s", set.floor.levelDb.size(),
+                 toml_util::formatFrequencyShort(set.floor.sampleRate));
+    std::println("  LO-offset spurs    {}", sweeping ? loCount : 0);
+    std::println("  fixed spurs        {}", set.spurs.size() - (sweeping ? loCount : 0));
+    for (const SpurEntry& spur : set.spurs) {
+        std::println("    {:<10} {:>16} width {}", toString(spur.kind),
+                     spur.kind == SpurKind::LoOffset ? std::format("{:+.3f} MHz", spur.hz / 1e6)
+                                                     : toml_util::formatFrequencyShort(spur.hz),
+                     toml_util::formatFrequencyShort(spur.widthHz));
+    }
+    std::println("  context            {} parameter(s), DC removal {}",
+                 set.context.parameters.size(), set.context.dcRemoval ? "on" : "off");
+    return 0;
 }
 
 /// `info <file>` for a session.
@@ -1104,6 +1455,8 @@ int main(int argc, char** argv) {
 
     case Command::Sweep:
         return runSweep(*options);
+    case Command::Calibrate:
+        return runCalibrate(*options);
     case Command::Record:
         return runRecord(*options);
     case Command::Replay:

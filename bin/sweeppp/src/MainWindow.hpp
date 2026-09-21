@@ -195,6 +195,11 @@ private:
                          float axisHeight);
     void drawClosePrompt();
 
+    /// The Corrections block of the Analysis panel, and its two prompts.
+    void drawCorrectionsBlock(bool sweeping);
+    void drawLearnPrompt();
+    void drawClearCorrectionsPrompt();
+
     /// A labelled frequency field in MHz with coarse/fine nudge buttons.
     ///
     /// The buttons are the point. Typing is fine for jumping somewhere known,
@@ -485,6 +490,8 @@ private:
     bool m_showHistory = false;
     bool m_showGradientEditor = false;
     bool m_showFftBenchmark = false;
+    bool m_showLearnPrompt = false;
+    bool m_showClearCorrectionsPrompt = false;
 
     bool m_showAntennaEditor = false;
     Antenna m_editingAntenna;

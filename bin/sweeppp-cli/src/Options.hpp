@@ -14,12 +14,13 @@ namespace sweeppp::cli {
 /// Subcommands. All of them work except `serve`, which reports that it is not
 /// available yet rather than failing obscurely.
 enum class Command {
-    Sweep,   ///< Headless sweep to CSV. The perf and CI harness.
-    Record,  ///< Headless capture to .sweeps.
-    Serve,   ///< Remote server: engine plus protocol endpoint.
-    Replay,  ///< Play back a .sweeps file.
-    Info,    ///< Describe devices, backends, or a .sweeps file.
-    Extract, ///< Cut a time+frequency range out of a .sweeps file.
+    Sweep,     ///< Headless sweep to CSV. The perf and CI harness.
+    Calibrate, ///< Learn the receiver's floor and spurs, antenna off.
+    Record,    ///< Headless capture to .sweeps.
+    Serve,     ///< Remote server: engine plus protocol endpoint.
+    Replay,    ///< Play back a .sweeps file.
+    Info,      ///< Describe devices, backends, or a .sweeps file.
+    Extract,   ///< Cut a time+frequency range out of a .sweeps file.
     Help,
     Version,
 };
@@ -64,6 +65,16 @@ struct Options {
 
     std::string throttle = "auto";
     std::uint32_t everyNth = 1;
+
+    /// Receiver corrections. DC removal is on unless refused; the two that
+    /// need a calibration are off unless asked for, since without a file
+    /// they have nothing to apply.
+    bool dcRemoval = true;
+    bool flatten = false;
+    bool spurMask = false;
+    /// The calibration file to read, or to write for `calibrate`. Empty means
+    /// the radio's own under the config folder.
+    std::string calibrationPath;
 
     double durationSeconds = 5.0;
     std::string outputPath;
