@@ -96,6 +96,10 @@ bladeRF 2.0 micro xA4, xA5 and xA9.
   - signal strength (RSSI);
   - bus voltage, current and power;
   - oscillator trim.
+- **Artefacts:** the floor rises towards each step's LO, so a wide sweep shows
+  a hump every step; narrow spurs sit at multiples of the 38.4 MHz reference
+  clock. Analysis → Corrections → **Learn** with no antenna removes both. See
+  [Corrections](user-guide.md#advanced-settings).
 
 ## RTL-SDR
 

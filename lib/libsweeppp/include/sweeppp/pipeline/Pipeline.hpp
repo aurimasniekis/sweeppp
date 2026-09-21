@@ -7,6 +7,7 @@
 #include "sweeppp/core/EventBus.hpp"
 #include "sweeppp/core/MpmcQueue.hpp"
 #include "sweeppp/core/Telemetry.hpp"
+#include "sweeppp/correction/Corrections.hpp"
 #include "sweeppp/fft/IFftBackend.hpp"
 #include "sweeppp/fft/Window.hpp"
 #include "sweeppp/pipeline/FrameBus.hpp"
@@ -156,6 +157,18 @@ public:
     /// Marks the current sweep pass and step, stamped into published frames.
     void setSweepPosition(std::uint64_t pass, std::uint32_t step, bool passComplete) noexcept;
 
+    /// Which receiver corrections apply, effective from the next block. Held
+    /// as one atomic byte, so switching one costs the hot path nothing and
+    /// needs no restart -- unlike a `PipelineConfig` change.
+    void setCorrectionSettings(CorrectionSettings settings) noexcept;
+    [[nodiscard]] CorrectionSettings correctionSettings() const noexcept;
+
+    /// The learned floor and spur list the flatten and mask switches apply.
+    /// Null clears it. Survives `configure()` and `reconfigure()`, which only
+    /// rebuild the workers.
+    void setCorrections(std::shared_ptr<const CorrectionSet> set);
+    [[nodiscard]] std::shared_ptr<const CorrectionSet> corrections() const;
+
     [[nodiscard]] std::uint32_t workerCount() const noexcept {
         return static_cast<std::uint32_t>(m_workers.size());
     }
@@ -223,7 +236,15 @@ private:
     /// publish; without this they would allocate sequences in one order and
     /// deliver them in another, which would corrupt any consumer that assumes
     /// time moves forward -- the waterfall and the session file both do.
-    std::mutex m_publishMutex;
+    mutable std::mutex m_publishMutex;
+
+    /// `CorrectionSettings::toBits()`, read once per block and once per frame.
+    std::atomic<std::uint8_t> m_correctionBits{0};
+    /// The set and its per-grid scratch, both guarded by m_publishMutex: the
+    /// corrections run inside the publish critical section, on the frame's
+    /// own bins, so one scratch serves every worker.
+    std::shared_ptr<const CorrectionSet> m_corrections;
+    CorrectionScratch m_correctionScratch;
     AcquisitionConfig m_acquisitionConfig;
     std::atomic<std::uint64_t> m_sweepPass{0};
     std::atomic<std::uint32_t> m_sweepStep{0};

@@ -257,7 +257,7 @@ const Paths& Paths::instance() {
 Status Paths::ensureConfigTree() const {
     const fs::path directories[] = {
         m_configDir,     themesDir(),  colormapsDir(), bandPlansDir(), profilesDir(),
-        sweepPlansDir(), pluginsDir(), sessionsDir(),  antennasDir(),
+        sweepPlansDir(), pluginsDir(), sessionsDir(),  antennasDir(),  calibrationDir(),
     };
 
     for (const fs::path& dir : directories) {

@@ -194,7 +194,30 @@ For each step, the sweep thread:
 Meanwhile `SweepEngine::onFrame` finds each frame's step by its centre
 frequency, drops frames from before the settle deadline, and stitches the rest.
 Where steps overlap, the measurement that sat deepest inside its own step's
-usable band wins.
+usable band wins. Every stitched frame is also handed to the engine's step
+observer, which is how the correction learner sees each step's raw measurement.
+
+### Receiver corrections
+
+`correction/` holds three corrections the pipeline applies to every frame, so
+fixed tune and sweep get them alike and plugins see the result:
+
+- DC removal: `dsp::blockStats` yields each block's mean I/Q in the same pass
+  as the clipping check, and `convertAndWindow` subtracts it before the window.
+- Floor flattening: a `FloorShape` in dB against LO offset, 2048 points over
+  the sample rate, resampled to the running bin width; applied relative to its
+  median.
+- Spur mask: `SpurEntry` at an LO offset or an absolute frequency; the bins
+  under it are replaced by a line between the nearest measured neighbours.
+
+The switches are an atomic byte on the pipeline; the set is a
+`shared_ptr<const CorrectionSet>` read under the publish lock, applied on the
+frame's own bins once its centre is known. `CorrectionLearner` keeps a running
+mean in dB per local bin: smoothed, it is the floor; runs standing above that
+smoothing by more than the floor's remaining scatter are spurs. A calibration is
+bound to a `CalibrationContext` of every grid- or calibration-affecting device
+parameter except the centre; a differing one leaves the floor out. Each radio's
+set lives in `calibration/<driver>_<serial>.toml` under the config folder.
 
 ## The History viewer
 

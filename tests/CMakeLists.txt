@@ -3,6 +3,7 @@ set(SWEEPPP_TEST_SOURCES
     ReferenceFft.cpp
     test_antenna.cpp
     test_core.cpp
+    test_correction.cpp
     test_fft.cpp
     test_format.cpp
     test_golden.cpp

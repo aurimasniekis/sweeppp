@@ -676,6 +676,102 @@ TEST_CASE("pipeline end-to-end against the synthetic device") {
     CHECK(*maximum > *minimum + 10.0F);
 }
 
+TEST_CASE("the pipeline removes a DC offset and masks a configured spur") {
+    registerReferenceFftBackend();
+    registerBuiltinSdrDevices();
+
+    auto backend = FftBackendManager::instance().acquire("reference");
+    REQUIRE(backend.has_value());
+
+    // A quiet receiver with two artefacts and nothing else: the LO leak as a
+    // DC offset, and a fixed tone 300 kHz above the tuning, some 30 dB above
+    // the per-bin floor as a reference-clock harmonic would be. Float
+    // samples, because at -85 dBFS an 8-bit quantiser would round the noise
+    // away and leave nothing for the peaks to stand above.
+    constexpr double kRate = 2e6;
+    constexpr double kCenterHz = 100e6;
+    constexpr double kSpurHz = kCenterHz + 300e3;
+    constexpr std::uint32_t kFftSize = 1024;
+
+    auto device = SdrDeviceManager::instance().open("synthetic", "");
+    REQUIRE(device.has_value());
+    REQUIRE((*device)->setParameter("sample_rate", SdrValue{kRate}).has_value());
+    REQUIRE((*device)->setParameter("center_hz", SdrValue{kCenterHz}).has_value());
+    REQUIRE((*device)->setParameter("sample_format", SdrValue{std::string("cf32")}).has_value());
+    REQUIRE((*device)->setParameter("emitters", SdrValue{std::int64_t{0}}).has_value());
+    REQUIRE((*device)->setParameter("dc_offset", SdrValue{0.1}).has_value());
+    REQUIRE((*device)->setParameter("spur_hz", SdrValue{kSpurHz}).has_value());
+    REQUIRE((*device)->setParameter("spur_db", SdrValue{-80.0}).has_value());
+
+    const auto spurBin =
+        static_cast<std::size_t>((kSpurHz - (kCenterHz - kRate * 0.5)) / (kRate / kFftSize));
+    constexpr std::size_t kDcBin = kFftSize / 2;
+
+    const auto capture = [&](CorrectionSettings settings,
+                             std::shared_ptr<const CorrectionSet> set) {
+        FrameBus bus;
+        Telemetry telemetry;
+        EventBus events;
+        RecordingConsumer consumer;
+        bus.subscribe(&consumer);
+
+        // Averaged, so a single bin's chi-square scatter cannot put the floor
+        // itself ten dB up on one unlucky frame.
+        Pipeline pipeline(bus, telemetry, events);
+        REQUIRE(pipeline
+                    .configure(**backend, PipelineConfig{.fftSize = kFftSize,
+                                                         .window = WindowType::Hann,
+                                                         .workerCount = 1,
+                                                         .averageCount = 16,
+                                                         .targetFrameRate = 60.0})
+                    .has_value());
+        pipeline.setTuning(kCenterHz, kRate, kRate);
+        pipeline.setCorrectionSettings(settings);
+        pipeline.setCorrections(std::move(set));
+
+        REQUIRE(pipeline
+                    .start(**device, StreamConfig{.framesPerBlock = 16'384,
+                                                  .blockCount = 16,
+                                                  .format = (*device)->nativeFormat()})
+                    .has_value());
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        pipeline.stop();
+
+        const SpectrumFramePtr last = consumer.last();
+        REQUIRE(last);
+        REQUIRE(last->binCount() == kFftSize);
+        return last;
+    };
+
+    const auto medianLevel = [](const SpectrumFrame& frame) {
+        std::vector<float> sorted = frame.binsDbfs;
+        const auto middle = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
+        std::nth_element(sorted.begin(), middle, sorted.end());
+        return *middle;
+    };
+
+    // Positive control: with everything off, both artefacts stand well above
+    // the floor, so a pass below cannot be the peaks failing to appear.
+    const SpectrumFramePtr raw = capture(
+        CorrectionSettings{.dcRemoval = false, .flatten = false, .spurMask = false}, nullptr);
+    const float rawFloor = medianLevel(*raw);
+    CHECK(raw->binsDbfs[kDcBin] > rawFloor + 30.0F);
+    CHECK(raw->binsDbfs[spurBin] > rawFloor + 20.0F);
+
+    auto set = std::make_shared<CorrectionSet>();
+    set->spurs.push_back(
+        SpurEntry{.kind = SpurKind::Absolute, .hz = kSpurHz, .widthHz = 5.0 * kRate / kFftSize});
+
+    const SpectrumFramePtr corrected =
+        capture(CorrectionSettings{.dcRemoval = true, .flatten = false, .spurMask = true}, set);
+    const float correctedFloor = medianLevel(*corrected);
+    CHECK(corrected->binsDbfs[kDcBin] < correctedFloor + 10.0F);
+    CHECK(corrected->binsDbfs[spurBin] < correctedFloor + 10.0F);
+
+    // The floor itself did not move: a correction is not an attenuator.
+    CHECK(std::abs(correctedFloor - rawFloor) < 3.0F);
+}
+
 TEST_CASE("every-nth throttling processes exactly the requested fraction") {
     registerReferenceFftBackend();
     registerBuiltinSdrDevices();

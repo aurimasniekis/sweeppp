@@ -23,6 +23,9 @@ Result<Command> commandFromString(std::string_view name) {
     if (name == "replay") {
         return Command::Replay;
     }
+    if (name == "calibrate") {
+        return Command::Calibrate;
+    }
     if (name == "info") {
         return Command::Info;
     }
@@ -193,6 +196,18 @@ Result<Options> parseArguments(int argc, char** argv) {
                 return std::unexpected(value.error());
             }
             options.workerCount = static_cast<std::uint32_t>(*value);
+        } else if (argument == "--no-dc-removal") {
+            options.dcRemoval = false;
+        } else if (argument == "--flatten") {
+            options.flatten = true;
+        } else if (argument == "--spur-mask") {
+            options.spurMask = true;
+        } else if (argument == "--calibration") {
+            auto value = reader.value(argument, inlineValue);
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.calibrationPath = *value;
         } else if (argument == "--sample-rate") {
             auto value = frequencyValue();
             if (!value) {
@@ -314,6 +329,7 @@ USAGE
 
 COMMANDS
   sweep      Sweep and write CSV. The throughput and correctness harness.
+  calibrate  Learn the receiver's floor and spurs. Disconnect the antenna first.
   record     Capture to a .sweeps session file, no GUI.
   serve      Run the engine and expose the remote protocol. Not available yet.
   replay     Play back a .sweeps file.
@@ -344,6 +360,11 @@ ANALYSIS
   --overlap <fraction>     0..0.95
   --average <n>            FFTs averaged per emitted frame
   --workers <n>            0 = cores - 2
+  --no-dc-removal          keep the LO leak; DC removal is on by default
+  --flatten                subtract the learned floor shape
+  --spur-mask              interpolate across the learned spurs
+  --calibration <file>     calibration to read (sweep) or write (calibrate);
+                           default: the radio's own in the config folder
 
 THROUGHPUT
   --throttle <mode>        auto | every-nth | all-samples (default: auto)
@@ -374,6 +395,10 @@ EXAMPLES
 
   # Sweep 2.4 GHz for Wi-Fi, 10 kHz RBW, to CSV
   sweeppp-cli sweep --start 2.4G --stop 2.5G --rbw 10k -o wifi.csv
+
+  # Learn a bladeRF's floor and spurs with no antenna, then sweep through them
+  sweeppp-cli calibrate --device bladerf --start 2300M --stop 3400M --sample-rate 61.44M
+  sweeppp-cli sweep --device bladerf --start 2300M --stop 3400M --flatten --spur-mask
 
   # What is available in this build?
   sweeppp-cli info)");

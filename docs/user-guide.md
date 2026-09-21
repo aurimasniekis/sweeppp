@@ -198,7 +198,27 @@ need; **Advanced** shows all of them.
     bandwidth are less accurate, so they are cropped.
   - **Step overlap:** extra overlap between steps so there are no gaps.
   - **LO guard:** removes the spike many radios show at the centre of each
-    step.
+    step. Once corrections are learned (below), set it to 0 for about twice the
+    sweep speed.
+- **Corrections:** what the receiver adds on its own, removed from every frame.
+  - **DC removal:** removes the LO spike at the centre of each step. On by
+    default. A carrier sitting exactly on the LO is removed with it.
+  - **Flatten floor:** subtracts the learned floor shape, levelling the hump
+    around each step's LO. Greyed out until learned, and marked **stale** when
+    a gain, bandwidth or sample rate differs from when it was learned: learn
+    again at the new setting. A signal close to a step's LO can read low by up
+    to the hump's height.
+  - **Spur mask:** replaces the learned spurs with a line between their
+    neighbours.
+  - **Auto spurs** (sweeping): keeps looking for LO-offset spurs the mask does
+    not cover yet and adds them for this session. Never saved. **Clear auto
+    spurs** drops them.
+  - **Learn:** disconnect the antenna (or fit a 50 Ω load), start
+    acquisition, press it. Sweeping, it takes about ten passes: one for the
+    floor and the LO-offset spurs, the rest through them for spurs at fixed
+    frequencies. Fixed tune, it takes 200 frames. The result is saved per
+    radio under `calibration/` in the [config folder](#where-settings-are-stored)
+    and applied whenever that radio is opened. **Clear** forgets it.
 - **Backend:** which FFT engine does the maths. **Bench** opens the FFT
   benchmark, which times every installed engine on your computer and offers to
   switch to the fastest.

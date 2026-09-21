@@ -11,6 +11,9 @@ set(SWEEPPP_SOURCES
 
     src/dsp/Convert.cpp
 
+    src/correction/CorrectionLearner.cpp
+    src/correction/Corrections.cpp
+
     src/fft/FftBackendManager.cpp
     src/fft/FftBenchmark.cpp
     src/fft/IFftBackend.cpp

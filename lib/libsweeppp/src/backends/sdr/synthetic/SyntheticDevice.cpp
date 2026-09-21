@@ -98,6 +98,15 @@ public:
         if (key == "noise_floor") {
             return SdrValue{m_noiseFloorDb.load()};
         }
+        if (key == "dc_offset") {
+            return SdrValue{m_dcOffset.load()};
+        }
+        if (key == "spur_hz") {
+            return SdrValue{m_spurHz.load()};
+        }
+        if (key == "spur_db") {
+            return SdrValue{m_spurDb.load()};
+        }
         if (key == "emitters") {
             return SdrValue{std::int64_t{m_emitterCount.load()}};
         }
@@ -130,6 +139,12 @@ public:
             m_gainDb.store(static_cast<int>(asInt(*coerced)));
         } else if (key == "noise_floor") {
             m_noiseFloorDb.store(asDouble(*coerced));
+        } else if (key == "dc_offset") {
+            m_dcOffset.store(asDouble(*coerced));
+        } else if (key == "spur_hz") {
+            m_spurHz.store(asDouble(*coerced));
+        } else if (key == "spur_db") {
+            m_spurDb.store(asDouble(*coerced));
         } else if (key == "emitters") {
             m_emitterCount.store(static_cast<int>(asInt(*coerced)));
             buildEmitters();
@@ -337,6 +352,55 @@ private:
                          .requiresStop = false,
                          .description = "Thermal noise level of the simulated receiver.",
                          .defaultValue = -85.0},
+            SdrParameter{.key = "dc_offset",
+                         .label = "DC offset",
+                         .group = "Simulation",
+                         .type = SdrParameterType::Double,
+                         .unit = {},
+                         .min = 0.0,
+                         .max = 0.5,
+                         .step = 0.001,
+                         .enumValues = {},
+                         .readOnly = false,
+                         .gridAffecting = false,
+                         .calibrationAffecting = false,
+                         .requiresStop = false,
+                         .description = "Constant added to I and Q, as a fraction of full scale: "
+                                        "the LO leak of a direct-conversion receiver, for "
+                                        "exercising DC removal.",
+                         .defaultValue = 0.0},
+            SdrParameter{.key = "spur_hz",
+                         .label = "Spur frequency",
+                         .group = "Simulation",
+                         .type = SdrParameterType::Double,
+                         .unit = "Hz",
+                         .min = 0.0,
+                         .max = 6e9,
+                         .step = 1.0,
+                         .enumValues = {},
+                         .readOnly = false,
+                         .gridAffecting = false,
+                         .calibrationAffecting = false,
+                         .requiresStop = false,
+                         .description = "A fixed tone at this absolute frequency, like a "
+                                        "reference-clock harmonic. Zero for none.",
+                         .defaultValue = 0.0},
+            SdrParameter{.key = "spur_db",
+                         .label = "Spur level",
+                         .group = "Simulation",
+                         .type = SdrParameterType::Double,
+                         .unit = "dBFS",
+                         .min = -120.0,
+                         .max = 0.0,
+                         .step = 0.5,
+                         .enumValues = {},
+                         .readOnly = false,
+                         .gridAffecting = false,
+                         .calibrationAffecting = false,
+                         .requiresStop = false,
+                         .description = "Level of the fixed tone. Not scaled by gain, as a "
+                                        "spur past the front end would not be.",
+                         .defaultValue = -30.0},
             SdrParameter{.key = "emitters",
                          .label = "Emitters",
                          .group = "Simulation",
@@ -512,9 +576,15 @@ private:
             // 50 ms keeps a 200 ms pulsed burst clearly resolved, so the
             // transient the LOD pyramid must preserve is still generated
             // faithfully.
+            //
+            // A fixed-frequency spur is the one thing whose place in the block
+            // depends on the tuning, so while one is configured a retune also
+            // forces a refresh -- otherwise a sweep would carry it at the old
+            // step's offset for up to 50 ms of steps.
             constexpr double kRefreshSeconds = 0.05;
             if (lastRefreshTime < 0.0 || timeBase - lastRefreshTime >= kRefreshSeconds ||
-                m_templateFrames != frames || m_templateFormat != m_format) {
+                m_templateFrames != frames || m_templateFormat != m_format ||
+                (m_spurHz.load() != 0.0 && centerHz != m_templateCenterHz)) {
                 fillBlock(frames, emitters, centerHz, sampleRate, timeBase, gainLinear,
                           noiseAmplitude, rng, noise);
                 lastRefreshTime = timeBase;
@@ -544,13 +614,30 @@ private:
     void fillBlock(std::size_t frames, std::vector<Emitter>& emitters, double centerHz,
                    double sampleRate, double timeBase, double gainLinear, double noiseAmplitude,
                    std::mt19937& rng, std::normal_distribution<float>& noise) {
-        (void)centerHz;
-
         m_scratch.resize(frames * 2);
+        m_templateCenterHz = centerHz;
 
+        const auto dcOffset = static_cast<float>(m_dcOffset.load());
         for (std::size_t i = 0; i < frames; ++i) {
-            m_scratch[2 * i] = noise(rng) * static_cast<float>(noiseAmplitude);
-            m_scratch[2 * i + 1] = noise(rng) * static_cast<float>(noiseAmplitude);
+            m_scratch[2 * i] = noise(rng) * static_cast<float>(noiseAmplitude) + dcOffset;
+            m_scratch[2 * i + 1] = noise(rng) * static_cast<float>(noiseAmplitude) + dcOffset;
+        }
+
+        // The receiver's own tone: at a fixed absolute frequency, so it lands
+        // at a different offset for every tuning, and at a level the gain
+        // does not touch.
+        if (const double spurHz = m_spurHz.load(); spurHz > 0.0) {
+            const double normalisedFrequency = (spurHz - centerHz) / sampleRate;
+            if (std::abs(normalisedFrequency) < 0.5) {
+                const double amplitude = std::pow(10.0, m_spurDb.load() / 20.0);
+                const double omega = kTwoPi * normalisedFrequency;
+                for (std::size_t i = 0; i < frames; ++i) {
+                    const double phase = m_spurPhase + omega * static_cast<double>(i);
+                    m_scratch[2 * i] += static_cast<float>(amplitude * std::cos(phase));
+                    m_scratch[2 * i + 1] += static_cast<float>(amplitude * std::sin(phase));
+                }
+                m_spurPhase = std::fmod(m_spurPhase + omega * static_cast<double>(frames), kTwoPi);
+            }
         }
 
         for (Emitter& emitter : emitters) {
@@ -631,6 +718,10 @@ private:
     std::atomic<double> m_sampleRate{20e6};
     std::atomic<int> m_gainDb{20};
     std::atomic<double> m_noiseFloorDb{-85.0};
+    std::atomic<double> m_dcOffset{0.0};
+    std::atomic<double> m_spurHz{0.0};
+    std::atomic<double> m_spurDb{-30.0};
+    double m_spurPhase = 0.0;
     std::atomic<int> m_emitterCount{6};
     std::atomic<bool> m_simulateOverruns{false};
     SampleFormat m_format = SampleFormat::Cs8;
@@ -650,6 +741,7 @@ private:
     std::vector<std::byte> m_template;
     std::size_t m_templateFrames = 0;
     SampleFormat m_templateFormat = SampleFormat::Cs8;
+    double m_templateCenterHz = 0.0;
 
     std::atomic<StreamCounters*> m_telemetry{nullptr};
 };

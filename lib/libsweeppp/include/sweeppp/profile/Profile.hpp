@@ -4,6 +4,7 @@
 #pragma once
 
 #include "sweeppp/core/Result.hpp"
+#include "sweeppp/correction/Corrections.hpp"
 #include "sweeppp/pipeline/Pipeline.hpp"
 #include "sweeppp/sdr/SdrParameter.hpp"
 #include "sweeppp/sweep/SweepPlan.hpp"
@@ -42,6 +43,12 @@ struct Profile {
     bool sweeping = true;
 
     PipelineConfig pipeline;
+
+    /// The correction switches, beside the pipeline config rather than in it:
+    /// a `PipelineConfig` change restarts acquisition, and flipping the spur
+    /// mask must not.
+    CorrectionSettings corrections;
+
     ui::ViewSettings view;
 
     /// Split between the spectrum and the waterfall, as a fraction.

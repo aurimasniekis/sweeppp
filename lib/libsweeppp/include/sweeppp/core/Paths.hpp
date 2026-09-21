@@ -53,6 +53,15 @@ public:
     /// and loading a sweep profile must not silently rewire it.
     [[nodiscard]] std::filesystem::path antennasDir() const { return m_configDir / "antennas"; }
 
+    /// Learned receiver corrections, one file per radio.
+    ///
+    /// Not in a profile for the same reason the antennas are not: a floor
+    /// shape and a spur list are facts about one radio, and loading a job
+    /// must not carry another radio's calibration onto this one.
+    [[nodiscard]] std::filesystem::path calibrationDir() const {
+        return m_configDir / "calibration";
+    }
+
     /// Where live sessions and recordings land by default.
     [[nodiscard]] std::filesystem::path sessionsDir() const { return m_configDir / "sessions"; }
 

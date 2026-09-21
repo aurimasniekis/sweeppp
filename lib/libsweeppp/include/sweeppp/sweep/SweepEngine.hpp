@@ -13,6 +13,7 @@
 #include "sweeppp/sweep/SweepPlan.hpp"
 
 #include <atomic>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -76,6 +77,16 @@ public:
     /// Receives per-step frames from the pipeline's bus.
     void onFrame(const SpectrumFramePtr& frame) noexcept override;
     [[nodiscard]] std::string_view consumerName() const noexcept override { return "sweep-engine"; }
+
+    /// Sees every frame the engine accepts for stitching, with the step it
+    /// was attributed to -- exactly the frames `frameAccounting().stitched`
+    /// counts, and none of the ones it rejected.
+    ///
+    /// For the correction learner, which wants each step's raw measurement
+    /// rather than the stitched grid. Runs on the bus thread, under the same
+    /// contract as `onFrame`: it must not block. Empty removes it.
+    using StepObserver = std::function<void(const SpectrumFrame&, const SweepStep&)>;
+    void setStepObserver(StepObserver observer);
 
     [[nodiscard]] const SweepSchedule& schedule() const noexcept { return m_schedule; }
     [[nodiscard]] const SweepPlan& plan() const noexcept { return m_plan; }
@@ -175,6 +186,10 @@ private:
     std::atomic<std::uint64_t> m_unsettledFrames{0};
     std::atomic<std::uint64_t> m_unattributedFrames{0};
     std::atomic<std::uint64_t> m_shortFrames{0};
+
+    /// Guarded by m_gridMutex, and copied out before it is called so the
+    /// caller may replace it from inside its own callback.
+    StepObserver m_stepObserver;
 
     /// The stitched grid, and which bins have been written this pass.
     mutable std::mutex m_gridMutex;

@@ -619,6 +619,12 @@ void MainWindow::draw() {
     if (m_closeRequested) {
         drawClosePrompt();
     }
+    if (m_showLearnPrompt) {
+        drawLearnPrompt();
+    }
+    if (m_showClearCorrectionsPrompt) {
+        drawClearCorrectionsPrompt();
+    }
 
     // A plugin's own floating window, beside the application's own and outside
     // every popup and child: the argument for the spot existing is that these

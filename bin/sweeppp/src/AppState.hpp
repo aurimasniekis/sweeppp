@@ -13,6 +13,8 @@
 #include <string>
 #include <sweeppp/core/EventBus.hpp>
 #include <sweeppp/core/Telemetry.hpp>
+#include <sweeppp/correction/CorrectionLearner.hpp>
+#include <sweeppp/correction/Corrections.hpp>
 #include <sweeppp/fft/FftBackendManager.hpp>
 #include <sweeppp/history/IFrameSource.hpp>
 #include <sweeppp/history/SessionRecorder.hpp>
@@ -298,6 +300,49 @@ public:
     /// nobody has assigned is left alone: opening it would claim a serial port
     /// or a USB handle to answer a question nothing is asking.
     void refreshSwitchers();
+
+    // ---- receiver corrections --------------------------------------------
+    //
+    // DC removal, floor flattening and a spur mask, applied by the pipeline to
+    // every frame, and the learn that produces the floor and the spurs. The
+    // switches travel in a profile; what they apply is a file per radio,
+    // loaded when the radio is adopted.
+
+    [[nodiscard]] const CorrectionSettings& correctionSettings() const noexcept {
+        return m_correctionSettings;
+    }
+
+    /// Takes effect on the next block, with no restart.
+    void setCorrectionSettings(const CorrectionSettings& settings);
+
+    /// What was learned for the open radio, or null when nothing has been.
+    [[nodiscard]] const CorrectionSet* corrections() const noexcept;
+
+    /// Why the learned floor is not being applied: the first setting that
+    /// differs from when it was learned, or empty while it applies.
+    [[nodiscard]] const std::string& floorStaleReason() const noexcept {
+        return m_floorStaleReason;
+    }
+
+    [[nodiscard]] std::size_t spurCount() const noexcept;
+    [[nodiscard]] std::size_t automaticSpurCount() const noexcept;
+
+    /// Learns the floor and the spurs from what the receiver shows with no
+    /// signal in. Needs acquisition running, and the antenna off.
+    [[nodiscard]] Status startLearning();
+    [[nodiscard]] bool learning() const noexcept { return m_learn.has_value(); }
+    [[nodiscard]] std::string learningLabel() const;
+    void cancelLearning();
+
+    /// Drops the spurs found automatically this session.
+    void clearAutoSpurs();
+
+    /// Forgets everything learned for the open radio, file included.
+    void clearCorrections();
+
+    /// The learn's own numbers, for the prompt that starts one.
+    [[nodiscard]] static std::size_t learnPasses() noexcept;
+    static constexpr std::size_t kLearnFrames = 200;
 
     [[nodiscard]] bool sweeping() const noexcept { return m_sweeping; }
 
@@ -654,6 +699,70 @@ private:
     /// Held from `initialise` until the startup lands, because the parameters
     /// and the sweep plan it carries are applied to the device that arrives.
     std::optional<Profile> m_startupProfile;
+
+    // ---- corrections ------------------------------------------------------
+
+    [[nodiscard]] CalibrationContext currentContext() const;
+
+    /// The switches as the pipeline should see them: a learn in progress
+    /// overrides the flatten and mask switches for its own phases.
+    [[nodiscard]] CorrectionSettings effectiveCorrectionSettings() const noexcept;
+    void pushCorrectionSettings();
+
+    /// Reads the open radio's calibration file, or clears it.
+    void loadCalibration();
+
+    /// Hands the pipeline the set, minus the floor when the context has
+    /// moved since it was learned.
+    void installCorrections();
+    void refreshFloorStaleness();
+
+    /// A learn, from the button to the saved file.
+    struct LearnRun {
+        /// Sweep: one pass for the floor and the LO-offset spurs, then
+        /// several through them for whatever stands at a fixed frequency.
+        /// Fixed tune: one phase, everything absolute.
+        enum class Phase : std::uint8_t { LoOffsets, Absolute, Fixed };
+        Phase phase = Phase::LoOffsets;
+        CorrectionSettings savedSettings;
+        CalibrationContext context;
+        CorrectionLearner learner;
+        FloorShape floor;
+        std::vector<SpurEntry> loSpurs;
+        std::uint64_t passesHandled = 0;
+        /// The pass in progress when the LO-offset set went in; only a pass
+        /// completed after it was measured through the set throughout.
+        std::uint64_t installedAtPass = 0;
+        /// The stitched grid's own learner, one frame per completed pass.
+        CorrectionLearner gridLearner;
+    };
+
+    /// Called per frame on the UI thread, where the heavy end of a learn runs.
+    void advanceLearning();
+    void finishLearning(const std::vector<SpurEntry>& absoluteSpurs);
+    void abortLearning();
+
+    /// Each accepted step frame, on the bus thread.
+    void observeStep(const SpectrumFrame& frame) noexcept;
+
+    void beginAutoSpurs();
+    void endAutoSpurs();
+    void updateAutoSpurs();
+
+    CorrectionSettings m_correctionSettings;
+    std::optional<CorrectionSet> m_corrections;
+    std::string m_floorStaleReason;
+
+    /// Guards the two learners and `m_learn` itself, which the bus thread
+    /// reads and the UI thread replaces.
+    mutable std::mutex m_learnMutex;
+    std::optional<LearnRun> m_learn;
+    std::optional<CorrectionLearner> m_autoLearner;
+    std::uint64_t m_autoPassesHandled = 0;
+
+    /// Sweep passes completed, counted on the sweep thread and polled by the
+    /// UI thread, so a phase change never runs on the thread that raised it.
+    std::atomic<std::uint64_t> m_passesSeen{0};
 
     /// The consumer callback parks the newest frame here and returns; the UI
     /// thread picks it up. Nothing expensive happens on the publishing thread.

@@ -2114,7 +2114,9 @@ void MainWindow::drawAnalysisSection() {
 
             auto dcGuard = static_cast<float>(plan.dcGuardFraction);
             field("LO guard", "Discards the LO leak at each step's centre. Roughly halves the "
-                              "sweep rate; zero leaves evenly spaced LO peaks.");
+                              "sweep rate; zero leaves evenly spaced LO peaks.\n"
+                              "Once corrections are learned below, zero takes the speed back "
+                              "with the peaks removed.");
             if (ImGui::SliderFloat("##dcguard", &dcGuard, 0.0F, 0.2F, "%.3f")) {
                 plan.dcGuardFraction = static_cast<double>(dcGuard);
                 planChanged = true;
@@ -2221,6 +2223,8 @@ void MainWindow::drawAnalysisSection() {
         }
     }
 
+    drawCorrectionsBlock(sweeping);
+
     // What the plan will actually do, before it is started.
     if (sweeping && !m_state.sweepEngine().schedule().steps.empty()) {
         const SweepSchedule& schedule = m_state.sweepEngine().schedule();
@@ -2241,6 +2245,201 @@ void MainWindow::drawAnalysisSection() {
     }
 
     ImGui::Unindent(6.0F);
+}
+
+void MainWindow::drawCorrectionsBlock(bool sweeping) {
+    ImGui::SeparatorText("Corrections");
+
+    CorrectionSettings corrections = m_state.correctionSettings();
+    const CorrectionSet* learned = m_state.corrections();
+    const bool haveFloor = learned != nullptr && !learned->floor.empty();
+    const std::string& stale = m_state.floorStaleReason();
+    const std::size_t spurs = m_state.spurCount();
+    const std::size_t automatic = m_state.automaticSpurCount();
+    bool changed = false;
+
+    // Two switches to a row. Measured from where the row starts rather than
+    // from the window edge, for the reason `field` gives.
+    const float rowStart = ImGui::GetCursorPosX();
+    const float column = ImGui::GetContentRegionAvail().x * 0.5F;
+    const auto secondColumn = [&] {
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(rowStart + column);
+    };
+    const auto tip = [](const char* text, bool evenDisabled = false) {
+        if (ImGui::IsItemHovered(evenDisabled ? ImGuiHoveredFlags_AllowWhenDisabled : 0)) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0F);
+            ImGui::TextUnformatted(text);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    };
+
+    changed |= ImGui::Checkbox("DC removal", &corrections.dcRemoval);
+    tip("Subtracts each block's mean I/Q before the FFT, removing the LO leak at the centre "
+        "of every step. A carrier exactly on the LO goes with it.");
+
+    secondColumn();
+    ImGui::BeginDisabled(!haveFloor || !stale.empty());
+    changed |= ImGui::Checkbox("Flatten floor", &corrections.flatten);
+    ImGui::EndDisabled();
+    tip(!haveFloor       ? "Subtracts the learned floor shape. Nothing is learned yet: press Learn."
+        : !stale.empty() ? "The learned floor is not applied: a setting differs from when it "
+                           "was learned. Learn again at this setting."
+                         : "Subtracts the learned floor shape, levelling the hump around each "
+                           "step's LO. A signal close to a step's LO can read low by up to the "
+                           "hump's height; Best stitching already prefers the measurement "
+                           "further from the LO.",
+        true);
+
+    ImGui::BeginDisabled(spurs == 0);
+    changed |= ImGui::Checkbox("Spur mask", &corrections.spurMask);
+    ImGui::EndDisabled();
+    tip(spurs == 0 ? "Replaces the learned spurs with a line between their neighbours. "
+                     "Nothing is learned yet: press Learn."
+                   : "Replaces the bins under each learned spur with a line between their "
+                     "neighbours.",
+        true);
+
+    if (sweeping) {
+        secondColumn();
+        changed |= ImGui::Checkbox("Auto spurs", &corrections.autoSpurs);
+        tip("Keeps looking, pass by pass, for LO-offset spurs the mask does not cover yet, "
+            "and adds them for this session. Never saved.");
+    }
+
+    if (changed) {
+        m_state.setCorrectionSettings(corrections);
+    }
+
+    // One line for what is known, then the two actions.
+    std::string status;
+    if (learned == nullptr) {
+        status = "nothing learned for this radio";
+    } else {
+        status = !haveFloor       ? "no floor"
+                 : !stale.empty() ? std::format("floor stale ({} changed)", stale)
+                                  : "floor";
+        status += std::format(", {} spur{}", spurs, spurs == 1 ? "" : "s");
+        if (automatic > 0) {
+            status += std::format(" ({} auto)", automatic);
+        }
+        if (learned->learnedAt.size() >= 10) {
+            status += std::format(", learned {}", learned->learnedAt.substr(0, 10));
+        }
+    }
+    ImGui::TextDisabled("%s", status.c_str());
+
+    if (m_state.learning()) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(m_state.learningLabel().c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cancel")) {
+            m_state.cancelLearning();
+        }
+        return;
+    }
+
+    ImGui::BeginDisabled(!m_state.running());
+    if (ImGui::Button("Learn")) {
+        m_showLearnPrompt = true;
+    }
+    ImGui::EndDisabled();
+    tip(m_state.running() ? "Learn the floor and the spurs from what the receiver shows with "
+                            "nothing connected, and save them for this radio."
+                          : "Start acquisition first.",
+        true);
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(learned == nullptr);
+    if (ImGui::Button("Clear")) {
+        m_showClearCorrectionsPrompt = true;
+    }
+    ImGui::EndDisabled();
+    tip("Forget what was learned for this radio.", true);
+}
+
+void MainWindow::drawLearnPrompt() {
+    constexpr const char* kId = "Learn receiver corrections";
+    ImGui::OpenPopup(kId);
+
+    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+
+    if (ImGui::BeginPopupModal(kId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0F);
+        ImGui::TextUnformatted("Disconnect the antenna, or fit a 50-ohm load on the input, so "
+                               "the receiver measures only itself. Anything in the air while "
+                               "it learns is masked out of every sweep after.");
+        ImGui::Spacing();
+        if (m_state.sweeping()) {
+            const double passSeconds = m_state.sweepEngine().schedule().estimatedPassSeconds;
+            ImGui::TextUnformatted(
+                std::format(
+                    "Takes about {} passes, roughly {}.", AppState::learnPasses(),
+                    formatDuration(passSeconds * static_cast<double>(AppState::learnPasses())))
+                    .c_str());
+        } else {
+            ImGui::TextUnformatted(
+                std::format("Takes {} frames at this tuning.", AppState::kLearnFrames).c_str());
+        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("Use the gain, bandwidth and sample rate you will sweep with: the "
+                            "floor only applies while they match.");
+        ImGui::PopTextWrapPos();
+        ImGui::Separator();
+
+        if (ImGui::Button("Learn", ImVec2(120, 0))) {
+            if (auto started = m_state.startLearning(); !started) {
+                toast(ToastSeverity::Error, started.error().describe());
+            }
+            m_showLearnPrompt = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            m_showLearnPrompt = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void MainWindow::drawClearCorrectionsPrompt() {
+    constexpr const char* kId = "Clear corrections?";
+    ImGui::OpenPopup(kId);
+
+    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+
+    if (ImGui::BeginPopupModal(kId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        const std::size_t automatic = m_state.automaticSpurCount();
+        ImGui::TextWrapped("Forget the learned floor and spurs for this radio? Its calibration "
+                           "file is deleted; Learn makes a new one.");
+        ImGui::Separator();
+
+        if (ImGui::Button("Clear", ImVec2(120, 0))) {
+            m_state.clearCorrections();
+            toast(ToastSeverity::Info, "Corrections cleared");
+            m_showClearCorrectionsPrompt = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (automatic > 0) {
+            ImGui::SameLine();
+            if (ImGui::Button("Only auto spurs", ImVec2(140, 0))) {
+                m_state.clearAutoSpurs();
+                m_showClearCorrectionsPrompt = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            m_showClearCorrectionsPrompt = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 }
 
 void MainWindow::drawDisplaySection() {
