@@ -5,8 +5,9 @@ Sweep++ comes with three command-line programs besides the GUI:
 - [`sweeppp-cli`](#sweeppp-cli) sweeps, records and inspects without a window;
 - [`sweeps`](#sweeps) reads `.sweeps` recordings, with nothing else from
   Sweep++ needed;
-- [`sweeppp-server`](#sweeppp-server) is a placeholder that doesn't do anything
-  yet.
+- [`sweeppp-server`](#sweeppp-server) is a placeholder for a web interface,
+  and doesn't do anything yet. To use a radio from another computer, see
+  [`serve`](#serve).
 
 When built from source they're in `build/<preset>/dist/`. The `.deb` package
 installs them to `/usr/bin`.
@@ -42,7 +43,7 @@ sweeppp-cli <command> [options]
 | [`replay`](#replay)   | Play a `.sweeps` file back as CSV.                                       |
 | [`info`](#info)       | Describe this build (FFT engines, radios, plugins), or a `.sweeps` file. |
 | [`extract`](#extract) | Cut a time and frequency range out of a `.sweeps` file.                  |
-| `serve`               | **Not available yet.** Exits with an error.                              |
+| [`serve`](#serve)     | Serve a radio to the desktop app on another computer.                    |
 | `help`                | Print the usage.                                                         |
 | `version`             | Print the version and build details.                                     |
 
@@ -122,8 +123,14 @@ Options can be written as `--option value` or `--option=value`. A word with no
 |----------------------|--------------------------------------------------------------|----------------------------------------------------------------------|
 | `--config-dir <dir>` | [the config folder](user-guide.md#where-settings-are-stored) | Use this folder for settings, antennas, plugins and the log instead. |
 
-`--listen`, `--port` and `--token` are accepted but unused until `serve`
-exists.
+**Serve**
+
+| Option                | Default     | Meaning                                                                |
+|-----------------------|-------------|------------------------------------------------------------------------|
+| `--listen <address>`  | `127.0.0.1` | Address to listen on. `0.0.0.0` for every interface.                   |
+| `--port <n>`          | `7332`      | Port. `0` picks a free one and prints it.                              |
+| `--token <secret>`    |             | Required on any address but loopback.                                  |
+| `--token-file <path>` |             | The token from a file. The `SWEEPPP_REMOTE_TOKEN` variable also works. |
 
 ### Radio settings
 
@@ -278,6 +285,38 @@ sweeppp-cli extract ism.sweeps --from 1min --to 2min --start 433M --stop 435M -o
 `--from` and `--to` are times from the start of the recording; `--start` and
 `--stop` are frequencies. Leave any of them out to keep everything in that
 direction.
+
+### `serve`
+
+Runs a radio for the desktop app on another computer to use. The FFT,
+sweeping, corrections and antenna routing run here; the desktop receives the
+spectrum.
+
+```sh
+sweeppp-cli serve --device hackrf --listen 0.0.0.0 --token-file ~/.sweeppp-token
+```
+
+- One desktop at a time; a second is refused until the first disconnects.
+- When the desktop disconnects, the radio stops. Its settings stay until
+  `serve` exits.
+- Antennas, assignments and corrections are kept in this computer's config
+  folder (`--config-dir` to change it).
+- `--fft-backend`, `--rx-port` and `--param` set how the radio starts.
+- Plugins that process the spectrum run on the desktop, not here.
+- Ctrl-C disconnects the desktop and exits.
+- A 70 MHz–6 GHz sweep at 61.44 MS/s and 5.6 kHz resolution sends about
+  1.7 MB per pass.
+
+The connection is not encrypted. Over an untrusted network, use SSH or
+WireGuard:
+
+```sh
+ssh -L 7332:127.0.0.1:7332 pi.local sweeppp-cli serve --device hackrf
+```
+
+Then add `127.0.0.1:7332` as a server in the desktop app.
+
+From a source checkout, `make serve` serves the synthetic radio on loopback.
 
 ## `sweeps`
 

@@ -7,6 +7,7 @@ for using Sweep++, see the [user guide](user-guide.md).
 - [Repository layout](#repository-layout)
 - [libsweeppp modules](#libsweeppp-modules)
 - [Data flow](#data-flow)
+- [Remote instruments](#remote-instruments)
 - [Sweep planning](#sweep-planning)
 - [The History viewer](#the-history-viewer)
 - [The plugin host](#the-plugin-host)
@@ -23,9 +24,11 @@ lib/libsweepsfile/  the .sweeps container: format spec, reader, writer, C ABI,
 lib/libsweeppp/     the core, as a static library. Links nothing GPL; every FFT
                     engine and every radio except two is a plugin.
                     core/ dsp/ fft/ sdr/ backends/ rf/ sweep/ pipeline/
-                    history/ plugin/ profile/ ui/
+                    instrument/ history/ net/ crypto/ remote/ plugin/
+                    profile/ ui/
 bin/                sweeppp/         the desktop GUI
-                    sweeppp-cli/     headless sweep, record, replay, info, extract
+                    sweeppp-cli/     headless sweep, record, replay, info, extract,
+                                     and serve
                     sweeppp-server/  placeholder for a future web interface
 plugins/            bandplan/ channels/ detections/
                     fft-pocketfft/ fft-fftw/ fft-accelerate/
@@ -50,20 +53,24 @@ Each plugin has its own `tests/` directory. Headers are under
 `libsweeppp` is a static library. It publicly links `sweeps::sweepsfile`,
 toml++ and threads, and no FFT or radio library.
 
-| Module      | What it does                                                                                                                                                                                 | Key types                                                                                                                       |
-|-------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `core/`     | Lock-free building blocks, events, telemetry, paths, TOML helpers, logging, crash handler, version.                                                                                          | `BlockPool`/`BlockRef`, `MpmcQueue`, `EventBus`, `Telemetry`, `Paths`, `toml_util`, `Log`, `CrashHandler`, `Result`/`Status`    |
-| `dsp/`      | Sample-format conversion with the window applied in the same pass, magnitude to dBFS, fftshift.                                                                                              | `convertAndWindow`, `magnitudeToDbfs`                                                                                           |
-| `fft/`      | The FFT abstraction and registry. It has no engines of its own; they all come from plugins. Also window functions and the benchmark.                                                         | `IFftBackend`, `IFftPlan`, `FftBackendManager`, `Window`, `FftBenchmark`                                                        |
-| `sdr/`      | The radio abstraction. Devices push blocks borrowed from a pool; settings are generic so panels can be generated from them.                                                                  | `ISdrDevice`, `ISdrDeviceFactory`, `SdrDeviceManager`, `SdrParameter`/`SdrValue`, `SampleFormat`, `IqBlock`, `SdrRxPort`        |
-| `backends/` | The two radios that need no external library: the synthetic generator and IQ-file replay.                                                                                                    | `registerBuiltinSdrDevices()`                                                                                                   |
-| `rf/`       | What sits in front of the tuner: the antenna library, which antenna is on which input, switchers, and resolving that chain into routable legs.                                               | `AntennaLibrary`, `AntennaAssignments`, `IRfPath`, `RfPathManager`, `resolveRfPath()`, `RfLeg`                                  |
-| `sweep/`    | The plan model, the planner that turns a plan into a schedule, the engine that tunes and stitches, presets, and back/forward range history.                                                  | `SweepPlan`/`SweepSegment`, `SweepPlanner`, `SweepSchedule`/`SweepStep`, `SweepEngine`, `SweepPresetStore`, `SweepRangeHistory` |
-| `pipeline/` | Turns IQ blocks into spectrum frames and fans them out to consumers.                                                                                                                         | `Pipeline`, `PipelineConfig`, `FrameBus`, `IFrameConsumer`, `AsyncFrameConsumer`, `SpectrumFrame`                               |
-| `history/`  | A thin layer over libsweepsfile: a threaded recorder and replay.                                                                                                                             | `session::SessionRecorder`, `SessionReplay`, `IFrameSource`                                                                     |
-| `plugin/`   | The plugin host: search path, loading, manifests and dependencies, adapters from facets to host interfaces, events, contributors, UI dispatch. Also the headers plugins are written against. | `PluginManager`, `PluginAbi.h`, `Plugin.hpp`, `PluginSdr.hpp`, `PluginFft.hpp`, `PluginChrome.hpp`                              |
-| `profile/`  | One TOML-backed struct for the whole setup. `settings.toml` and named profiles are the same type.                                                                                            | `Profile`                                                                                                                       |
-| `ui/`       | UI state with no rendering in it.                                                                                                                                                            | `Theme`, `ColorMap`, `TraceStore`, `Marker`/`MarkerPresetStore`, `ToastCenter`, `ViewSettings`                                  |
+| Module        | What it does                                                                                                                                                                                 | Key types                                                                                                                       |
+|---------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
+| `core/`       | Lock-free building blocks, events, telemetry, paths, TOML helpers, logging, crash handler, version.                                                                                          | `BlockPool`/`BlockRef`, `MpmcQueue`, `EventBus`, `Telemetry`, `Paths`, `toml_util`, `Log`, `CrashHandler`, `Result`/`Status`    |
+| `dsp/`        | Sample-format conversion with the window applied in the same pass, magnitude to dBFS, fftshift.                                                                                              | `convertAndWindow`, `magnitudeToDbfs`                                                                                           |
+| `fft/`        | The FFT abstraction and registry. It has no engines of its own; they all come from plugins. Also window functions and the benchmark.                                                         | `IFftBackend`, `IFftPlan`, `FftBackendManager`, `Window`, `FftBenchmark`                                                        |
+| `sdr/`        | The radio abstraction. Devices push blocks borrowed from a pool; settings are generic so panels can be generated from them.                                                                  | `ISdrDevice`, `ISdrDeviceFactory`, `SdrDeviceManager`, `SdrParameter`/`SdrValue`, `SampleFormat`, `IqBlock`, `SdrRxPort`        |
+| `backends/`   | The two radios that need no external library: the synthetic generator and IQ-file replay.                                                                                                    | `registerBuiltinSdrDevices()`                                                                                                   |
+| `rf/`         | What sits in front of the tuner: the antenna library, which antenna is on which input, switchers, and resolving that chain into routable legs.                                               | `AntennaLibrary`, `AntennaAssignments`, `IRfPath`, `RfPathManager`, `resolveRfPath()`, `RfLeg`                                  |
+| `sweep/`      | The plan model, the planner that turns a plan into a schedule, the engine that tunes and stitches, presets, and back/forward range history.                                                  | `SweepPlan`/`SweepSegment`, `SweepPlanner`, `SweepSchedule`/`SweepStep`, `SweepEngine`, `SweepPresetStore`, `SweepRangeHistory` |
+| `pipeline/`   | Turns IQ blocks into spectrum frames and fans them out to consumers.                                                                                                                         | `Pipeline`, `PipelineConfig`, `FrameBus`, `IFrameConsumer`, `AsyncFrameConsumer`, `SpectrumFrame`                               |
+| `instrument/` | The radio, pipeline and sweep engine driven as one, behind an interface the GUI and the server share. Returns values only, so it can be implemented over a network.                          | `Instrument`, `LocalInstrument`, `DeviceDescriptor`, `InstrumentNotice`                                                         |
+| `history/`    | A thin layer over libsweepsfile: a threaded recorder and replay, and the mapping between bus events and Event records they share with the remote link.                                       | `session::SessionRecorder`, `SessionReplay`, `IFrameSource`, `toSessionEvent`, `publishSessionEvent`                            |
+| `net/`        | Blocking TCP sockets, POSIX and Winsock.                                                                                                                                                     | `TcpSocket`, `TcpListener`                                                                                                      |
+| `crypto/`     | SHA-256 and HMAC for the remote handshake, and the system random generator.                                                                                                                  | `Sha256`, `hmacSha256`, `fillRandom`                                                                                            |
+| `remote/`     | The remote instrument protocol, its server and its client.                                                                                                                                   | `RemoteServer`, `RemoteInstrument`, `FrameEncoder`/`FrameMirror`, `ClockMap`, `ServerList`                                      |
+| `plugin/`     | The plugin host: search path, loading, manifests and dependencies, adapters from facets to host interfaces, events, contributors, UI dispatch. Also the headers plugins are written against. | `PluginManager`, `PluginAbi.h`, `Plugin.hpp`, `PluginSdr.hpp`, `PluginFft.hpp`, `PluginChrome.hpp`                              |
+| `profile/`    | One TOML-backed struct for the whole setup. `settings.toml` and named profiles are the same type.                                                                                            | `Profile`                                                                                                                       |
+| `ui/`         | UI state with no rendering in it.                                                                                                                                                            | `Theme`, `ColorMap`, `TraceStore`, `Marker`/`MarkerPresetStore`, `ToastCenter`, `ViewSettings`                                  |
 
 ## Data flow
 
@@ -138,8 +145,47 @@ place of the UI.
 - one thread per `AsyncFrameConsumer`: the recorder and each plugin frame
   processor;
 - the UI and OpenGL main thread;
-- short-lived worker threads for opening a device, saving a session and opening
-  a history file.
+- short-lived worker threads for opening a device, connecting to a server,
+  saving a session and opening a history file;
+- while connected to a server, the link's reader and writer
+  ([Remote instruments](#remote-instruments)).
+
+## Remote instruments
+
+The GUI drives an `Instrument`. `LocalInstrument` runs the radio, pipeline and
+sweep engine in this process. `RemoteInstrument` drives a `LocalInstrument` in
+`sweeppp-cli serve` on another computer, through `RemoteServer`, so both ends
+run the same orchestration.
+
+The connection is a `.sweeps` record stream (Appendix C of the
+[format specification](../lib/libsweepsfile/sweeps-format-v1.md)):
+
+- spectra as Tile records, one per 1024-bin block that changed since the last
+  frame, at 0.5 dB steps, each line closed by a `frame` message;
+- bus events as Event records, and telemetry as Telemetry records at 4 Hz;
+- everything else as PluginData records under `org.sweeppp.remote`: the
+  handshake (HMAC-SHA256 of the token over both sides' nonces), commands,
+  acknowledgements, state sections and notices.
+
+An edit lands in the client's copy at once, and the state sections the command
+touches are held there until a `state` message acknowledges it. The server
+sends those sections again with the acknowledgement, so an edit it refused or
+changed is put right.
+
+Server threads:
+
+- a listener, and a handshake thread per pending connection (at most eight,
+  five seconds each);
+- one control thread, the only one that touches the `LocalInstrument`: it runs
+  commands, merging a burst of edits to the same thing, then `tick()`, then
+  sends state and telemetry;
+- per client, a reader and a sender. Frames reach the sender through a
+  two-slot mailbox (the latest completed pass and the latest partial), so a slow
+  network merges frames rather than slowing the engine.
+
+Client threads: a reader that rebuilds frames and republishes events on this
+computer's clocks (`ClockMap`, from the fastest recent ping), and a writer for
+commands and a ping a second. The UI thread applies state in `tick()`.
 
 ## Sweep planning
 

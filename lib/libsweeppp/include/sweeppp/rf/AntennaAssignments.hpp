@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace sweeppp {
@@ -47,6 +48,12 @@ public:
     /// nobody can read is better lost than allowed to route a sweep through
     /// half a table.
     [[nodiscard]] static AntennaAssignments load(const std::filesystem::path& path);
+
+    /// Rows as `entries()` and `fallbackPorts()` gave them, for a copy that
+    /// arrived some other way than from a file.
+    [[nodiscard]] static AntennaAssignments
+    of(std::vector<AntennaAssignment> entries,
+       std::vector<std::pair<std::string, std::string>> fallbackPorts);
 
     [[nodiscard]] Status save(const std::filesystem::path& path) const;
 
@@ -104,6 +111,12 @@ public:
     void setFallbackPort(std::string_view device, std::string_view portId);
 
     [[nodiscard]] std::span<const AntennaAssignment> entries() const noexcept { return m_entries; }
+
+    /// Device key, then port id.
+    [[nodiscard]] std::span<const std::pair<std::string, std::string>>
+    fallbackPorts() const noexcept {
+        return m_fallbackPorts;
+    }
 
 private:
     std::vector<AntennaAssignment> m_entries;

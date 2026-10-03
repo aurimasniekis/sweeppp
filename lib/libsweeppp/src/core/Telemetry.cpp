@@ -94,6 +94,7 @@ void ProcessCounters::reset() noexcept {
     retunes.store(0, std::memory_order_relaxed);
     activeWorkers.store(0, std::memory_order_relaxed);
     workerBusyNs.store(0, std::memory_order_relaxed);
+    sweepSpeedHzPerSec.store(0.0, std::memory_order_relaxed);
     fftLatency.reset();
 }
 
@@ -101,7 +102,6 @@ void RenderCounters::reset() noexcept {
     framesRendered.store(0, std::memory_order_relaxed);
     framesDropped.store(0, std::memory_order_relaxed);
     waterfallLines.store(0, std::memory_order_relaxed);
-    sweepSpeedHzPerSec.store(0.0, std::memory_order_relaxed);
 }
 
 Telemetry::Telemetry() {
@@ -140,6 +140,16 @@ void Telemetry::reset() noexcept {
 }
 
 const TelemetrySnapshot& Telemetry::sample() noexcept {
+    return sampleInto(nullptr, nullptr);
+}
+
+const TelemetrySnapshot& Telemetry::sampleWith(const StreamStats& stream,
+                                               const ProcessStats& process) noexcept {
+    return sampleInto(&stream, &process);
+}
+
+const TelemetrySnapshot& Telemetry::sampleInto(const StreamStats* remoteStream,
+                                               const ProcessStats* remoteProcess) noexcept {
     const std::uint64_t now = monotonicNs();
     const double dt = nsToSeconds(now - m_lastSampleNs);
     m_lastSampleNs = now;
@@ -218,6 +228,14 @@ const TelemetrySnapshot& Telemetry::sample() noexcept {
             ? nsToSeconds(busyNs - m_previous.workerBusyNs) / (dt * static_cast<double>(workers))
             : 0.0;
     process.throttleReason = m_process.throttleReason.load(std::memory_order_relaxed);
+    process.sweepSpeedHzPerSec = m_process.sweepSpeedHzPerSec.load(std::memory_order_relaxed);
+
+    if (remoteStream != nullptr) {
+        stream = *remoteStream;
+    }
+    if (remoteProcess != nullptr) {
+        process = *remoteProcess;
+    }
 
     // ---- rendering -------------------------------------------------------
     const std::uint64_t rendered = m_render.framesRendered.load(std::memory_order_relaxed);
@@ -230,7 +248,6 @@ const TelemetrySnapshot& Telemetry::sample() noexcept {
     render.fps = static_cast<double>(m_fpsEwma.value());
     render.framesDropped = m_render.framesDropped.load(std::memory_order_relaxed);
     render.waterfallLinesPerSec = static_cast<double>(m_lpsEwma.value());
-    render.sweepSpeedHzPerSec = m_render.sweepSpeedHzPerSec.load(std::memory_order_relaxed);
 
     if (const double cpu = sampleProcessCpuPercent(); cpu >= 0.0) {
         m_cpuEwma.push(static_cast<float>(cpu));

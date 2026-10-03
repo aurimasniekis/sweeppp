@@ -345,6 +345,14 @@ private:
     /// beside it, and a popover closes the moment attention moves.
     void drawAntennaEditor();
 
+    /// Opens the server window on a saved server, or on a new one.
+    void beginEditingServer(const remote::SavedServer* server);
+    void drawServerEditor();
+
+    /// The saved servers, for the device chooser. The one clicked, to be
+    /// connected to once nothing still points into the list.
+    [[nodiscard]] std::optional<remote::SavedServer> drawServerList();
+
     /// Opens the editor on `antenna`, or on a blank entry when it is null.
     void beginEditingAntenna(const Antenna* antenna);
 
@@ -362,6 +370,9 @@ private:
     /// pass, and "which antenna measured this" is the question an operator has
     /// while looking at the trace, not while setting the bench up.
     void drawRxPortChip(const ChromeTheme& chrome);
+
+    /// The server the radio is on, the round trip and the rate, while remote.
+    void drawLinkChip(const ChromeTheme& chrome);
 
     /// One assignment row: a label, a combo, and the caption under it.
     ///
@@ -575,6 +586,11 @@ private:
     float m_historyOverviewHeight = 72.0F;
 
     bool m_showPerformance = false;
+
+    /// When the server last had to merge passes for a link that could not
+    /// keep up, so the link chip can say so for a while afterwards.
+    std::uint64_t m_linkMergedSeen = 0;
+    std::uint64_t m_linkMergedAtNs = 0;
     bool m_showHistory = false;
     bool m_showGradientEditor = false;
     bool m_showFftBenchmark = false;
@@ -591,11 +607,15 @@ private:
     /// which id the copy has to carry to shadow it.
     std::string m_editingAntennaOriginalId;
 
-    /// The switchers on the bench, and when they were last looked for.
-    ///
-    /// Cached rather than asked per frame: `enumerate` is a bus scan per
-    /// driver, and the panel is drawn sixty times a second.
-    std::vector<RfPathInfo> m_switcherList;
+    bool m_showServerEditor = false;
+    remote::SavedServer m_editingServer;
+    /// As typed, which may not parse yet.
+    std::string m_editingServerAddress;
+    /// The address it was saved under; empty for a new one.
+    std::string m_editingServerOriginal;
+
+    /// When the switchers on the bench were last looked for. Not per frame:
+    /// `enumerate` is a bus scan per driver.
     std::uint64_t m_switcherListNs = 0;
 
     /// Which backend is fastest is a property of this machine, so it is

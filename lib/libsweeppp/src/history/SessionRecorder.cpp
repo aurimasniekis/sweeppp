@@ -6,6 +6,7 @@
 #include "sweeppp/core/Clock.hpp"
 #include "sweeppp/core/Log.hpp"
 #include "sweeppp/core/Version.hpp"
+#include "sweeppp/history/EventMapping.hpp"
 #include "sweeppp/history/SweepsLog.hpp"
 
 #include <utility>
@@ -202,57 +203,18 @@ void SessionRecorder::drainEvents() {
 void SessionRecorder::attachEvents(EventBus& bus) {
     m_eventBus = &bus;
 
-    // Each mapping is field for field with the bus event it comes from. Nothing
-    // is summarised or dropped on the way into the file: replay reconstructs
-    // these events from the recording alone, and a field left behind here is one
-    // no later reader can recover.
-    m_subscriptions.push_back(bus.subscribe<RetuneEvent>([this](const RetuneEvent& event) {
-        recordEvent(
-            SessionEvent::of(SessionEvent::Kind::Retune, event.monotonicNs, wallClockNs(),
-                             RetuneData{.centerHz = event.centerHz, .stepIndex = event.stepIndex}));
-    }));
-
-    m_subscriptions.push_back(
-        bus.subscribe<ParameterChangedEvent>([this](const ParameterChangedEvent& event) {
-            // Calibration-affecting changes matter especially: the noise floor
-            // shifts, and later analysis of these tiles must know it happened.
-            recordEvent(SessionEvent::of(
-                SessionEvent::Kind::ParameterChanged, event.monotonicNs, wallClockNs(),
-                ParameterChangedData{.key = event.key,
-                                     .value = event.value,
-                                     .gridAffecting = event.gridAffecting,
-                                     .calibrationAffecting = event.calibrationAffecting}));
-        }));
-
-    m_subscriptions.push_back(bus.subscribe<SweepPassEvent>([this](const SweepPassEvent& event) {
-        recordEvent(SessionEvent::of(SessionEvent::Kind::SweepPass, event.monotonicNs,
-                                     wallClockNs(),
-                                     SweepPassData{.passId = event.passId,
-                                                   .startHz = event.startHz,
-                                                   .stopHz = event.stopHz,
-                                                   .durationSeconds = event.durationSeconds}));
-    }));
-
-    m_subscriptions.push_back(
-        bus.subscribe<ThrottleChangedEvent>([this](const ThrottleChangedEvent& event) {
-            recordEvent(SessionEvent::of(
-                SessionEvent::Kind::ThrottleChanged, event.monotonicNs, wallClockNs(),
-                ThrottleChangedData{.reason = event.reason,
-                                    .processedFraction = event.processedFraction}));
-        }));
-
-    m_subscriptions.push_back(bus.subscribe<AnnotationEvent>([this](const AnnotationEvent& event) {
-        recordEvent(SessionEvent::of(
-            SessionEvent::Kind::Annotation, event.monotonicNs, wallClockNs(),
-            AnnotationData{.text = event.text, .startHz = event.startHz, .stopHz = event.stopHz}));
-    }));
-
-    m_subscriptions.push_back(bus.subscribe<MarkerEvent>([this](const MarkerEvent& event) {
-        recordEvent(SessionEvent::of(SessionEvent::Kind::Marker, event.monotonicNs, wallClockNs(),
-                                     MarkerData{.label = event.label,
-                                                .frequencyHz = event.frequencyHz,
-                                                .levelDbm = event.levelDbm}));
-    }));
+    // Field for field: replay reconstructs these events from the recording
+    // alone. Calibration-affecting parameter changes matter especially -- the
+    // noise floor shifts, and later analysis of these tiles must know it did.
+    const auto record = [this]<typename Event>(const Event& event) {
+        recordEvent(toSessionEvent(event, wallClockNs()));
+    };
+    m_subscriptions.push_back(bus.subscribe<RetuneEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<ParameterChangedEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<SweepPassEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<ThrottleChangedEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<AnnotationEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<MarkerEvent>(record));
 }
 
 } // namespace sweeppp::session

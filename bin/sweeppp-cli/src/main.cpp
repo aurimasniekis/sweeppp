@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <csignal>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <print>
@@ -27,10 +28,13 @@
 #include <sweeppp/history/SessionReader.hpp>
 #include <sweeppp/history/SessionRecorder.hpp>
 #include <sweeppp/history/SweepsLog.hpp>
+#include <sweeppp/instrument/LocalInstrument.hpp>
+#include <sweeppp/net/Socket.hpp>
 #include <sweeppp/pipeline/AsyncFrameConsumer.hpp>
 #include <sweeppp/pipeline/FrameBus.hpp>
 #include <sweeppp/pipeline/Pipeline.hpp>
 #include <sweeppp/plugin/PluginHost.hpp>
+#include <sweeppp/remote/RemoteServer.hpp>
 #include <sweeppp/rf/Antenna.hpp>
 #include <sweeppp/rf/AntennaAssignments.hpp>
 #include <sweeppp/rf/IRfPath.hpp>
@@ -503,12 +507,33 @@ void printStatsSummary(const TelemetrySnapshot& live, const TelemetrySnapshot& s
     std::println("  rate error            {:.2f}%", rateError * 100.0);
 }
 
-/// Opens the radio the options name, selects its port and applies every
-/// parameter they carry. Null after printing why, so a caller returns 1.
-///
-/// Shared by `sweep` and `calibrate`: a calibration is only applied while the
-/// radio is set the way it was learned, so the two must set it the same way.
-std::unique_ptr<ISdrDevice> openConfiguredDevice(const Options& options) {
+/// Applies one `--param`, typed by the parameter's own declaration. Applied
+/// through the generic parameter model, so the CLI needs no per-device
+/// knowledge -- exactly the property that lets the UI generate its panel from
+/// parameters() alone. False after printing why.
+bool applyDeviceParameter(ISdrDevice& device, const std::string& key, const std::string& text) {
+    const auto parameters = device.parameters();
+    const auto match =
+        std::ranges::find_if(parameters, [&key](const SdrParameter& p) { return p.key == key; });
+    if (match == parameters.end()) {
+        std::println(stderr, "sweeppp-cli: device has no parameter '{}'", key);
+        return false;
+    }
+    auto value = parseSdrValue(text, match->type);
+    if (!value) {
+        std::println(stderr, "sweeppp-cli: {}", value.error().describe());
+        return false;
+    }
+    if (auto applied = device.setParameter(key, *value); !applied) {
+        std::println(stderr, "sweeppp-cli: {}", applied.error().describe());
+        return false;
+    }
+    return true;
+}
+
+/// Opens the radio the options name, selects its port if one was asked for,
+/// and applies every `--param`. Null after printing why.
+std::unique_ptr<ISdrDevice> openNamedDevice(const Options& options) {
     auto device = SdrDeviceManager::instance().openSpecifier(options.device);
     if (!device) {
         std::println(stderr, "sweeppp-cli: {}", device.error().describe());
@@ -525,40 +550,36 @@ std::unique_ptr<ISdrDevice> openConfiguredDevice(const Options& options) {
         }
     }
 
-    // Applied through the generic parameter model, so the CLI needs no
-    // per-device knowledge -- exactly the property that lets the UI generate
-    // its panel from parameters() alone.
-    const auto applyParameter = [&device](const std::string& key, const std::string& text) {
-        const auto parameters = (*device)->parameters();
-        const auto match = std::ranges::find_if(
-            parameters, [&key](const SdrParameter& p) { return p.key == key; });
-        if (match == parameters.end()) {
-            std::println(stderr, "sweeppp-cli: device has no parameter '{}'", key);
-            return false;
-        }
-        auto value = parseSdrValue(text, match->type);
-        if (!value) {
-            std::println(stderr, "sweeppp-cli: {}", value.error().describe());
-            return false;
-        }
-        if (auto applied = (*device)->setParameter(key, *value); !applied) {
-            std::println(stderr, "sweeppp-cli: {}", applied.error().describe());
-            return false;
-        }
-        return true;
-    };
-
-    if (!applyParameter("sample_rate", std::format("{}", options.sampleRate)) ||
-        !applyParameter("center_hz", std::format("{}", options.centerHz))) {
-        return nullptr;
-    }
     for (const auto& [key, value] : options.deviceParameters) {
-        if (!applyParameter(key, value)) {
+        if (!applyDeviceParameter(**device, key, value)) {
             return nullptr;
         }
     }
-
     return std::move(*device);
+}
+
+/// `openNamedDevice`, tuned to the options' sample rate and centre first.
+///
+/// Shared by `sweep` and `calibrate`: a calibration is only applied while the
+/// radio is set the way it was learned, so the two must set it the same way.
+/// The `--param`s go last, so one naming `sample_rate` still wins.
+std::unique_ptr<ISdrDevice> openConfiguredDevice(const Options& options) {
+    Options tuned = options;
+    tuned.deviceParameters.clear();
+    std::unique_ptr<ISdrDevice> device = openNamedDevice(tuned);
+    if (!device) {
+        return nullptr;
+    }
+    if (!applyDeviceParameter(*device, "sample_rate", std::format("{}", options.sampleRate)) ||
+        !applyDeviceParameter(*device, "center_hz", std::format("{}", options.centerHz))) {
+        return nullptr;
+    }
+    for (const auto& [key, value] : options.deviceParameters) {
+        if (!applyDeviceParameter(*device, key, value)) {
+            return nullptr;
+        }
+    }
+    return device;
 }
 
 /// The calibration file a run reads or writes: the one named, or the radio's.
@@ -1407,12 +1428,97 @@ int runExtract(const Options& options) {
     return sweeps::cli::runExtract(extract, std::cout, std::cerr);
 }
 
-int runNotYetImplemented(std::string_view command) {
-    std::println(stderr,
-                 "sweeppp-cli: '{}' is not available yet.\n"
-                 "Run `sweeppp-cli help` for what does work.",
-                 command);
-    return 2;
+/// The token from `--token`, else `--token-file`, else the environment.
+/// Surrounding whitespace is dropped: a file written by `echo` ends in a
+/// newline nobody meant as part of the secret.
+Result<std::string> resolveToken(const Options& options) {
+    std::string token = options.token;
+    if (token.empty() && !options.tokenFile.empty()) {
+        std::ifstream in(options.tokenFile, std::ios::binary);
+        if (!in) {
+            return fail<std::string>(ErrorCode::NotFound, "cannot read the token file {}",
+                                     options.tokenFile);
+        }
+        token.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    if (token.empty()) {
+        if (const char* environment = std::getenv("SWEEPPP_REMOTE_TOKEN")) {
+            token = environment;
+        }
+    }
+    const auto first = token.find_first_not_of(" \t\r\n");
+    const auto last = token.find_last_not_of(" \t\r\n");
+    return first == std::string::npos ? std::string{} : token.substr(first, last - first + 1);
+}
+
+int runServe(const Options& options) {
+    auto token = resolveToken(options);
+    if (!token) {
+        std::println(stderr, "sweeppp-cli: {}", token.error().describe());
+        return 1;
+    }
+    if (token->empty() && !net::isLoopbackAddress(options.listenAddress)) {
+        std::println(stderr,
+                     "sweeppp-cli: listening on {} needs a token (--token, --token-file or "
+                     "SWEEPPP_REMOTE_TOKEN); without one, anyone who can reach this machine "
+                     "can drive the radio",
+                     options.listenAddress);
+        return 1;
+    }
+
+    // Radio and transform plugins, but no frame processors: those run on the
+    // desktop, against the frames it receives.
+    registerBuiltinsAndPlugins();
+
+    auto backend = FftBackendManager::instance().acquireOrDefault(options.fftBackend);
+    if (!backend) {
+        std::println(stderr, "sweeppp-cli: {}", backend.error().describe());
+        return 1;
+    }
+    std::unique_ptr<ISdrDevice> device = openNamedDevice(options);
+    if (!device) {
+        return 1;
+    }
+
+    FrameBus output;
+    EventBus events;
+    Telemetry telemetry;
+    LocalInstrument instrument(output, events, telemetry, InstrumentPaths::fromConfig(), **backend);
+    instrument.adoptDevice(std::move(device));
+    for (const InstrumentNotice& notice : instrument.takeNotices()) {
+        std::println(stderr, "sweeppp-cli: {}", notice.text);
+    }
+
+    remote::RemoteServer server(instrument, output, events, telemetry,
+                                remote::ServerConfig{.listenAddress = options.listenAddress,
+                                                     .port = options.port,
+                                                     .token = *token});
+    if (auto started = server.start(); !started) {
+        std::println(stderr, "sweeppp-cli: {}", started.error().describe());
+        return 1;
+    }
+
+    std::println("serving {} on {}:{}{}", instrument.displayLabel(), options.listenAddress,
+                 server.port(), token->empty() ? " (no token: this machine only)" : "");
+    std::fflush(stdout);
+
+    std::signal(SIGINT, handleInterrupt);
+    std::signal(SIGTERM, handleInterrupt);
+    std::string lastClient;
+    while (!g_interrupted.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const std::string client = server.clientAddress();
+        if (!options.quiet && client != lastClient) {
+            std::println(stderr, "{}",
+                         client.empty() ? std::format("{} disconnected", lastClient)
+                                        : std::format("{} connected", client));
+            lastClient = client;
+        }
+    }
+
+    std::println(stderr, "\nstopping");
+    server.stop();
+    return 0;
 }
 
 } // namespace
@@ -1465,7 +1571,7 @@ int main(int argc, char** argv) {
         return runExtract(*options);
 
     case Command::Serve:
-        return runNotYetImplemented("serve");
+        return runServe(*options);
     }
 
     return 0;

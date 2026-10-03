@@ -375,9 +375,9 @@ void MainWindow::setWindowTitle(std::string title) {
 void MainWindow::updateInstrumentTitle() {
     std::string title(productName());
 
-    const ISdrDevice* device = m_state.device();
+    const DeviceDescriptor* device = m_state.device();
     if (device != nullptr) {
-        title += std::format(" ({})", device->info().label);
+        title += std::format(" ({})", m_state.instrument().displayLabel());
     }
 
     // The plan, not the view, and the same reading the range button on the bar
@@ -389,7 +389,7 @@ void MainWindow::updateInstrumentTitle() {
         title += std::format(" ({} - {})", toml_util::formatFrequencyShort(plan.lowestHz()),
                              toml_util::formatFrequencyShort(plan.highestHz()));
     } else if (device != nullptr) {
-        if (auto centre = device->getParameter("center_hz")) {
+        if (auto centre = m_state.instrument().parameter("center_hz")) {
             title += std::format(" (fixed {})", toml_util::formatFrequencyShort(asDouble(*centre)));
         }
     }
@@ -615,6 +615,9 @@ void MainWindow::draw() {
     }
     if (m_showGradientEditor) {
         drawGradientEditor();
+    }
+    if (m_showServerEditor) {
+        drawServerEditor();
     }
     if (m_showAntennaEditor) {
         drawAntennaEditor();
@@ -917,10 +920,10 @@ float MainWindow::drawPanelLauncher(const char* label, const char* id, const cha
 void MainWindow::drawPanelLaunchers() {
     // The device launcher carries the open radio's name, so the bar always
     // says what is connected without a panel being open.
-    const ISdrDevice* device = m_state.device();
-    const std::string deviceLabel =
-        std::format("{} {}##devicepanel", icon::glyphOr(icon::kDevice, ""),
-                    device != nullptr ? device->info().label : std::string("Select device"));
+    const DeviceDescriptor* device = m_state.device();
+    const std::string deviceLabel = std::format(
+        "{} {}##devicepanel", icon::glyphOr(icon::kDevice, ""),
+        device != nullptr ? m_state.instrument().displayLabel() : std::string("Select device"));
 
     drawPanelLauncher(deviceLabel.c_str(), "##devicepopup",
                       "Device settings, and the list of detected radios",
@@ -1035,12 +1038,12 @@ void MainWindow::drawMenuSection() {
 }
 
 void MainWindow::drawRxPortChip(const ChromeTheme& chrome) {
-    const ISdrDevice* device = m_state.device();
+    const DeviceDescriptor* device = m_state.device();
     if (device == nullptr) {
         return;
     }
 
-    const std::span<const SdrRxPort> ports = device->rxPorts();
+    const std::span<const SdrRxPort> ports = device->rxPorts;
     if (ports.empty()) {
         // One implicit connector. There is nothing to report that the device
         // name does not already say, and a chip reading "RX1" on a radio with
@@ -1048,36 +1051,25 @@ void MainWindow::drawRxPortChip(const ChromeTheme& chrome) {
         return;
     }
 
-    const std::string_view selectedId = device->selectedRxPort();
+    const std::string selectedId = m_state.instrument().selectedRxPort();
     const auto port = std::ranges::find_if(
         ports, [selectedId](const SdrRxPort& candidate) { return candidate.id == selectedId; });
     if (port == ports.end()) {
         return;
     }
 
-    const auto portIndex = static_cast<std::size_t>(port - ports.begin());
-
-    // Which leg of the RF path is live, which for a switcher means asking the
-    // box which input it is on rather than which one was assigned first.
-    const std::vector<RfLeg> legs = m_state.rfPath();
-    const auto leg = std::ranges::find_if(legs, [portIndex](const RfLeg& candidate) {
-        if (candidate.route.portIndex != portIndex) {
-            return false;
-        }
-        if (candidate.route.inputIndex == kNoInput || candidate.switcher == nullptr) {
-            return true;
-        }
-        return candidate.route.inputIndex == candidate.switcher->selectedInput();
-    });
+    // Which leg of the RF path is live, which for a switcher means the input
+    // the box is on rather than the one assigned first.
+    const std::vector<RfLegView> legs = m_state.instrument().rfPath();
+    const auto leg = std::ranges::find_if(legs, &RfLegView::live);
 
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("On");
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
 
-    const std::string label = leg != legs.end()
-                                  ? std::format("{} · {}", leg->portLabel, leg->antenna->name)
-                                  : port->label;
+    const std::string label =
+        leg != legs.end() ? std::format("{} · {}", leg->portLabel, leg->antenna.name) : port->label;
 
     // Dim when nothing is assigned: the port is a fact, but "what is on it" is
     // the part worth reading, and a bright chip naming only a connector claims
@@ -1095,8 +1087,8 @@ void MainWindow::drawRxPortChip(const ChromeTheme& chrome) {
                         port->connector.empty() ? "" : std::format(" -- {}", port->connector))
                 .c_str());
         if (leg != legs.end()) {
-            ImGui::TextUnformatted(std::format("{} · {} · {:+.1f} dBi", leg->antenna->name,
-                                               leg->antenna->describeRange(), leg->antenna->gainDbi)
+            ImGui::TextUnformatted(std::format("{} · {} · {:+.1f} dBi", leg->antenna.name,
+                                               leg->antenna.describeRange(), leg->antenna.gainDbi)
                                        .c_str());
         } else {
             ImGui::TextUnformatted("Nothing assigned to this connector.");
@@ -1106,6 +1098,54 @@ void MainWindow::drawRxPortChip(const ChromeTheme& chrome) {
                                                                   : "Antenna routing off");
         ImGui::PopStyleColor();
         ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+
+    ImGui::SameLine(0.0F, 24.0F);
+}
+
+void MainWindow::drawLinkChip(const ChromeTheme& chrome) {
+    const remote::RemoteInstrument* remote = m_state.remoteInstrument();
+    if (remote == nullptr) {
+        return;
+    }
+    const LinkStats link = remote->link();
+
+    // A pass merged into the next means the link, not the radio, is what is
+    // setting the waterfall's pace. Said for a few seconds after it happens
+    // rather than only in the instant it does.
+    const std::uint64_t now = monotonicNs();
+    if (link.passesCoalesced != m_linkMergedSeen) {
+        m_linkMergedSeen = link.passesCoalesced;
+        m_linkMergedAtNs = now;
+    }
+    const bool behind = m_linkMergedAtNs != 0 && now - m_linkMergedAtNs < 3'000'000'000ULL;
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("Via");
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(behind ? chrome.warning : chrome.text));
+    ImGui::TextUnformatted(std::format("{} · {:.0f} ms · {:.1f} MB/s", remote->serverName(),
+                                       link.roundTripMs, link.bytesPerSec / 1e6)
+                               .c_str());
+    ImGui::PopStyleColor();
+
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(
+            std::format("{} ({})", remote->serverName(), remote->endpoint().address()).c_str());
+        ImGui::TextUnformatted(std::format("Round trip {:.1f} ms", link.roundTripMs).c_str());
+        ImGui::TextUnformatted(std::format("Receiving {:.2f} MB/s, {:.1f} MB in all",
+                                           link.bytesPerSec / 1e6,
+                                           static_cast<double>(link.bytesReceived) / 1e6)
+                                   .c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(behind ? chrome.warning : chrome.textDim));
+        ImGui::TextUnformatted(
+            std::format("{} passes and {} partial updates merged for a slow link",
+                        link.passesCoalesced, link.partialsCoalesced)
+                .c_str());
+        ImGui::PopStyleColor();
         ImGui::EndTooltip();
     }
 
@@ -1140,6 +1180,7 @@ void MainWindow::drawStatusBar() {
     }
 
     drawRxPortChip(chrome);
+    drawLinkChip(chrome);
 
     // A plugin's own chip, for something the ranked answer above has no
     // vocabulary for.
@@ -1252,7 +1293,7 @@ void MainWindow::drawStatusBar() {
         {std::format("CPU {:.0f}%", badgeStats.render.cpuPercent), "CPU 888%", &badgeColor},
         {std::format("{:.0f}% shown", badgeStats.process.processedFraction * 100.0), "888% shown",
          nullptr},
-        {std::format("{:.1f} MHz/s", badgeStats.render.sweepSpeedHzPerSec / 1e6), "88888.8 MHz/s",
+        {std::format("{:.1f} MHz/s", badgeStats.process.sweepSpeedHzPerSec / 1e6), "88888.8 MHz/s",
          nullptr},
         {std::format("{:.0f} lines/s", badgeStats.render.waterfallLinesPerSec), "8888 lines/s",
          nullptr},

@@ -56,6 +56,8 @@ From left to right:
   selected marker, or at the centre of the view when no marker is selected.
 - **RX port.** Only on radios with more than one input. Shows which connector
   and antenna are in use, and whether antenna routing is on.
+- **Via.** Only when connected to a server: its name, the round trip and the
+  data rate. Amber when the network can't keep up and passes are being merged.
 - **Save now.** Saves the recording so far to a `.sweeps` file. See
   [Recording](#recording).
 - **Snapshot.** Copies a picture of the spectrum and waterfall. See
@@ -79,6 +81,9 @@ where the time goes.
 
 ### Performance window
 
+- **Link:** only when connected to a server: round trip, data rate, and how
+  many frames the server merged because the network was slower. The sections
+  below it are measured on the server.
 - **Input:** how full the USB link and buffers are, sample rate, dropped
   samples, overruns and gaps. **Reset** clears the counters.
 - **Device:** temperatures, power and similar readings, for radios that
@@ -112,6 +117,26 @@ With a radio open, the panel shows:
 Sweep++ reopens the last radio you used the next time it starts.
 
 [Supported devices](devices.md) describes each radio's settings.
+
+### Servers
+
+A radio on another computer is used the same way, through
+[`sweeppp-cli serve`](cli.md#serve) running there.
+
+- Under **Servers** in the device panel, click **Add server...**, enter a name,
+  the address (`host` or `host:port`) and the token, and click **Connect**.
+- Click a saved server to connect. Right-click it to edit or forget it.
+- **Disconnect** returns to the radios on this computer.
+
+While connected:
+
+- the radio is named "*radio* on *server*";
+- antennas, assignments and corrections are stored on the server;
+- **Bench** is off, since it measures this computer;
+- a profile names the server by address; its token stays in `servers.toml`.
+
+If the connection drops, a message says why and Sweep++ returns to the radios
+on this computer.
 
 ## Setting the range
 
@@ -667,6 +692,7 @@ setup, start Sweep++ with `--config-dir <folder>` (see
 | `themes/`, `colormaps/`                     | Your themes and colour maps.                                                    |
 | `antennas/custom.toml`                      | Your antennas.                                                                  |
 | `antennas/assignments.toml`                 | Which antenna is on which input.                                                |
+| `servers.toml`                              | Saved servers and their tokens. Readable only by you.                           |
 | `bandplans/`, `channels/`                   | Your own band plans and channel lists. See [Plugins](plugins.md#your-own-data). |
 | `plugins.toml`                              | Which plugins are turned off, and the Data contributors order.                  |
 | `plugins/`                                  | Plugin settings, and plugins you install yourself.                              |

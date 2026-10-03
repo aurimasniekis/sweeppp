@@ -28,7 +28,9 @@ set(SWEEPSFILE_TEST_SOURCES
     test_golden.cpp
     test_mappedfile.cpp
     test_metadata.cpp
+    test_records.cpp
     test_session.cpp
+    test_stream.cpp
     test_text.cpp
     test_version.cpp
 )

@@ -6,6 +6,7 @@
 #include "sweeps/Clock.hpp"
 #include "sweeps/Config.hpp"
 #include "sweeps/Metadata.hpp"
+#include "sweeps/Records.hpp"
 #include "sweeps/Text.hpp"
 #include "sweeps/WindowType.hpp"
 
@@ -42,29 +43,6 @@ template <typename... Args>
 void logError(const Log& log, std::string_view fmt, Args&&... args) {
     if (log.enabled()) {
         log.emit(LogLevel::Error, kCategory, detail::format(fmt, std::forward<Args>(args)...));
-    }
-}
-
-/// Encodes an acquisition config into a record payload.
-void encodeConfig(std::vector<std::byte>& out, const AcquisitionConfig& config) {
-    writeF64(out, config.centerHz);
-    writeF64(out, config.spanHz);
-    writeF64(out, config.sampleRate);
-    writeU32(out, config.fftSize);
-    writeU32(out, static_cast<std::uint32_t>(config.window));
-    writeF64(out, config.windowBeta);
-    writeF64(out, config.windowEnbw);
-    writeF64(out, config.overlap);
-    writeF64(out, config.rbwHz);
-    writeF64(out, config.referenceLevelDbm);
-    writeF64(out, config.dbfsToDbmOffset);
-    writeString(out, config.deviceId);
-    writeString(out, config.deviceLabel);
-
-    writeU32(out, static_cast<std::uint32_t>(config.gains.size()));
-    for (const auto& gain : config.gains) {
-        writeString(out, gain.first);
-        writeF64(out, gain.second);
     }
 }
 
@@ -121,18 +99,10 @@ SessionWriter::~SessionWriter() {
 }
 
 Status SessionWriter::writeRecord(RecordType type, const std::vector<std::byte>& payload) {
-    RecordHeader header;
-    header.type = static_cast<std::uint16_t>(type);
-    header.flags = 0;
-    header.payloadBytes = static_cast<std::uint32_t>(payload.size());
-    header.checksum = crc32(payload.data(), payload.size());
-
     std::vector<std::byte> encoded;
     encoded.reserve(RecordHeader::kBytes);
-    writeU16(encoded, header.type);
-    writeU16(encoded, header.flags);
-    writeU32(encoded, header.payloadBytes);
-    writeU32(encoded, header.checksum);
+    encodeRecordHeader(encoded, makeRecordHeader(static_cast<std::uint16_t>(type), payload.data(),
+                                                 payload.size()));
 
     m_stream.write(reinterpret_cast<const char*>(encoded.data()),
                    static_cast<std::streamsize>(encoded.size()));
@@ -223,14 +193,7 @@ Status SessionWriter::openSegment(const AcquisitionConfig& config, const Segment
     }
 
     std::vector<std::byte> payload;
-    writeU32(payload, segment.info.id);
-    writeF64(payload, grid.startHz);
-    writeF64(payload, grid.binWidthHz);
-    writeU32(payload, grid.binCount);
-    writeU64(payload, segment.info.startWallNs);
-    writeU64(payload, segment.info.startMonotonicNs);
-    writeString(payload, segment.info.reason);
-    encodeConfig(payload, config);
+    encodeSegmentOpen(payload, segment.info);
 
     if (auto written = writeRecord(RecordType::SegmentOpen, payload); !written) {
         return written;
@@ -259,10 +222,13 @@ Status SessionWriter::closeSegment(std::uint64_t monotonicNs) {
     }
     segment.info.endMonotonicNs = monotonicNs;
 
+    SegmentClose close;
+    close.id = segment.info.id;
+    close.endMonotonicNs = monotonicNs;
+    close.lineCount = segment.info.lineCount;
+
     std::vector<std::byte> payload;
-    writeU32(payload, segment.info.id);
-    writeU64(payload, monotonicNs);
-    writeU64(payload, segment.info.lineCount);
+    encodeSegmentClose(payload, close);
     return writeRecord(RecordType::SegmentClose, payload);
 }
 
@@ -466,65 +432,18 @@ void SessionWriter::appendLine(SegmentState& segment, std::uint32_t lod,
 Status SessionWriter::flushTile(const TileKey& key, PendingTile& tile) {
     const std::size_t used = static_cast<std::size_t>(tile.header.lines) * tile.header.bins;
 
-    // Choose the origin now, from the tile's true range. 255 steps of 0.5 dB
-    // span 127.5 dB; anchoring 8 dB above the peak leaves headroom without
-    // wasting the scale, and puts the floor of a typical 70 dB-range tile
-    // comfortably inside the window.
-    // Over the measurements only. A bin the sweep never reached carries the
-    // unmeasured sentinel, and letting that set the floor would choose the
-    // origin from a level nothing recorded.
-    float peak = -std::numeric_limits<float>::infinity();
-    float floor = std::numeric_limits<float>::infinity();
-    for (std::size_t i = 0; i < used; ++i) {
-        const float value = tile.values[i];
-        if (std::isfinite(value) && isMeasuredDb(static_cast<double>(value))) {
-            peak = std::max(peak, value);
-            floor = std::min(floor, value);
-        }
-    }
-    if (!std::isfinite(peak)) {
-        peak = 0.0F;
-        floor = 0.0F;
-    }
+    // Choose the origin now, from the tile's true range: 255 steps of 0.5 dB
+    // span 127.5 dB, and anchoring 8 dB above the peak leaves headroom without
+    // wasting the scale.
+    tile.header.originDb = chooseTileOrigin(tile.values.data(), used);
 
-    // Prefer covering the whole range; fall back to anchoring on the peak when
-    // the range exceeds what 255 steps can express, since losing the top of
-    // the scale matters far more than losing the bottom of the noise floor.
-    //
-    // The two branches are NOT the same expression written twice: the first
-    // computes in double and the second in float, and they can differ in the
-    // last bit of a value that is stored as F32. Collapsing them changes output
-    // bytes, so they stay as they are.
-    const auto span = static_cast<double>(peak - floor);
-    tile.header.originDb = span <= kQuantSpanDb - 8.0
-                               ? static_cast<float>(static_cast<double>(peak) + 8.0 - kQuantSpanDb)
-                               : peak - static_cast<float>(kQuantSpanDb) + 8.0F;
-
-    // Both kinds of non-measurement land on the same byte: a bin no step
-    // reached carries the sentinel, and one no source bin resampled onto is
-    // still at -inf.
     std::vector<std::uint8_t> quantised(used);
-    const auto originDb = static_cast<double>(tile.header.originDb);
-    for (std::size_t i = 0; i < used; ++i) {
-        quantised[i] = quantiseDb(static_cast<double>(tile.values[i]), originDb);
-    }
-
-    std::vector<std::byte> payload;
-    payload.reserve(TileHeader::kBytes + quantised.size());
-
-    writeU32(payload, tile.header.segmentId);
-    writeU32(payload, tile.header.lod);
-    writeU32(payload, tile.header.timeBlock);
-    writeU32(payload, tile.header.freqBlock);
-    writeU32(payload, tile.header.lines);
-    writeU32(payload, tile.header.bins);
-    writeF32(payload, tile.header.originDb);
-    writeU64(payload, tile.header.firstLineNs);
-    writeU64(payload, tile.header.lastLineNs);
+    quantiseTile(tile.values.data(), used, tile.header.originDb, quantised.data());
 
     // Only the filled rows: a partial tile at the end of a segment must not
     // pad the session with a block of fabricated silence.
-    writeBytes(payload, quantised.data(), quantised.size());
+    std::vector<std::byte> payload;
+    encodeTile(payload, tile.header, quantised.data(), quantised.size());
 
     const std::uint64_t offset = m_bytesWritten;
     if (auto written = writeRecord(RecordType::Tile, payload); !written) {
@@ -646,29 +565,12 @@ Status SessionWriter::recordEvent(const SessionEvent& event) {
 Status SessionWriter::writePluginData(std::string_view pluginId, std::string_view recordName,
                                       std::uint32_t schemaVersion, std::uint64_t monotonicNs,
                                       const void* body, std::size_t bodyBytes) {
-    if (pluginId.empty() || pluginId.size() > kMaxPluginIdBytes) {
-        return fail(ErrorCode::InvalidArgument,
-                    "a pluginId must be 1..{} bytes of reverse-DNS, not {}", kMaxPluginIdBytes,
-                    pluginId.size());
-    }
-    if (bodyBytes > std::numeric_limits<std::uint32_t>::max()) {
-        return fail(ErrorCode::InvalidArgument, "a plugin record body of {} bytes is too large",
-                    bodyBytes);
-    }
-
     std::vector<std::byte> payload;
-    writeString(payload, pluginId);
-    writeString(payload, recordName);
-    writeU32(payload, schemaVersion);
-    writeU64(payload, monotonicNs);
-    // Explicitly length-prefixed rather than "the rest of the payload", so that
-    // appending a field here stays invisible to an older reader -- the same
-    // guarantee §11.5 gives every other record.
-    writeU32(payload, static_cast<std::uint32_t>(bodyBytes));
-    if (bodyBytes > 0 && body != nullptr) {
-        writeBytes(payload, body, bodyBytes);
+    if (auto encoded = encodePluginData(payload, pluginId, recordName, schemaVersion, monotonicNs,
+                                        body, bodyBytes);
+        !encoded) {
+        return encoded;
     }
-
     return writeRecord(RecordType::PluginData, payload);
 }
 

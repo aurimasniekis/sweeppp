@@ -111,9 +111,11 @@ set(SWEEPSFILE_SOURCES
     src/Clock.cpp
     src/FileFormat.cpp
     src/Metadata.cpp
+    src/Records.cpp
     src/Result.cpp
     src/SessionReader.cpp
     src/SessionWriter.cpp
+    src/Stream.cpp
     src/Text.cpp
     src/WindowType.cpp
 )

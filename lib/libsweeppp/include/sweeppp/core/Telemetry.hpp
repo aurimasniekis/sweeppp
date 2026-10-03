@@ -210,6 +210,7 @@ struct alignas(kCacheLineSize) ProcessCounters {
     /// fully loaded pipeline, because the sample lands between blocks.
     std::atomic<std::uint64_t> workerBusyNs{0};
     std::atomic<ThrottleReason> throttleReason{ThrottleReason::Stopped};
+    std::atomic<double> sweepSpeedHzPerSec{0.0};
 
     LatencyTracker fftLatency;
 
@@ -220,7 +221,6 @@ struct alignas(kCacheLineSize) RenderCounters {
     std::atomic<std::uint64_t> framesRendered{0};
     std::atomic<std::uint64_t> framesDropped{0};
     std::atomic<std::uint64_t> waterfallLines{0};
-    std::atomic<double> sweepSpeedHzPerSec{0.0};
 
     void reset() noexcept;
 };
@@ -273,13 +273,13 @@ struct ProcessStats {
     double workerUtilisation = 0.0;
     std::uint32_t workerCount = 0;
     ThrottleReason throttleReason = ThrottleReason::Stopped;
+    double sweepSpeedHzPerSec = 0.0;
 };
 
 struct RenderStats {
     double fps = 0.0;
     std::uint64_t framesDropped = 0;
     double waterfallLinesPerSec = 0.0;
-    double sweepSpeedHzPerSec = 0.0;
     double cpuPercent = 0.0;
 };
 
@@ -311,6 +311,12 @@ public:
 
     /// Recomputes rates and appends to the sparkline histories.
     const TelemetrySnapshot& sample() noexcept;
+
+    /// The same, with the stream and processing figures taken as given rather
+    /// than computed -- they were measured on another machine, which ran the
+    /// radio and the transforms. Rendering is still this process's own.
+    const TelemetrySnapshot& sampleWith(const StreamStats& stream,
+                                        const ProcessStats& process) noexcept;
 
     [[nodiscard]] const TelemetrySnapshot& snapshot() const noexcept { return m_snapshot; }
 
@@ -347,6 +353,9 @@ private:
         std::uint64_t retunes = 0;
         std::uint64_t workerBusyNs = 0;
     };
+
+    const TelemetrySnapshot& sampleInto(const StreamStats* stream,
+                                        const ProcessStats* process) noexcept;
 
     StreamCounters m_stream;
     ProcessCounters m_process;

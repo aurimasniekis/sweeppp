@@ -583,7 +583,7 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout, PanelView& pa
         const float top = layout.origin.y;
         const float bottom = layout.origin.y + layout.size.y;
 
-        for (const RfLeg& leg : m_state.rfPath()) {
+        for (const RfLegView& leg : m_state.instrument().rfPath()) {
             const double fromHz = std::max(leg.route.startHz, layout.fromHz);
             const double toHz = std::min(leg.route.stopHz, layout.toHz);
             if (toHz <= fromHz) {
@@ -607,7 +607,7 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout, PanelView& pa
             // chips are not. Only when the band is wide enough to hold it --
             // a clipped name is worse than none, because it reads as a
             // different antenna.
-            const std::string label = std::format("{} · {}", leg.antenna->name, leg.portLabel);
+            const std::string label = std::format("{} · {}", leg.antenna.name, leg.portLabel);
             const ImVec2 size = ImGui::CalcTextSize(label.c_str());
             if (x1 - x0 > size.x + 10.0F) {
                 draw->AddText(ImVec2(x0 + 5.0F, bottom - size.y - 4.0F),

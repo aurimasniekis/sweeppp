@@ -11,6 +11,8 @@ set(SWEEPPP_SOURCES
 
     src/dsp/Convert.cpp
 
+    src/crypto/Sha256.cpp
+
     src/correction/CorrectionLearner.cpp
     src/correction/Corrections.cpp
 
@@ -19,8 +21,13 @@ set(SWEEPPP_SOURCES
     src/fft/IFftBackend.cpp
     src/fft/Window.cpp
 
-    src/history/SessionReplay.cpp
+    src/history/EventMapping.cpp
     src/history/SessionRecorder.cpp
+    src/history/SessionReplay.cpp
+
+    src/instrument/LocalInstrument.cpp
+
+    src/net/Socket.cpp
 
     src/pipeline/AsyncFrameConsumer.cpp
     src/pipeline/FrameBus.cpp
@@ -32,6 +39,15 @@ set(SWEEPPP_SOURCES
     src/plugin/PluginHost.cpp
     src/plugin/PluginSearchPath.cpp
     src/plugin/PluginSettings.cpp
+
+    src/remote/ClockMap.cpp
+    src/remote/FrameCodec.cpp
+    src/remote/Messages.cpp
+    src/remote/RemoteInstrument.cpp
+    src/remote/RemoteServer.cpp
+    src/remote/ServerList.cpp
+    src/remote/StreamIo.cpp
+    src/remote/WireCodec.cpp
 
     src/rf/Antenna.cpp
     src/rf/AntennaAssignments.cpp
@@ -82,6 +98,11 @@ target_link_libraries(sweeppp
 # POSIX side gets the same from backtrace_symbols_fd in libc.
 if(WIN32)
     target_link_libraries(sweeppp PRIVATE dbghelp)
+endif()
+
+# Winsock for the remote link, and the system generator its nonces come from.
+if(WIN32)
+    target_link_libraries(sweeppp PRIVATE ws2_32 bcrypt)
 endif()
 
 target_compile_definitions(sweeppp PRIVATE

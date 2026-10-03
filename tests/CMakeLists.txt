@@ -4,13 +4,19 @@ set(SWEEPPP_TEST_SOURCES
     test_antenna.cpp
     test_core.cpp
     test_correction.cpp
+    test_crypto.cpp
     test_fft.cpp
     test_format.cpp
     test_golden.cpp
+    test_instrument.cpp
     test_marker.cpp
+    test_net.cpp
     test_panels.cpp
     test_pipeline.cpp
     test_plugin.cpp
+    test_remote_codec.cpp
+    test_remote_loopback.cpp
+    test_remote_server.cpp
     test_session.cpp
     test_profile.cpp
     test_sweep.cpp

@@ -74,6 +74,10 @@ public:
     [[nodiscard]] static AntennaLibrary discover(std::span<const std::filesystem::path> directories,
                                                  std::vector<std::string>* problems = nullptr);
 
+    /// Entries as another library listed them, shipped ones still marked so:
+    /// a copy of one kept elsewhere, as a remote instrument's is.
+    [[nodiscard]] static AntennaLibrary of(std::vector<Antenna> entries);
+
     [[nodiscard]] const Antenna* find(std::string_view id) const;
     [[nodiscard]] std::span<const Antenna> entries() const noexcept { return m_entries; }
     [[nodiscard]] bool empty() const noexcept { return m_entries.empty(); }

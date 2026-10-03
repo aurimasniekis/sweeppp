@@ -6,6 +6,7 @@
 #include "sweeps/Clock.hpp"
 #include "sweeps/Config.hpp"
 #include "sweeps/Metadata.hpp"
+#include "sweeps/Records.hpp"
 #include "sweeps/Text.hpp"
 
 #include <algorithm>
@@ -35,82 +36,6 @@ template <typename... Args>
 void logWarn(const Log& log, std::string_view fmt, Args&&... args) {
     if (log.enabled()) {
         log.emit(LogLevel::Warn, kCategory, detail::format(fmt, std::forward<Args>(args)...));
-    }
-}
-
-Result<AcquisitionConfig> decodeConfig(ByteReader& reader) {
-    AcquisitionConfig config;
-
-    auto centerHz = reader.readF64();
-    auto spanHz = reader.readF64();
-    auto sampleRate = reader.readF64();
-    auto fftSize = reader.readU32();
-    auto window = reader.readU32();
-    auto beta = reader.readF64();
-    auto enbw = reader.readF64();
-    auto overlap = reader.readF64();
-    auto rbw = reader.readF64();
-    auto referenceLevel = reader.readF64();
-    auto offset = reader.readF64();
-    auto deviceId = reader.readString();
-    auto deviceLabel = reader.readString();
-    auto gainCount = reader.readU32();
-
-    if (!centerHz || !spanHz || !sampleRate || !fftSize || !window || !beta || !enbw || !overlap ||
-        !rbw || !referenceLevel || !offset || !deviceId || !deviceLabel || !gainCount) {
-        return fail<AcquisitionConfig>(ErrorCode::Corrupt, "malformed acquisition config");
-    }
-
-    config.centerHz = *centerHz;
-    config.spanHz = *spanHz;
-    config.sampleRate = *sampleRate;
-    config.fftSize = *fftSize;
-    config.window = static_cast<WindowType>(*window);
-    config.windowBeta = *beta;
-    config.windowEnbw = *enbw;
-    config.overlap = *overlap;
-    config.rbwHz = *rbw;
-    config.referenceLevelDbm = *referenceLevel;
-    config.dbfsToDbmOffset = *offset;
-    config.deviceId = std::move(*deviceId);
-    config.deviceLabel = std::move(*deviceLabel);
-
-    for (std::uint32_t i = 0; i < *gainCount; ++i) {
-        auto key = reader.readString();
-        auto value = reader.readF64();
-        if (!key || !value) {
-            return fail<AcquisitionConfig>(ErrorCode::Corrupt, "malformed gain entry");
-        }
-        config.gains.emplace_back(std::move(*key), *value);
-    }
-
-    // Deliberately no check that the payload is exhausted. A newer minor
-    // version may have appended fields here, and ignoring a tail is exactly
-    // what makes such a bump invisible to this reader rather than fatal.
-    return config;
-}
-
-/// Encodes an acquisition config into a record payload. Shared by the extract
-/// path and, via the writer, by live recording.
-void encodeConfig(std::vector<std::byte>& out, const AcquisitionConfig& config) {
-    writeF64(out, config.centerHz);
-    writeF64(out, config.spanHz);
-    writeF64(out, config.sampleRate);
-    writeU32(out, config.fftSize);
-    writeU32(out, static_cast<std::uint32_t>(config.window));
-    writeF64(out, config.windowBeta);
-    writeF64(out, config.windowEnbw);
-    writeF64(out, config.overlap);
-    writeF64(out, config.rbwHz);
-    writeF64(out, config.referenceLevelDbm);
-    writeF64(out, config.dbfsToDbmOffset);
-    writeString(out, config.deviceId);
-    writeString(out, config.deviceLabel);
-
-    writeU32(out, static_cast<std::uint32_t>(config.gains.size()));
-    for (const auto& gain : config.gains) {
-        writeString(out, gain.first);
-        writeF64(out, gain.second);
     }
 }
 
@@ -354,29 +279,13 @@ Status SessionReader::scanRecords(bool rebuildIndex) {
         }
 
         case RecordType::SegmentOpen: {
-            SegmentInfo segment;
-            auto id = payload.readU32();
-            auto startHz = payload.readF64();
-            auto binWidth = payload.readF64();
-            auto binCount = payload.readU32();
-            auto startWall = payload.readU64();
-            auto startMono = payload.readU64();
-            auto reason = payload.readString();
-            if (!id || !startHz || !binWidth || !binCount || !startWall || !startMono || !reason) {
+            // An unreadable config keeps the segment: its tiles are still
+            // readable at the grid it declares.
+            auto decoded = decodeSegmentOpen(payload, false);
+            if (!decoded) {
                 break;
             }
-
-            segment.id = *id;
-            segment.grid.startHz = *startHz;
-            segment.grid.binWidthHz = *binWidth;
-            segment.grid.binCount = *binCount;
-            segment.startWallNs = *startWall;
-            segment.startMonotonicNs = *startMono;
-            segment.reason = std::move(*reason);
-
-            if (auto config = decodeConfig(payload)) {
-                segment.config = std::move(*config);
-            }
+            SegmentInfo segment = std::move(*decoded);
 
             m_summary.lowestHz = std::min(m_summary.lowestHz, segment.grid.startHz);
             m_summary.highestHz = std::max(m_summary.highestHz, segment.grid.stopHz());
@@ -385,16 +294,13 @@ Status SessionReader::scanRecords(bool rebuildIndex) {
         }
 
         case RecordType::SegmentClose: {
-            auto id = payload.readU32();
-            auto endNs = payload.readU64();
-            auto lines = payload.readU64();
-            if (id && endNs && lines) {
+            if (auto close = decodeSegmentClose(payload)) {
                 // By id, not by position. An extracted file contains segments
                 // whose ids do not start at zero, and indexing by position
                 // there attributes one segment's extent to another.
-                if (SegmentInfo* segment = mutableSegment(*id)) {
-                    segment->endMonotonicNs = *endNs;
-                    segment->lineCount = *lines;
+                if (SegmentInfo* segment = mutableSegment(close->id)) {
+                    segment->endMonotonicNs = close->endMonotonicNs;
+                    segment->lineCount = close->lineCount;
                 }
             }
             break;
@@ -416,38 +322,29 @@ Status SessionReader::scanRecords(bool rebuildIndex) {
         }
 
         case RecordType::Tile: {
-            auto segmentId = payload.readU32();
-            auto lod = payload.readU32();
-            auto timeBlock = payload.readU32();
-            auto freqBlock = payload.readU32();
-            auto lines = payload.readU32();
-            auto bins = payload.readU32();
-            auto originDb = payload.readF32();
-            auto firstNs = payload.readU64();
-            auto lastNs = payload.readU64();
-
-            if (segmentId && lod && timeBlock && freqBlock && lines && bins && originDb &&
-                firstNs && lastNs) {
-                const TileKey key = TileKey::of(*segmentId, *lod, *timeBlock, *freqBlock);
+            if (auto tile = decodeTileHeader(payload)) {
+                const TileKey key =
+                    TileKey::of(tile->segmentId, tile->lod, tile->timeBlock, tile->freqBlock);
                 if (rebuildIndex) {
                     IndexEntry entry;
                     entry.key = key;
                     entry.offset = offset;
                     entry.length = static_cast<std::uint32_t>(RecordHeader::kBytes + *payloadBytes);
-                    entry.firstLineNs = *firstNs;
-                    entry.lastLineNs = *lastNs;
+                    entry.firstLineNs = tile->firstLineNs;
+                    entry.lastLineNs = tile->lastLineNs;
                     m_index[key] = entry;
                 }
-                if (*lod == 0) {
-                    m_summary.firstLineNs = std::min(m_summary.firstLineNs, *firstNs);
-                    m_summary.lastLineNs = std::max(m_summary.lastLineNs, *lastNs);
-                    if (SegmentInfo* segment = mutableSegment(*segmentId);
+                if (tile->lod == 0) {
+                    m_summary.firstLineNs = std::min(m_summary.firstLineNs, tile->firstLineNs);
+                    m_summary.lastLineNs = std::max(m_summary.lastLineNs, tile->lastLineNs);
+                    if (SegmentInfo* segment = mutableSegment(tile->segmentId);
                         segment != nullptr && segment->endMonotonicNs == 0) {
                         // A segment never formally closed (abrupt end): infer
                         // its line count from the tiles that survived.
                         segment->lineCount =
                             std::max(segment->lineCount,
-                                     static_cast<std::uint64_t>(*timeBlock) * kTileLines + *lines);
+                                     (static_cast<std::uint64_t>(tile->timeBlock) * kTileLines) +
+                                         tile->lines);
                     }
                 }
             }
@@ -455,31 +352,20 @@ Status SessionReader::scanRecords(bool rebuildIndex) {
         }
 
         case RecordType::PluginData: {
-            PluginRecord record;
-            auto pluginId = payload.readString();
-            auto recordName = payload.readString();
-            auto schemaVersion = payload.readU32();
-            auto monotonicNs = payload.readU64();
-            auto bodyBytes = payload.readU32();
-            if (!pluginId || !recordName || !schemaVersion || !monotonicNs || !bodyBytes) {
-                logWarn(m_log, "{}: skipping an unreadable plugin record at offset {}",
-                        m_path.filename().string(), offset);
-                break;
-            }
-            if (*bodyBytes > payload.remaining()) {
-                logWarn(m_log,
-                        "{}: plugin record at offset {} claims {} bytes of body but only {} "
-                        "remain; skipping it",
-                        m_path.filename().string(), offset, *bodyBytes, payload.remaining());
+            auto decoded = decodePluginData(payload);
+            if (!decoded) {
+                logWarn(m_log, "{}: skipping a plugin record at offset {} ({})",
+                        m_path.filename().string(), offset, decoded.error().message());
                 break;
             }
 
-            record.pluginId = std::move(*pluginId);
-            record.recordName = std::move(*recordName);
-            record.schemaVersion = *schemaVersion;
-            record.monotonicNs = *monotonicNs;
-            record.body = data() + payloadOffset + payload.offset();
-            record.bodyBytes = *bodyBytes;
+            PluginRecord record;
+            record.pluginId = std::move(decoded->pluginId);
+            record.recordName = std::move(decoded->recordName);
+            record.schemaVersion = decoded->schemaVersion;
+            record.monotonicNs = decoded->monotonicNs;
+            record.body = decoded->body;
+            record.bodyBytes = decoded->bodyBytes;
 
             m_pluginRecords.push_back(std::move(record));
             m_pluginPayloads.push_back(RawPayload{payloadOffset, *payloadBytes});
@@ -629,57 +515,33 @@ Result<HistoryTile> SessionReader::readTileAt(const IndexEntry& entry) const {
                                  entry.offset);
     }
 
-    ByteReader reader(data(), size());
-    reader.seek(payloadOffset);
-
-    HistoryTile tile;
-    auto segmentId = reader.readU32();
-    auto lod = reader.readU32();
-    auto timeBlock = reader.readU32();
-    auto freqBlock = reader.readU32();
-    auto lines = reader.readU32();
-    auto bins = reader.readU32();
-    auto originDb = reader.readF32();
-    auto firstNs = reader.readU64();
-    auto lastNs = reader.readU64();
-
-    if (!segmentId || !lod || !timeBlock || !freqBlock || !lines || !bins || !originDb ||
-        !firstNs || !lastNs) {
-        return fail<HistoryTile>(ErrorCode::Corrupt, "unreadable tile header");
+    ByteReader reader(data() + payloadOffset, *payloadBytes);
+    auto decoded = decodeTile(reader);
+    if (!decoded) {
+        return fail<HistoryTile>(ErrorCode::Corrupt, "tile at {}: {}", entry.offset,
+                                 decoded.error().message());
     }
 
-    tile.segmentId = *segmentId;
-    tile.lod = *lod;
-    tile.timeBlock = *timeBlock;
-    tile.freqBlock = *freqBlock;
-    tile.lines = *lines;
-    tile.bins = *bins;
-    tile.originDb = *originDb;
-    tile.firstLineNs = *firstNs;
-    tile.lastLineNs = *lastNs;
+    HistoryTile tile;
+    tile.segmentId = decoded->header.segmentId;
+    tile.lod = decoded->header.lod;
+    tile.timeBlock = decoded->header.timeBlock;
+    tile.freqBlock = decoded->header.freqBlock;
+    tile.lines = decoded->header.lines;
+    tile.bins = decoded->header.bins;
+    tile.originDb = decoded->header.originDb;
+    tile.firstLineNs = decoded->header.firstLineNs;
+    tile.lastLineNs = decoded->header.lastLineNs;
+    tile.data = std::move(decoded->data);
 
     // The tile's frequency extent comes from its segment's grid, looked up by
     // id. Using the segment's position here is how an extract that excludes
     // segment 0 ends up drawing every tile at another segment's frequencies.
-    if (const SegmentInfo* owner = segment(*segmentId)) {
+    if (const SegmentInfo* owner = segment(tile.segmentId)) {
         const SegmentGrid& grid = owner->grid;
         tile.binWidthHz = grid.binWidthHz;
-        tile.startHz = grid.startHz + grid.binWidthHz * static_cast<double>(*freqBlock * kTileBins);
-    }
-
-    // Computed in 64 bits and checked before it becomes an allocation. Both
-    // operands are attacker-controlled u32s whose product does not fit in 32,
-    // and `size_t` is only 64 bits if the platform says so.
-    const std::uint64_t bytes =
-        static_cast<std::uint64_t>(*lines) * static_cast<std::uint64_t>(*bins);
-    if (bytes > static_cast<std::uint64_t>(reader.remaining())) {
-        return fail<HistoryTile>(ErrorCode::Corrupt,
-                                 "tile at {} claims {} bytes of data but only {} remain",
-                                 entry.offset, bytes, reader.remaining());
-    }
-    tile.data.resize(static_cast<std::size_t>(bytes));
-    if (auto read = reader.readBytes(tile.data.data(), static_cast<std::size_t>(bytes)); !read) {
-        return unexpected<Error>(read.error());
+        tile.startHz =
+            grid.startHz + (grid.binWidthHz * static_cast<double>(tile.freqBlock * kTileBins));
     }
 
     return tile;
@@ -987,19 +849,11 @@ Status SessionReader::extract(const fs::path& destination, const HistoryQuery& r
             continue;
         }
 
-        std::vector<std::byte> segmentPayload;
         // The original id is preserved rather than renumbered. Renumbering
         // would break every tile record's segmentId, which is copied verbatim.
-        writeU32(segmentPayload, segmentInfo.id);
-        writeF64(segmentPayload, segmentInfo.grid.startHz);
-        writeF64(segmentPayload, segmentInfo.grid.binWidthHz);
-        writeU32(segmentPayload, segmentInfo.grid.binCount);
-        writeU64(segmentPayload, segmentInfo.startWallNs);
-        writeU64(segmentPayload, segmentInfo.startMonotonicNs);
-        writeString(segmentPayload, segmentInfo.reason);
-
-        // Re-encode the config verbatim so the extract stands alone.
-        encodeConfig(segmentPayload, segmentInfo.config);
+        // The config is re-encoded in full so the extract stands alone.
+        std::vector<std::byte> segmentPayload;
+        encodeSegmentOpen(segmentPayload, segmentInfo);
 
         emit(RecordType::SegmentOpen, segmentPayload);
 

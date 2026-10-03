@@ -177,6 +177,13 @@ const Antenna* AntennaLibrary::find(std::string_view id) const {
     return match != m_entries.end() ? &*match : nullptr;
 }
 
+AntennaLibrary AntennaLibrary::of(std::vector<Antenna> entries) {
+    AntennaLibrary library;
+    library.m_entries = std::move(entries);
+    library.sort();
+    return library;
+}
+
 void AntennaLibrary::add(Antenna antenna) {
     antenna.builtin = false;
 

@@ -732,7 +732,7 @@ void SweepEngine::completePass() {
     if (passSeconds > 0.0) {
         const double rate = m_plan.totalSpanHz() / passSeconds;
         m_measuredRate.store(rate, std::memory_order_relaxed);
-        m_telemetry.render().sweepSpeedHzPerSec.store(rate, std::memory_order_relaxed);
+        m_telemetry.process().sweepSpeedHzPerSec.store(rate, std::memory_order_relaxed);
     }
 
     m_events.publish(SweepPassEvent{.monotonicNs = now,

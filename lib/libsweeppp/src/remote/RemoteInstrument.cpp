@@ -1,0 +1,867 @@
+// SPDX-FileCopyrightText: 2026 Aurimas Niekis <aurimas@niekis.lt>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "sweeppp/remote/RemoteInstrument.hpp"
+
+#include "remote/StreamIo.hpp"
+#include "sweeppp/core/Clock.hpp"
+#include "sweeppp/core/Log.hpp"
+#include "sweeppp/core/Version.hpp"
+#include "sweeppp/crypto/Sha256.hpp"
+#include "sweeppp/history/EventMapping.hpp"
+#include "sweeppp/net/Socket.hpp"
+#include "sweeppp/remote/ClockMap.hpp"
+#include "sweeppp/remote/FrameCodec.hpp"
+#include "sweeppp/remote/Messages.hpp"
+#include "sweeppp/remote/WireCodec.hpp"
+
+#include <algorithm>
+#include <charconv>
+#include <condition_variable>
+#include <format>
+#include <mutex>
+#include <sweeps/Records.hpp>
+#include <thread>
+
+namespace sweeppp::remote {
+namespace {
+
+using io::asBytes;
+using io::Clock;
+using sweeps::Metadata;
+
+constexpr std::uint64_t kRateWindowNs = 1'000'000'000;
+
+bool isType(const sweeps::StreamRecord& record, sweeps::RecordType type) {
+    return record.header.type == static_cast<std::uint16_t>(type);
+}
+
+std::vector<std::byte> messageBytes(std::string_view name, const Metadata& body) {
+    std::vector<std::byte> out;
+    appendMessage(out, name, body, monotonicNs());
+    return out;
+}
+
+/// A refusal, as the error a caller can show.
+Error refusalError(const Refused& refused, const std::string& server) {
+    if (refused.reason == refusal::kAuth) {
+        return Error{ErrorCode::PermissionDenied,
+                     std::format("{} did not accept the token", server)};
+    }
+    if (refused.reason == refusal::kBusy) {
+        return Error{ErrorCode::Unavailable,
+                     std::format("{} is in use by another desktop", server)};
+    }
+    if (refused.reason == refusal::kVersion) {
+        return Error{ErrorCode::Unsupported, std::format("{}: {}", server, refused.message)};
+    }
+    return Error{ErrorCode::ProtocolError,
+                 std::format("{} refused the connection: {}", server,
+                             refused.message.empty() ? refused.reason : refused.message)};
+}
+
+} // namespace
+
+// --------------------------------------------------------------- the endpoint
+
+std::string RemoteEndpoint::address() const {
+    if (host.find(':') != std::string::npos) {
+        return std::format("[{}]:{}", host, port);
+    }
+    return std::format("{}:{}", host, port);
+}
+
+Result<RemoteEndpoint> RemoteEndpoint::parse(std::string_view address) {
+    RemoteEndpoint endpoint;
+    std::string_view portText;
+    if (address.starts_with('[')) {
+        const std::size_t close = address.find(']');
+        if (close == std::string_view::npos) {
+            return fail<RemoteEndpoint>(ErrorCode::InvalidArgument, "'{}' has no closing ]",
+                                        address);
+        }
+        endpoint.host = std::string(address.substr(1, close - 1));
+        const std::string_view rest = address.substr(close + 1);
+        if (!rest.empty()) {
+            if (!rest.starts_with(':')) {
+                return fail<RemoteEndpoint>(ErrorCode::InvalidArgument, "'{}' is not host:port",
+                                            address);
+            }
+            portText = rest.substr(1);
+        }
+    } else if (const std::size_t colon = address.rfind(':');
+               colon != std::string_view::npos && address.find(':') == colon) {
+        endpoint.host = std::string(address.substr(0, colon));
+        portText = address.substr(colon + 1);
+    } else {
+        // No colon, or several: a bare IPv6 address with no port.
+        endpoint.host = std::string(address);
+    }
+
+    if (endpoint.host.empty()) {
+        return fail<RemoteEndpoint>(ErrorCode::InvalidArgument, "'{}' names no host", address);
+    }
+    if (!portText.empty()) {
+        unsigned value = 0;
+        const auto [end, error] =
+            std::from_chars(portText.data(), portText.data() + portText.size(), value);
+        if (error != std::errc{} || end != portText.data() + portText.size() || value == 0 ||
+            value > 65535) {
+            return fail<RemoteEndpoint>(ErrorCode::InvalidArgument, "'{}' is not a port", portText);
+        }
+        endpoint.port = static_cast<std::uint16_t>(value);
+    }
+    return endpoint;
+}
+
+// -------------------------------------------------------------------- the link
+
+/// The connection and the two threads on it. Everything the reader hands the
+/// owner goes through the inbox; everything the owner sends goes through the
+/// outbox.
+struct RemoteInstrument::Link {
+    Link(net::TcpSocket socket, sweeps::RecordFramer framer, FrameBus& output, EventBus& events)
+        : socket(std::move(socket)), framer(std::move(framer)), output(output), events(events) {}
+
+    void start() {
+        reader = std::thread([this] { readLoop(); });
+        writer = std::thread([this] { writeLoop(); });
+    }
+
+    /// Says goodbye if it can, then closes and joins.
+    void close() {
+        {
+            const std::lock_guard lock(outMutex);
+            closing = true;
+        }
+        outWake.notify_all();
+        if (writer.joinable()) {
+            writer.join();
+        }
+        stopping.store(true);
+        socket.shutdown();
+        if (reader.joinable()) {
+            reader.join();
+        }
+    }
+
+    void push(std::vector<std::byte> bytes) {
+        {
+            const std::lock_guard lock(outMutex);
+            outbox.push_back(std::move(bytes));
+        }
+        outWake.notify_all();
+    }
+
+    // ---- the reader -------------------------------------------------------------
+
+    void readLoop() {
+        std::vector<std::byte> buffer(io::kReceiveChunk);
+        auto lastHeard = Clock::now();
+        std::string reason;
+        while (!stopping.load() && reason.empty()) {
+            sweeps::StreamRecord record;
+            while (reason.empty()) {
+                auto next = framer.next(record);
+                if (!next) {
+                    reason = next.error().message();
+                    break;
+                }
+                if (!*next) {
+                    break;
+                }
+                reason = handle(record);
+            }
+            if (!reason.empty()) {
+                break;
+            }
+
+            auto readable = socket.waitReadable(io::kReadSlice);
+            if (!readable) {
+                reason = readable.error().message();
+                break;
+            }
+            if (!*readable) {
+                if (Clock::now() - lastHeard > kSilenceTimeout) {
+                    reason = std::format("nothing heard for {} s", kSilenceTimeout.count());
+                }
+                continue;
+            }
+            auto got =
+                socket.receive({reinterpret_cast<std::uint8_t*>(buffer.data()), buffer.size()});
+            if (!got) {
+                reason = got.error().message();
+                break;
+            }
+            if (*got == 0) {
+                reason = "the server closed the connection";
+                break;
+            }
+            framer.feed(buffer.data(), *got);
+            bytesReceived.fetch_add(*got);
+            lastHeard = Clock::now();
+        }
+
+        {
+            const std::lock_guard lock(inMutex);
+            if (lostReason.empty()) {
+                lostReason = std::move(reason);
+            }
+        }
+        alive.store(false);
+        outWake.notify_all();
+    }
+
+    /// Empty to carry on, or why the link ends here.
+    std::string handle(const sweeps::StreamRecord& record) {
+        using sweeps::RecordType;
+        const std::uint64_t now = monotonicNs();
+
+        if (isType(record, RecordType::SegmentOpen) || isType(record, RecordType::Tile) ||
+            isType(record, RecordType::SegmentClose)) {
+            if (auto applied = mirror.apply(record); !applied) {
+                return applied.error().message();
+            }
+            return {};
+        }
+
+        if (isType(record, RecordType::Event)) {
+            sweeps::ByteReader in(record.payload.data(), record.payload.size());
+            if (auto event = sweeps::decodeEvent(in)) {
+                session::publishSessionEvent(events, *event,
+                                             clocks.toClient(event->monotonicNs, now));
+            }
+            return {};
+        }
+
+        if (isType(record, RecordType::Telemetry)) {
+            if (auto report = decodeTelemetry(record)) {
+                const std::lock_guard lock(inMutex);
+                telemetry = std::move(*report);
+            }
+            return {};
+        }
+
+        if (isType(record, RecordType::EndOfStream)) {
+            return "the server ended the stream";
+        }
+
+        if (!isType(record, RecordType::PluginData)) {
+            return {};
+        }
+        auto message = decodeMessage(record);
+        if (!message) {
+            return message.error().message();
+        }
+
+        if (message->name == msg::kFrame) {
+            const FrameCommit commit = FrameCommit::from(message->body);
+            auto frame = mirror.commit(commit);
+            if (!frame) {
+                return frame.error().message();
+            }
+            const std::uint64_t hostNs = clocks.toClient(commit.hostTimeNs, now);
+            (*frame)->hostTimeNs = hostNs;
+            (*frame)->wallTimeNs = wallClockNs() - (now - hostNs);
+            output.publish(std::move(*frame));
+        } else if (message->name == msg::kPong) {
+            const Pong pong = Pong::from(message->body);
+            clocks.observe(pong.clientNs, pong.serverNs, now);
+            roundTripNs.store(clocks.lastRoundTripNs());
+        } else if (message->name == msg::kBye) {
+            const Bye bye = Bye::from(message->body);
+            return bye.reason == refusal::kShutdown
+                       ? "the server shut down"
+                       : std::format("the server said goodbye: {}", bye.reason);
+        } else {
+            const std::lock_guard lock(inMutex);
+            inbox.push_back(std::move(*message));
+        }
+        return {};
+    }
+
+    // ---- the writer -------------------------------------------------------------
+
+    void writeLoop() {
+        std::uint64_t pingId = 0;
+        auto nextPing = Clock::now();
+        std::vector<std::vector<std::byte>> batch;
+        std::vector<std::byte> buffer;
+        while (true) {
+            bool closingNow = false;
+            {
+                std::unique_lock lock(outMutex);
+                outWake.wait_until(lock, nextPing,
+                                   [this] { return closing || !outbox.empty() || !alive.load(); });
+                if (!alive.load() && !closing) {
+                    return;
+                }
+                batch.swap(outbox);
+                closingNow = closing;
+            }
+
+            buffer.clear();
+            for (const std::vector<std::byte>& message : batch) {
+                buffer.insert(buffer.end(), message.begin(), message.end());
+            }
+            batch.clear();
+            if (Clock::now() >= nextPing) {
+                appendMessage(buffer, msg::kPing,
+                              Ping{.id = ++pingId, .clientNs = monotonicNs()}.toMetadata());
+                nextPing = Clock::now() + kPingInterval;
+            }
+            if (closingNow) {
+                appendMessage(buffer, msg::kBye, Bye{.reason = "closed"}.toMetadata());
+            }
+            if (!buffer.empty() && !socket.sendAll(asBytes(buffer))) {
+                return;
+            }
+            if (closingNow) {
+                return;
+            }
+        }
+    }
+
+    net::TcpSocket socket;
+    sweeps::RecordFramer framer;
+    FrameBus& output;
+    EventBus& events;
+
+    std::atomic<bool> stopping{false};
+    std::atomic<bool> alive{true};
+    std::atomic<std::uint64_t> bytesReceived{0};
+    std::atomic<std::uint64_t> roundTripNs{0};
+
+    std::mutex outMutex;
+    std::condition_variable outWake;
+    std::vector<std::vector<std::byte>> outbox;
+    bool closing = false;
+
+    std::mutex inMutex;
+    std::vector<Message> inbox;
+    std::optional<TelemetryReport> telemetry;
+    std::string lostReason;
+
+    // The reader's alone.
+    ClockMap clocks;
+    FrameMirror mirror;
+
+    std::thread reader;
+    std::thread writer;
+};
+
+// ---------------------------------------------------------------- connecting
+
+RemoteInstrument::RemoteInstrument(RemoteEndpoint endpoint, FrameBus& output, EventBus& events)
+    : m_endpoint(std::move(endpoint)), m_output(output), m_events(events) {
+}
+
+RemoteInstrument::~RemoteInstrument() {
+    disconnect();
+}
+
+Result<std::unique_ptr<RemoteInstrument>>
+RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, EventBus& events,
+                          std::chrono::milliseconds timeout) {
+    using Instance = std::unique_ptr<RemoteInstrument>;
+    const std::string where = endpoint.address();
+    const std::atomic<bool> never{false};
+    const auto deadline = Clock::now() + timeout;
+
+    auto socket = net::TcpSocket::connect(endpoint.host, endpoint.port, timeout);
+    if (!socket) {
+        return std::unexpected(std::move(socket).error());
+    }
+    (void)socket->setNoDelay(true);
+    (void)socket->setKeepAlive(true);
+
+    if (auto sent = io::sendStreamHeader(*socket); !sent) {
+        return std::unexpected(std::move(sent).error());
+    }
+    if (auto header = io::readStreamHeader(*socket, deadline, never); !header) {
+        return fail<Instance>(header.error().code(), "{} is not a Sweep++ server: {}", where,
+                              header.error().message());
+    }
+
+    sweeps::RecordFramer framer(kMaxServerRecordBytes);
+    std::optional<TelemetryReport> telemetry;
+    const auto nextMessage = [&](std::initializer_list<std::string_view> names) -> Result<Message> {
+        while (true) {
+            auto record = io::readRecord(*socket, framer, deadline, never);
+            if (!record) {
+                return std::unexpected(std::move(record).error());
+            }
+            if (isType(*record, sweeps::RecordType::Telemetry)) {
+                if (auto report = decodeTelemetry(*record)) {
+                    telemetry = std::move(*report);
+                }
+                continue;
+            }
+            if (!isType(*record, sweeps::RecordType::PluginData)) {
+                continue;
+            }
+            auto message = decodeMessage(*record);
+            if (!message) {
+                return std::unexpected(std::move(message).error());
+            }
+            if (std::ranges::find(names, message->name) != names.end()) {
+                return message;
+            }
+        }
+    };
+    const auto sendMessage = [&](std::string_view name, const Metadata& body) {
+        return socket->sendAll(asBytes(messageBytes(name, body)));
+    };
+
+    if (auto sent = sendMessage(
+            msg::kHello, Hello{.protocolVersion = kProtocolVersion,
+                               .software = std::format("{} {}", productName(), versionString())}
+                             .toMetadata());
+        !sent) {
+        return std::unexpected(std::move(sent).error());
+    }
+
+    auto offered = nextMessage({msg::kChallenge, msg::kRefused});
+    if (!offered) {
+        return std::unexpected(std::move(offered).error());
+    }
+    if (offered->name == msg::kRefused) {
+        return std::unexpected(refusalError(Refused::from(offered->body), where));
+    }
+    const Challenge challenge = Challenge::from(offered->body);
+    if (challenge.protocolVersion != kProtocolVersion) {
+        return fail<Instance>(ErrorCode::Unsupported,
+                              "{} speaks protocol {}, this Sweep++ speaks {}", where,
+                              challenge.protocolVersion, kProtocolVersion);
+    }
+    if (challenge.authRequired && endpoint.token.empty()) {
+        return fail<Instance>(ErrorCode::PermissionDenied, "{} needs a token", where);
+    }
+
+    Auth auth;
+    if (auto filled = crypto::fillRandom(auth.clientNonce); !filled) {
+        return std::unexpected(std::move(filled).error());
+    }
+    auth.mac = authMac(endpoint.token, challenge.serverNonce, auth.clientNonce);
+    if (auto sent = sendMessage(msg::kAuth, auth.toMetadata()); !sent) {
+        return std::unexpected(std::move(sent).error());
+    }
+
+    auto answer = nextMessage({msg::kWelcome, msg::kRefused});
+    if (!answer) {
+        return std::unexpected(std::move(answer).error());
+    }
+    if (answer->name == msg::kRefused) {
+        return std::unexpected(refusalError(Refused::from(answer->body), where));
+    }
+
+    Instance instrument(new RemoteInstrument(endpoint, output, events));
+    const Welcome welcome = Welcome::from(answer->body);
+    instrument->m_serverName = welcome.serverName.empty() ? endpoint.host : welcome.serverName;
+
+    auto state = nextMessage({msg::kState});
+    if (!state) {
+        return std::unexpected(std::move(state).error());
+    }
+    const State first = State::from(state->body);
+    instrument->applyState(first.ackSeq, first.sections);
+
+    instrument->m_linkThreads =
+        std::make_unique<Link>(std::move(*socket), std::move(framer), output, events);
+    if (telemetry) {
+        const std::lock_guard lock(instrument->m_linkThreads->inMutex);
+        instrument->m_linkThreads->telemetry = std::move(telemetry);
+    }
+    return instrument;
+}
+
+void RemoteInstrument::begin() {
+    if (!m_linkThreads || m_closed) {
+        return;
+    }
+    m_linkThreads->start();
+    if (m_device) {
+        m_events.publish(DeviceOpenedEvent{.monotonicNs = monotonicNs(),
+                                           .deviceId = m_device->info.id,
+                                           .label = displayLabel(),
+                                           .serial = m_device->info.serial});
+    }
+}
+
+void RemoteInstrument::disconnect() {
+    if (m_closed) {
+        return;
+    }
+    m_closed = true;
+    if (m_linkThreads) {
+        m_linkThreads->close();
+    }
+    if (m_device) {
+        m_events.publish(
+            DeviceClosedEvent{.monotonicNs = monotonicNs(),
+                              .deviceId = m_device->info.id,
+                              .reason = m_linkError.empty() ? "disconnected" : m_linkError});
+    }
+    m_device.reset();
+    m_values.clear();
+    m_running = false;
+    m_learning = false;
+    m_health.clear();
+    m_haveTelemetry = false;
+}
+
+bool RemoteInstrument::linkUp() const noexcept {
+    return !m_closed && m_linkThreads != nullptr;
+}
+
+void RemoteInstrument::linkLost(std::string reason) {
+    m_linkError = std::move(reason);
+    logWarn("remote", "lost {}: {}", m_endpoint.address(), m_linkError);
+    m_notices.push_back(InstrumentNotice{
+        .kind = InstrumentNotice::Kind::Condition,
+        .text = std::format("Lost the link to {}: {}", m_serverName, m_linkError)});
+    disconnect();
+}
+
+// ------------------------------------------------------------------ the state
+
+void RemoteInstrument::send(std::string_view op, Metadata args) {
+    if (!linkUp()) {
+        return;
+    }
+    const std::uint64_t seq = ++m_seq;
+    for (const std::string_view name : sectionsTouchedBy(op)) {
+        m_pending.insert_or_assign(std::string(name), seq);
+    }
+    m_linkThreads->push(messageBytes(
+        msg::kCommand,
+        Command{.seq = seq, .op = std::string(op), .args = std::move(args)}.toMetadata()));
+}
+
+void RemoteInstrument::applyState(std::uint64_t ackSeq, const Metadata& sections) {
+    for (const auto& [name, value] : sections) {
+        const Metadata* body = value.asHash();
+        if (body == nullptr) {
+            continue;
+        }
+        if (const auto pending = m_pending.find(name); pending != m_pending.end()) {
+            if (ackSeq < pending->second) {
+                continue;
+            }
+            m_pending.erase(pending);
+        }
+        applySection(name, *body);
+    }
+}
+
+void RemoteInstrument::applySection(std::string_view name, const Metadata& body) {
+    if (name == section::kDevice) {
+        if (body.getBool("present")) {
+            m_device = decodeDevice(hashAt(body, "descriptor"));
+        } else {
+            m_device.reset();
+        }
+        m_antennaKey = body.getString("antennaKey");
+        m_deviceLabel = body.getString("displayLabel");
+    } else if (name == section::kValues) {
+        m_values.clear();
+        for (const auto& [key, value] : hashAt(body, "parameters")) {
+            m_values.insert_or_assign(key, decodeValue(value));
+        }
+        m_selectedRxPort = body.getString("selectedRxPort");
+    } else if (name == section::kRun) {
+        m_running = body.getBool("running");
+        m_sweeping = body.getBool("sweeping");
+        m_startGeneration = static_cast<std::uint64_t>(body.getInt("startGeneration"));
+        m_engine = decodeEngineStats(hashAt(body, "engine"));
+    } else if (name == section::kPlan) {
+        m_plan = decodePlan(body);
+    } else if (name == section::kSchedule) {
+        m_schedule = decodeSchedule(body);
+    } else if (name == section::kPipeline) {
+        m_pipeline = decodePipeline(body);
+    } else if (name == section::kBackends) {
+        m_backends = decodeBackends(body);
+        m_backendName = body.getString("current");
+    } else if (name == section::kCorrections) {
+        m_correctionSettings = decodeCorrectionSettings(hashAt(body, "settings"));
+        m_correctionSummary = decodeCorrectionSummary(hashAt(body, "summary"));
+    } else if (name == section::kLearning) {
+        m_learning = body.getBool("active");
+        m_learningLabel = body.getString("label");
+    } else if (name == section::kAntennas) {
+        m_antennas = AntennaLibrary::of(decodeAntennas(body));
+    } else if (name == section::kAssignments) {
+        m_assignments = decodeAssignments(body);
+    } else if (name == section::kSwitchers) {
+        m_switchers = decodeSwitcherViews(hashAt(body, "open"));
+        m_availableSwitchers = decodeSwitcherInfos(hashAt(body, "available"));
+    } else if (name == section::kRfPath) {
+        m_rfLegs = decodeRfLegs(hashAt(body, "legs"));
+        m_coverage = decodeRanges(hashAt(body, "coverage"));
+    }
+}
+
+void RemoteInstrument::tick(std::uint64_t nowNs) {
+    if (!m_linkThreads || m_closed) {
+        return;
+    }
+
+    std::vector<Message> inbox;
+    std::optional<TelemetryReport> telemetry;
+    {
+        const std::lock_guard lock(m_linkThreads->inMutex);
+        inbox.swap(m_linkThreads->inbox);
+        telemetry = std::exchange(m_linkThreads->telemetry, std::nullopt);
+    }
+
+    for (const Message& message : inbox) {
+        if (message.name == msg::kState) {
+            const State state = State::from(message.body);
+            applyState(state.ackSeq, state.sections);
+        } else if (message.name == msg::kReply) {
+            const Reply reply = Reply::from(message.body);
+            if (!reply.ok) {
+                m_notices.push_back(
+                    InstrumentNotice{.kind = InstrumentNotice::Kind::Error, .text = reply.message});
+            }
+        } else if (message.name == msg::kNotice) {
+            m_notices.push_back(decodeNotice(message.body));
+        }
+    }
+
+    if (telemetry) {
+        m_engineTelemetry.stream = telemetry->stream;
+        m_engineTelemetry.process = telemetry->process;
+        m_health = std::move(telemetry->health);
+        m_link.framesSent = telemetry->link.framesSent;
+        m_link.passesCoalesced = telemetry->link.passesCoalesced;
+        m_link.partialsCoalesced = telemetry->link.partialsCoalesced;
+        m_link.eventsDropped = telemetry->link.eventsDropped;
+        m_haveTelemetry = true;
+    }
+
+    const std::uint64_t received = m_linkThreads->bytesReceived.load();
+    m_link.bytesReceived = received;
+    m_link.roundTripMs = static_cast<double>(m_linkThreads->roundTripNs.load()) / 1e6;
+    if (m_rateWindowNs == 0) {
+        m_rateWindowNs = nowNs;
+        m_rateWindowBytes = received;
+    } else if (nowNs - m_rateWindowNs >= kRateWindowNs) {
+        m_link.bytesPerSec =
+            static_cast<double>(received - m_rateWindowBytes) / nsToSeconds(nowNs - m_rateWindowNs);
+        m_rateWindowNs = nowNs;
+        m_rateWindowBytes = received;
+    }
+
+    if (!m_linkThreads->alive.load()) {
+        std::string reason;
+        {
+            const std::lock_guard lock(m_linkThreads->inMutex);
+            reason = m_linkThreads->lostReason;
+        }
+        linkLost(reason.empty() ? std::string("the connection ended") : std::move(reason));
+    }
+}
+
+std::vector<InstrumentNotice> RemoteInstrument::takeNotices() {
+    return std::exchange(m_notices, {});
+}
+
+const TelemetrySnapshot* RemoteInstrument::engineTelemetry() const noexcept {
+    return m_haveTelemetry ? &m_engineTelemetry : nullptr;
+}
+
+void RemoteInstrument::resetTelemetry() {
+    send(op::kResetTelemetry, {});
+}
+
+// ------------------------------------------------------------------ the radio
+
+std::string RemoteInstrument::displayLabel() const {
+    if (!m_device) {
+        return m_serverName;
+    }
+    const std::string& label = m_deviceLabel.empty() ? m_device->info.label : m_deviceLabel;
+    return std::format("{} on {}", label, m_serverName);
+}
+
+const DeviceDescriptor* RemoteInstrument::device() const noexcept {
+    return m_device ? &*m_device : nullptr;
+}
+
+std::optional<SdrValue> RemoteInstrument::parameter(std::string_view key) const {
+    const auto found = m_values.find(key);
+    return found != m_values.end() ? std::optional<SdrValue>(found->second) : std::nullopt;
+}
+
+Status RemoteInstrument::setDeviceParameter(const std::string& key, const SdrValue& value) {
+    if (!m_device) {
+        return fail(ErrorCode::NotFound, "no device is open");
+    }
+    m_values.insert_or_assign(key, value);
+    if (key == "sample_rate" && m_sweeping) {
+        m_plan.sampleRate = asDouble(value);
+    }
+    Metadata args;
+    args.setString("key", key);
+    args.set("value", encodeValue(value));
+    send(op::kSetParameter, std::move(args));
+    return ok();
+}
+
+bool RemoteInstrument::parameterNeedsStop(const SdrParameter& parameter) const noexcept {
+    if (!parameter.requiresStop) {
+        return false;
+    }
+    return !(m_sweeping && parameter.key == "sample_rate");
+}
+
+// ------------------------------------------------------------------ running
+
+Status RemoteInstrument::start() {
+    if (!m_device) {
+        return fail(ErrorCode::NotFound, "no device is open");
+    }
+    m_running = true;
+    send(op::kStart, {});
+    return ok();
+}
+
+void RemoteInstrument::stop() {
+    m_running = false;
+    send(op::kStop, {});
+}
+
+Status RemoteInstrument::restart() {
+    send(op::kRestart, {});
+    return ok();
+}
+
+Status RemoteInstrument::setSweeping(bool enabled) {
+    m_sweeping = enabled;
+    Metadata args;
+    args.setBool("enabled", enabled);
+    send(op::kSetSweeping, std::move(args));
+    return ok();
+}
+
+Status RemoteInstrument::applySweepPlan(const SweepPlan& plan) {
+    m_plan = plan;
+    Metadata args;
+    args.setHash("plan", encodePlan(plan));
+    send(op::kApplySweepPlan, std::move(args));
+    return plan.validate();
+}
+
+Status RemoteInstrument::sweepRange(const SweepPlan& plan) {
+    m_plan = plan;
+    m_sweeping = true;
+    Metadata args;
+    args.setHash("plan", encodePlan(plan));
+    send(op::kSweepRange, std::move(args));
+    return plan.validate();
+}
+
+Status RemoteInstrument::applyPipelineConfig(const PipelineConfig& config) {
+    m_pipeline = config;
+    Metadata args;
+    args.setHash("config", encodePipeline(config));
+    send(op::kApplyPipelineConfig, std::move(args));
+    return ok();
+}
+
+Status RemoteInstrument::setFftBackend(std::string_view name) {
+    const bool known = std::ranges::any_of(m_backends, [name](const FftBackendInfo& backend) {
+        return backend.name == name && backend.available;
+    });
+    if (!known) {
+        return fail(ErrorCode::NotFound, "{} has no FFT backend '{}'", m_serverName, name);
+    }
+    m_backendName = std::string(name);
+    Metadata args;
+    args.setString("name", std::string(name));
+    send(op::kSetFftBackend, std::move(args));
+    return ok();
+}
+
+// -------------------------------------------------------------- corrections
+
+void RemoteInstrument::setCorrectionSettings(const CorrectionSettings& settings) {
+    m_correctionSettings = settings;
+    Metadata args;
+    args.setHash("settings", encodeCorrectionSettings(settings));
+    send(op::kSetCorrectionSettings, std::move(args));
+}
+
+Status RemoteInstrument::startLearning() {
+    if (!m_running) {
+        return fail(ErrorCode::Unavailable, "start acquisition before learning corrections");
+    }
+    m_learning = true;
+    send(op::kStartLearning, {});
+    return ok();
+}
+
+void RemoteInstrument::cancelLearning() {
+    m_learning = false;
+    send(op::kCancelLearning, {});
+}
+
+void RemoteInstrument::clearAutoSpurs() {
+    send(op::kClearAutoSpurs, {});
+}
+
+void RemoteInstrument::clearCorrections() {
+    send(op::kClearCorrections, {});
+}
+
+// ----------------------------------------------------------------- antennas
+
+Status RemoteInstrument::setUserAntennas(std::vector<Antenna> entries) {
+    std::vector<Antenna> library;
+    for (const Antenna& existing : m_antennas.entries()) {
+        const bool shadowed = std::ranges::any_of(
+            entries, [&existing](const Antenna& entry) { return entry.id == existing.id; });
+        if (existing.builtin && !shadowed) {
+            library.push_back(existing);
+        }
+    }
+    for (Antenna& entry : entries) {
+        entry.builtin = false;
+        library.push_back(entry);
+    }
+    m_antennas = AntennaLibrary::of(std::move(library));
+
+    Metadata args;
+    args.setHash("antennas", encodeAntennas(entries));
+    send(op::kSetUserAntennas, std::move(args));
+    return ok();
+}
+
+Status RemoteInstrument::setAntennaAssignments(AntennaAssignments assignments) {
+    Metadata args;
+    args.setHash("assignments", encodeAssignments(assignments));
+    m_assignments = std::move(assignments);
+    send(op::kSetAssignments, std::move(args));
+    return ok();
+}
+
+const Antenna* RemoteInstrument::antennaOnPort(std::string_view portId) const {
+    if (!m_device) {
+        return nullptr;
+    }
+    const std::string_view id = m_assignments.antennaFor(m_antennaKey, portId);
+    return id.empty() ? nullptr : m_antennas.find(id);
+}
+
+const SwitcherView* RemoteInstrument::switcher(std::string_view key) const {
+    const auto match = std::ranges::find(m_switchers, key, &SwitcherView::key);
+    return match != m_switchers.end() ? &*match : nullptr;
+}
+
+void RemoteInstrument::rescanSwitchers() {
+    send(op::kRescanSwitchers, {});
+}
+
+} // namespace sweeppp::remote

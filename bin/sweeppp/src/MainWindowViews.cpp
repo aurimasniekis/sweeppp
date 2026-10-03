@@ -897,8 +897,8 @@ void MainWindow::drawOverviewStrip(float height) {
     // The radio's whole reach when there is one; otherwise the plan with a
     // margin either side, so its outer segments are not flush with the edges.
     FrequencySpan full;
-    if (const ISdrDevice* device = m_state.device()) {
-        full = {std::max(0.0, device->info().minFrequencyHz), device->info().maxFrequencyHz};
+    if (const DeviceDescriptor* device = m_state.device()) {
+        full = {std::max(0.0, device->info.minFrequencyHz), device->info.maxFrequencyHz};
     }
     if (!full.valid()) {
         const SweepPlan& plan = m_state.sweepPlan();

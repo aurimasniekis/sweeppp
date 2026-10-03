@@ -11,8 +11,7 @@
 
 namespace sweeppp::cli {
 
-/// Subcommands. All of them work except `serve`, which reports that it is not
-/// available yet rather than failing obscurely.
+/// Subcommands.
 enum class Command {
     Sweep,     ///< Headless sweep to CSV. The perf and CI harness.
     Calibrate, ///< Learn the receiver's floor and spurs, antenna off.
@@ -93,6 +92,7 @@ struct Options {
     std::string listenAddress = "127.0.0.1";
     std::uint16_t port = 7332;
     std::string token;
+    std::string tokenFile;
 
     /// extract
     double fromSeconds = 0.0;

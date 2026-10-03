@@ -109,14 +109,14 @@ straight from the build tree.
 All presets use Ninja and build into `build/<preset>/`. Compiler warnings are on
 in every preset; none of them turns warnings into errors.
 
-| Preset     | Build type     | What's built                        | Notes                                                 |
-|------------|----------------|-------------------------------------|-------------------------------------------------------|
-| `dev`      | RelWithDebInfo | everything, with tests              | The default.                                          |
-| `debug`    | Debug          | everything, with tests              |                                                       |
-| `release`  | Release        | everything except tests             |                                                       |
-| `asan`     | Debug          | no GUI or server; plugins and tests | AddressSanitizer and UndefinedBehaviorSanitizer.      |
-| `tsan`     | Debug          | no GUI or server; plugins and tests | ThreadSanitizer, mainly for the acquisition pipeline. |
-| `headless` | Release        | no GUI, server or tests             | For machines without a display.                       |
+| Preset     | Build type     | What's built                        | Notes                                                                    |
+|------------|----------------|-------------------------------------|--------------------------------------------------------------------------|
+| `dev`      | RelWithDebInfo | everything, with tests              | The default.                                                             |
+| `debug`    | Debug          | everything, with tests              |                                                                          |
+| `release`  | Release        | everything except tests             |                                                                          |
+| `asan`     | Debug          | no GUI or server; plugins and tests | AddressSanitizer and UndefinedBehaviorSanitizer.                         |
+| `tsan`     | Debug          | no GUI or server; plugins and tests | ThreadSanitizer, mainly for the acquisition pipeline.                    |
+| `headless` | Release        | no GUI, server or tests             | For machines without a display, such as one running `sweeppp-cli serve`. |
 
 - The sanitizer presets still build the plugins, so they still need FFTW and
   the radio libraries.
@@ -165,26 +165,27 @@ PocketFFT (and Accelerate on macOS) still provide the FFT, so the app works.
 Run `make` on its own for the full list. Variables: `PRESET` (default `dev`),
 `JOBS`, `ARGS`, `WITHOUT` and `BUILD_TYPE`.
 
-| Target                                                                             | Does                                                                 |
-|------------------------------------------------------------------------------------|----------------------------------------------------------------------|
-| `make build`                                                                       | Configure and build `PRESET`.                                        |
-| `make debug`, `make release`, `make headless`                                      | Build that preset.                                                   |
-| `make all`                                                                         | Build dev, debug and release.                                        |
-| `make run`                                                                         | Build and start the GUI.                                             |
-| `make cli ARGS="…"`                                                                | Build and run `sweeppp-cli` with those arguments.                    |
-| `make info`                                                                        | List the FFT engines, radios and plugins this build can see.         |
-| `make sweep ARGS="…"`                                                              | A 5-second sweep of the synthetic radio, with statistics.            |
-| `make throughput`                                                                  | A 30-second, 100 MS/s synthetic run that checks no samples are lost. |
-| `make test`                                                                        | Build and run the tests.                                             |
-| `make asan`, `make tsan`                                                           | Run the tests under the sanitizers.                                  |
-| `make sweepsfile`                                                                  | Build, test and install-check libsweepsfile on its own.              |
-| `make check`                                                                       | Everything CI runs: `test`, `sweepsfile`, `asan` and `tsan`.         |
-| `make modules`                                                                     | List the names `make without` accepts.                               |
-| `make without WITHOUT="…"`                                                         | Build with some parts turned off.                                    |
-| `make format`, `make format-check`, `make tidy`, `make check-headers`, `make lint` | See [Code quality](#code-quality).                                   |
-| `make compile-commands`                                                            | Point `compile_commands.json` at `PRESET`'s build, for clangd.       |
-| `make clean`                                                                       | Delete `build/`, downloaded dependencies included.                   |
-| `make rebuild`                                                                     | `clean`, then `build`.                                               |
+| Target                                                                             | Does                                                                  |
+|------------------------------------------------------------------------------------|-----------------------------------------------------------------------|
+| `make build`                                                                       | Configure and build `PRESET`.                                         |
+| `make debug`, `make release`, `make headless`                                      | Build that preset.                                                    |
+| `make all`                                                                         | Build dev, debug and release.                                         |
+| `make run`                                                                         | Build and start the GUI.                                              |
+| `make cli ARGS="…"`                                                                | Build and run `sweeppp-cli` with those arguments.                     |
+| `make info`                                                                        | List the FFT engines, radios and plugins this build can see.          |
+| `make sweep ARGS="…"`                                                              | A 5-second sweep of the synthetic radio, with statistics.             |
+| `make throughput`                                                                  | A 30-second, 100 MS/s synthetic run that checks no samples are lost.  |
+| `make serve ARGS="…"`                                                              | Serve the synthetic radio on loopback, for the desktop to connect to. |
+| `make test`                                                                        | Build and run the tests.                                              |
+| `make asan`, `make tsan`                                                           | Run the tests under the sanitizers.                                   |
+| `make sweepsfile`                                                                  | Build, test and install-check libsweepsfile on its own.               |
+| `make check`                                                                       | Everything CI runs: `test`, `sweepsfile`, `asan` and `tsan`.          |
+| `make modules`                                                                     | List the names `make without` accepts.                                |
+| `make without WITHOUT="…"`                                                         | Build with some parts turned off.                                     |
+| `make format`, `make format-check`, `make tidy`, `make check-headers`, `make lint` | See [Code quality](#code-quality).                                    |
+| `make compile-commands`                                                            | Point `compile_commands.json` at `PRESET`'s build, for clangd.        |
+| `make clean`                                                                       | Delete `build/`, downloaded dependencies included.                    |
+| `make rebuild`                                                                     | `clean`, then `build`.                                                |
 
 ### Building with parts turned off
 
@@ -214,6 +215,9 @@ The tests are split into several executables in `build/<preset>/dist/`:
 
 Each is a doctest binary, so it can also be run directly, with doctest's own
 filters such as `-tc="name*"`.
+
+The remote link's throughput report is skipped by default; run it with
+`sweeppp-tests -tc="throughput*" --no-skip`.
 
 `make check` runs everything CI runs, including both sanitizer builds and the
 standalone libsweepsfile checks.

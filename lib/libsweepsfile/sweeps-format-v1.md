@@ -48,6 +48,7 @@ independent reader or writer without consulting the reference implementation.
 13. [IANA considerations](#13-iana-considerations)
 - [Appendix A: Test vectors](#appendix-a-test-vectors)
 - [Appendix B: Manifest profile](#appendix-b-manifest-profile)
+- [Appendix C: Live streams](#appendix-c-live-streams)
 
 ---
 
@@ -84,7 +85,7 @@ The record encoding in §4 is shared with the streaming protocol: streaming live
 means emitting the same records over a socket instead of to a file. A remote
 reader is therefore the same decoder as a file reader. The `Telemetry` record
 (§4.9) exists only on that path and never appears in a file written by a
-conforming v1 writer.
+conforming v1 writer. Appendix C defines what differs on a stream.
 
 ---
 
@@ -666,9 +667,18 @@ on its own, since `indexOffset` is the authoritative signal of a clean close.
 
 ### 4.9. Telemetry
 
-Reserved for the streaming protocol, where it carries the far end's drop and
-throttle counters. A conforming v1 file writer MUST NOT emit it. Readers MUST
-skip it, as they would any unrecognised record.
+```
+<hash-body>            the sender's counters, §4.2.1
+```
+
+Carried only on a live stream (Appendix C), where it reports the far end's
+state: samples delivered and dropped, transforms computed, the link's own
+counters. A conforming v1 file writer MUST NOT emit it. A file reader MUST skip
+it, as it would any unrecognised record.
+
+The keys are the producer's own, nested as hashes by subject. A receiver MUST
+ignore keys it does not recognise and MUST tolerate a key of an unexpected
+type, exactly as for the manifest (§4.2).
 
 ### 4.10. PluginData
 
@@ -1317,6 +1327,11 @@ accidental damage, not tampering: an attacker who can modify the bytes can
 recompute the CRC. A file whose provenance matters MUST be protected by
 something outside this format.
 
+The same holds for a live stream (Appendix C). Its peer is as untrusted as a
+downloaded file, every rule above applies to what it sends, and anything that
+must be authenticated or kept private is the business of the protocol carrying
+the stream.
+
 ---
 
 ## 13. IANA considerations
@@ -1601,3 +1616,97 @@ Keys appear in ascending byte order — `app_version`, `bins_per_line`, `created
 `db_per_step`, `format_version`, `lod_levels`, `name`, `tile_bins`, `tile_lines`
 — which is the order a writer MUST emit them in (§4.2.1), not merely the order
 this example happens to show.
+
+---
+
+## Appendix C: Live streams
+
+### C.1. Scope
+
+A live stream carries the records of §4 over a reliable, ordered byte stream —
+a TCP connection, typically — as they are produced, for a receiver to display
+rather than to store. This appendix defines how a stream differs from a file.
+Whatever an application layers on top of it — a handshake, authentication,
+commands — travels in `PluginData` records (§4.10) under that application's
+own `pluginId`, and is outside this specification.
+
+### C.2. The stream header
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                     magic "SWPP" (4 x u8)                     |   0
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      majorVersion (u32)                       |   4
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      minorVersion (u32)                       |   8
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                  incompatibleFeatures (u32)                   |  12
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+Each side sends one header before anything else, and checks the other's by the
+decision procedure of §11.2: a wrong magic, a newer major version or an unknown
+feature bit ends the stream. The file header's `indexOffset` and
+`createdWallNs` mean nothing here and are not carried.
+
+### C.3. Records on a stream
+
+Records are framed exactly as in §3.2. Two things are different from a file:
+
+- **A damaged record ends the stream.** A file recovers from a bad record by
+  scanning on (§9.2); on a stream nothing after a bad length can be trusted to
+  start a record, so a checksum mismatch is fatal rather than skipped.
+- **A receiver MUST bound `payloadBytes` before buffering the payload**, and end
+  the stream when a record exceeds that bound. 16 MiB is RECOMMENDED: the
+  largest legitimate record on a stream is a `SegmentOpen` or a tile, both far
+  smaller.
+
+Unrecognised record types are skipped, as in a file. `Index` never appears.
+`Manifest` MAY appear and carries what it does in a file.
+
+### C.4. Segments
+
+A `SegmentOpen` declares the grid and the acquisition configuration in force
+from that point on, superseding any earlier one. Segment ids are unique within
+a stream. Every bin of a newly opened segment is unmeasured until a tile
+carries it. A `SegmentClose` says the sender has stopped producing lines for
+that segment — acquisition stopped, typically.
+
+### C.5. Tiles as updates
+
+On a stream a tile is the latest value of one frequency block, not a block of
+history:
+
+| Field       | On a stream                                                     |
+|-------------|-----------------------------------------------------------------|
+| `segmentId` | the most recently opened segment                                |
+| `lod`       | 0                                                               |
+| `timeBlock` | the sender's line number, modulo 2³², shared by one line's tiles |
+| `freqBlock` | as §6.2                                                         |
+| `lines`     | 1                                                               |
+| `bins`      | as §6.2                                                         |
+
+A receiver applies each tile to its copy of the segment's current line; blocks
+not sent keep the values they last had. A sender SHOULD send only the blocks
+whose values changed, which on a sweep is the part of the span measured since
+the previous line. A tile for any segment but the most recently opened one
+MUST be ignored. Quantisation is §7's, with an origin per tile.
+
+What marks a line as complete and ready to display is the application's to
+define, typically a `PluginData` record after the line's tiles.
+
+### C.6. Events and telemetry
+
+`Event` records (§4.5) carry what they do in a file, timestamped on the
+sender's clocks; a receiver that compares them with its own must map between
+the two. `Telemetry` (§4.9) is sent periodically by the side producing data.
+
+### C.7. Ending a stream
+
+`EndOfStream` (§4.8) says the sender is finished deliberately; the receiver
+SHOULD close the connection. A connection that simply ends is the stream's
+equivalent of a truncated file, and everything received before it remains
+valid.
+
