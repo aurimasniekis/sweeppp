@@ -191,6 +191,11 @@ private:
     void setArrangement(PanelArrangement arrangement);
 
     void setPanelMode(PanelMode mode);
+
+    /// Zooms each panel onto one swept range, lowest first, grouping the
+    /// closest ranges when there are more of them than panels. Mirror only:
+    /// the panels stay free to move afterwards.
+    void fitPanelsToRanges();
     void drawPanelsPopup();
 
     /// Binds each panel to a segment of the plan, by overlap.

@@ -215,4 +215,14 @@ struct SegmentBinding {
 [[nodiscard]] SegmentBinding rebindSegments(std::span<const FrequencySpan> bound,
                                             std::span<const FrequencySpan> segments);
 
+/// The windows that show `segments` in `groups` panels as large as possible.
+///
+/// In frequency order, with overlapping segments merged. When there are more
+/// segments than panels, the two neighbours with the narrowest gap between
+/// them share a window, again and again until they fit -- so what gets drawn
+/// as empty space between ranges is the least it can be. Fewer segments than
+/// panels gives one window per segment.
+[[nodiscard]] std::vector<FrequencySpan> groupSegments(std::span<const FrequencySpan> segments,
+                                                       std::size_t groups);
+
 } // namespace sweeppp::ui

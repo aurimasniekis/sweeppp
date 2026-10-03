@@ -312,6 +312,22 @@ void MainWindow::setPanelMode(PanelMode mode) {
     m_segmentsBound = true;
 }
 
+void MainWindow::fitPanelsToRanges() {
+    PanelLayout& layout = m_state.view().layout;
+
+    std::vector<FrequencySpan> segments;
+    for (const SweepSegment& segment : m_state.sweepPlan().segments) {
+        segments.push_back({segment.startHz, segment.stopHz});
+    }
+
+    // Panels in layout order, which is the order they are drawn in; any past
+    // the last window keep what they show.
+    const std::vector<FrequencySpan> windows = groupSegments(segments, layout.panels.size());
+    for (std::size_t i = 0; i < windows.size(); ++i) {
+        setPanelRange(layout.panels[i], windows[i].startHz, windows[i].stopHz);
+    }
+}
+
 void MainWindow::rebindSpans() {
     PanelLayout& layout = m_state.view().layout;
     const std::vector<SweepSegment>& planned = m_state.sweepPlan().segments;

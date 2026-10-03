@@ -353,4 +353,41 @@ SegmentBinding rebindSegments(std::span<const FrequencySpan> bound,
     return binding;
 }
 
+std::vector<FrequencySpan> groupSegments(std::span<const FrequencySpan> segments,
+                                         std::size_t groups) {
+    std::vector<FrequencySpan> sorted;
+    sorted.reserve(segments.size());
+    for (const FrequencySpan& segment : segments) {
+        if (segment.valid()) {
+            sorted.push_back(segment);
+        }
+    }
+    std::ranges::sort(sorted, {}, &FrequencySpan::startHz);
+
+    std::vector<FrequencySpan> windows;
+    for (const FrequencySpan& segment : sorted) {
+        if (!windows.empty() && segment.startHz <= windows.back().stopHz) {
+            windows.back().stopHz = std::max(windows.back().stopHz, segment.stopHz);
+        } else {
+            windows.push_back(segment);
+        }
+    }
+
+    if (groups == 0) {
+        return {};
+    }
+    while (windows.size() > groups) {
+        std::size_t narrowest = 0;
+        for (std::size_t i = 1; i + 1 < windows.size(); ++i) {
+            const double gap = windows[i + 1].startHz - windows[i].stopHz;
+            if (gap < windows[narrowest + 1].startHz - windows[narrowest].stopHz) {
+                narrowest = i;
+            }
+        }
+        windows[narrowest].stopHz = windows[narrowest + 1].stopHz;
+        windows.erase(windows.begin() + static_cast<std::ptrdiff_t>(narrowest + 1));
+    }
+    return windows;
+}
+
 } // namespace sweeppp::ui

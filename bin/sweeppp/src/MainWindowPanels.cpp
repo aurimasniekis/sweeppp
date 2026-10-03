@@ -3731,6 +3731,23 @@ void MainWindow::drawPanelsPopup() {
         }
     }
 
+    // Mirror's counterpart to Spans, for a moment rather than for good: each
+    // panel lands on a range, and is still free to be moved off it.
+    if (layout.mode == PanelMode::Mirror) {
+        const std::size_t ranges = m_state.sweepPlan().segments.size();
+        ImGui::BeginDisabled(!m_state.sweeping() || ranges == 0);
+        if (ImGui::Button("Fit to ranges", ImVec2(-1, 0))) {
+            fitPanelsToRanges();
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(ranges > layout.panels.size()
+                                  ? "Zoom each panel onto a swept range, lowest first.\n"
+                                    "More ranges than panels: the closest share one."
+                                  : "Zoom each panel onto a swept range, lowest first.");
+        }
+    }
+
     ImGui::Spacing();
     {
         ImGui::BeginDisabled(layout.mode != PanelMode::Spans);

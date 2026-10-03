@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <optional>
 
 namespace sweeppp {
 namespace {
@@ -74,33 +73,19 @@ std::string_view arrangementName(ui::PanelArrangement arrangement) {
     return "single";
 }
 
-::toml::array pairOf(const std::array<float, 2>& values) {
-    return ::toml::array{static_cast<double>(values[0]), static_cast<double>(values[1])};
-}
-
-/// A two-number array, or `fallback` when the key is missing or malformed.
-std::array<float, 2> readPair(const ::toml::table& table, std::string_view key,
-                              const std::array<float, 2>& fallback) {
-    const ::toml::array* values = toml_util::at(table, key).as_array();
-    if (values == nullptr || values->size() != 2) {
-        return fallback;
-    }
-    const std::optional<double> first = (*values)[0].value<double>();
-    const std::optional<double> second = (*values)[1].value<double>();
-    if (!first || !second) {
-        return fallback;
-    }
-    return {static_cast<float>(*first), static_cast<float>(*second)};
-}
-
 void writeLayout(::toml::table& display, const ui::PanelLayout& layout) {
     display.insert_or_assign("panel_mode", std::string(panelModeName(layout.mode)));
     display.insert_or_assign("panel_layout", std::string(arrangementName(ui::arrangementFor(
                                                  layout.attachedCount(), layout.rowsForTwo))));
     display.insert_or_assign("panel_split_x", static_cast<double>(layout.splits.x));
     display.insert_or_assign("panel_split_y", static_cast<double>(layout.splits.y));
-    display.insert_or_assign("panel_thirds_x", pairOf(layout.splits.thirdsX));
-    display.insert_or_assign("panel_thirds_y", pairOf(layout.splits.thirdsY));
+    // Four keys rather than two arrays. toml++ sizes an inline array by casting
+    // log10 of each float to an unsigned integer, which is undefined for any
+    // value under 0.1 -- and these are fractions.
+    display.insert_or_assign("panel_third_x1", static_cast<double>(layout.splits.thirdsX[0]));
+    display.insert_or_assign("panel_third_x2", static_cast<double>(layout.splits.thirdsX[1]));
+    display.insert_or_assign("panel_third_y1", static_cast<double>(layout.splits.thirdsY[0]));
+    display.insert_or_assign("panel_third_y2", static_cast<double>(layout.splits.thirdsY[1]));
     display.insert_or_assign("overview", layout.overview);
 
     // Mirror panels side by side at different zooms are the point of that
@@ -159,8 +144,12 @@ ui::PanelLayout readLayout(const ::toml::table& table) {
     ui::PanelSplits splits;
     splits.x = toml_util::getFloat(table, "display.panel_split_x", splitDefaults.x);
     splits.y = toml_util::getFloat(table, "display.panel_split_y", splitDefaults.y);
-    splits.thirdsX = readPair(table, "display.panel_thirds_x", splitDefaults.thirdsX);
-    splits.thirdsY = readPair(table, "display.panel_thirds_y", splitDefaults.thirdsY);
+    splits.thirdsX = {
+        toml_util::getFloat(table, "display.panel_third_x1", splitDefaults.thirdsX[0]),
+        toml_util::getFloat(table, "display.panel_third_x2", splitDefaults.thirdsX[1])};
+    splits.thirdsY = {
+        toml_util::getFloat(table, "display.panel_third_y1", splitDefaults.thirdsY[0]),
+        toml_util::getFloat(table, "display.panel_third_y2", splitDefaults.thirdsY[1])};
     layout.splits = ui::clampSplits(splits);
     layout.overview = toml_util::getBool(table, "display.overview", true);
 

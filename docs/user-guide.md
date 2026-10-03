@@ -301,6 +301,9 @@ pause.
 Picking a layout with more panels copies the focused one; fewer drops the last
 ones.
 
+In Mirror, **Fit to ranges** zooms each panel onto one swept range, lowest
+first. With more ranges than panels, the closest ranges share a panel.
+
 ### Spans
 
 - Edit a panel's **Start** or **Stop** in its row to change its range.

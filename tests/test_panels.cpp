@@ -340,6 +340,51 @@ TEST_CASE("panels follow their segments by overlap, not by position") {
     }
 }
 
+TEST_CASE("segments are grouped into as many windows as there are panels") {
+    // FM, 433 MHz ISM, 868 MHz ISM and 2.4 GHz, out of order.
+    const std::vector<FrequencySpan> segments{
+        {2.4e9, 2.5e9}, {88e6, 108e6}, {868e6, 870e6}, {433e6, 435e6}};
+
+    SUBCASE("one each when they fit, lowest first") {
+        const std::vector<FrequencySpan> windows = groupSegments(segments, 6);
+        REQUIRE(windows.size() == 4);
+        CHECK(windows[0].startHz == doctest::Approx(88e6));
+        CHECK(windows[1].startHz == doctest::Approx(433e6));
+        CHECK(windows[2].startHz == doctest::Approx(868e6));
+        CHECK(windows[3].stopHz == doctest::Approx(2.5e9));
+    }
+
+    SUBCASE("the narrowest gap is shared first") {
+        // 108 -> 433 MHz is the narrowest gap (325 MHz), ahead of 435 -> 868.
+        const std::vector<FrequencySpan> three = groupSegments(segments, 3);
+        REQUIRE(three.size() == 3);
+        CHECK(three[0].startHz == doctest::Approx(88e6));
+        CHECK(three[0].stopHz == doctest::Approx(435e6));
+        CHECK(three[1].startHz == doctest::Approx(868e6));
+        CHECK(three[2].startHz == doctest::Approx(2.4e9));
+
+        const std::vector<FrequencySpan> two = groupSegments(segments, 2);
+        REQUIRE(two.size() == 2);
+        CHECK(two[0].stopHz == doctest::Approx(870e6));
+        CHECK(two[1].startHz == doctest::Approx(2.4e9));
+    }
+
+    SUBCASE("one panel shows the whole extent") {
+        const std::vector<FrequencySpan> one = groupSegments(segments, 1);
+        REQUIRE(one.size() == 1);
+        CHECK(one[0].startHz == doctest::Approx(88e6));
+        CHECK(one[0].stopHz == doctest::Approx(2.5e9));
+    }
+
+    SUBCASE("overlaps merge, and nothing comes back for no panels") {
+        const std::vector<FrequencySpan> overlapping{{100e6, 200e6}, {150e6, 250e6}, {}};
+        const std::vector<FrequencySpan> windows = groupSegments(overlapping, 4);
+        REQUIRE(windows.size() == 1);
+        CHECK(windows[0].stopHz == doctest::Approx(250e6));
+        CHECK(groupSegments(segments, 0).empty());
+    }
+}
+
 // ---------------------------------------------------------------- the layout
 
 TEST_CASE("a layout adds, removes and keeps a focus") {
