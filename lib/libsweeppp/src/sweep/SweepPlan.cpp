@@ -471,6 +471,23 @@ void SweepPlan::writeInto(::toml::table& root) const {
     sweep.insert_or_assign("segments", std::move(segmentArray));
 }
 
+std::size_t SweepSchedule::coveredBinCount() const {
+    std::vector<std::pair<std::size_t, std::size_t>> ranges = coveredRanges;
+    std::ranges::sort(ranges);
+
+    std::size_t total = 0;
+    std::size_t reached = 0;
+    for (const auto& [first, count] : ranges) {
+        const std::size_t end = std::min(first + count, gridBinCount);
+        const std::size_t from = std::max(first, reached);
+        if (end > from) {
+            total += end - from;
+            reached = end;
+        }
+    }
+    return total;
+}
+
 std::size_t SweepSchedule::binForFrequency(double hz) const noexcept {
     if (gridBinWidthHz <= 0.0) {
         return 0;

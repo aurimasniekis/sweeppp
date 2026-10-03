@@ -187,6 +187,7 @@ Status SweepEngine::configure(const SweepPlan& plan, IFftBackend& backend, ISdrD
 
     m_grid.assign(m_schedule.gridBinCount, kUnmeasuredDbfs);
     m_gridWritten.assign(m_schedule.gridBinCount, 0);
+    m_coveredBinCount = m_schedule.coveredBinCount();
     m_gridQuality.assign(m_schedule.gridBinCount, 0.0F);
     // Zero means "this step has not been tuned to yet", so nothing is
     // stitched for it until a retune records a time.
@@ -756,7 +757,7 @@ void SweepEngine::completePass() {
         const auto written = static_cast<double>(
             std::ranges::count_if(m_gridWritten, [](std::uint8_t v) { return v != 0; }));
         m_lastPassCoverage.store(
-            m_gridWritten.empty() ? 0.0 : written / static_cast<double>(m_gridWritten.size()),
+            m_coveredBinCount == 0 ? 0.0 : written / static_cast<double>(m_coveredBinCount),
             std::memory_order_relaxed);
 
         // Carrying the previous pass forward would make a signal that has

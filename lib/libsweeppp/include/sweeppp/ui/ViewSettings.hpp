@@ -4,6 +4,7 @@
 #pragma once
 
 #include "sweeppp/ui/Marker.hpp"
+#include "sweeppp/ui/PanelLayout.hpp"
 
 #include <string>
 
@@ -28,24 +29,12 @@ inline constexpr float kScaleCeilingDbfs = 10.0F;
 inline constexpr float kMinScaleSpanDb = 5.0F;
 
 /// Display-side settings, all live-adjustable.
+///
+/// What belongs to one plot -- its window, Y range, gradient, split and pause
+/// -- is per panel, in `layout`. Everything here applies to every panel.
 struct ViewSettings {
-    // Y axis, in dBFS. Dragged by the handles at the top and bottom of the
-    // plot, which move independently.
-    float yMinDb = -110.0F;
-    float yMaxDb = -10.0F;
-
-    // Waterfall gradient limits, separate from the Y axis: the useful contrast
-    // range for the waterfall is usually narrower than the span the trace needs.
-    // Sized so an ordinary noise floor lands near the *bottom* of the colour
-    // map rather than in the middle of it.
-    //
-    // These radios sit around -70 dBFS with no signal present. Centring the
-    // gradient on that puts an empty band in the bright part of the palette,
-    // and the waterfall comes up a solid wash with real signals barely
-    // separable from it. Anchoring the floor just under the noise keeps empty
-    // spectrum dark and leaves the whole range for what is actually there.
-    float gradientMinDb = -75.0F;
-    float gradientMaxDb = -15.0F;
+    /// The panels and how they are arranged.
+    PanelLayout layout;
 
     /// Display points across the plot. `autoPoints` follows the widget width,
     /// which is what makes VBW = span / points meaningful.
@@ -143,15 +132,10 @@ struct ViewSettings {
     /// operator expects to find again after a restart.
     MarkerSet markers;
 
-    bool waterfallPaused = false;
     /// History depth in lines. Raised to at least a screenful and a half at
     /// runtime, since a ring smaller than the pane leaves nothing to scroll
     /// back to.
     int waterfallLines = 4096;
-
-    /// Visible frequency window; equal values mean "fit the whole span".
-    double viewStartHz = 0.0;
-    double viewStopHz = 0.0;
 
     std::string themeName = "Dark";
 };

@@ -336,8 +336,9 @@ struct SweepSchedule {
     double usableHalfWidthHz = 0.0;
     double dcGuardHalfWidthHz = 0.0;
 
-    /// Bins the plan does not cover, which the display draws as gaps rather
-    /// than as a noise floor that was never measured.
+    /// Bins the plan covers, as (first bin, count) per step range. Steps
+    /// overlap, so the ranges do too; anything outside them is a gap the
+    /// display draws as such rather than as a noise floor never measured.
     std::vector<std::pair<std::size_t, std::size_t>> coveredRanges;
 
     /// Frequency ranges, in Hz, that no assigned antenna covers.
@@ -369,6 +370,9 @@ struct SweepSchedule {
     [[nodiscard]] double gridStopHz() const noexcept {
         return gridStartHz + gridBinWidthHz * static_cast<double>(gridBinCount);
     }
+
+    /// Bins in the union of `coveredRanges` -- what a complete pass writes.
+    [[nodiscard]] std::size_t coveredBinCount() const;
 
     [[nodiscard]] std::size_t binForFrequency(double hz) const noexcept;
     [[nodiscard]] double frequencyForBin(std::size_t bin) const noexcept;

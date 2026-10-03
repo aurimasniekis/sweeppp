@@ -114,13 +114,14 @@ sweeppp_plot_context_t pluginPlotContext(const SpectrumLayout& layout, ImDrawLis
 
 } // namespace
 
-void MainWindow::drawSpectrum() {
-    ViewSettings& view = m_state.view();
+void MainWindow::drawSpectrum(PanelView& panelView, ViewPanel& panel) {
+    const ViewSettings& view = m_state.view();
     const SpectrumTheme& colors = m_state.theme().spectrum();
+    PanelGestures& gestures = panel.gestures;
 
-    double fromHz = 0.0;
-    double toHz = 0.0;
-    m_state.visibleRange(fromHz, toHz);
+    const FrequencySpan range = panelRange(panelView);
+    const double fromHz = range.startHz;
+    const double toHz = range.stopHz;
 
     const ImVec2 available = ImGui::GetContentRegionAvail();
     // Room on the right for the gradient bar.
@@ -137,16 +138,16 @@ void MainWindow::drawSpectrum() {
     SpectrumLayout layout;
     layout.fromHz = fromHz;
     layout.toHz = toHz;
-    layout.minDb = view.yMinDb;
-    layout.maxDb = view.yMaxDb;
+    layout.minDb = panelView.yMinDb;
+    layout.maxDb = panelView.yMaxDb;
 
     if (ImPlot::BeginPlot("##spectrum", plotSize,
                           ImPlotFlags_NoTitle | ImPlotFlags_NoLegend | ImPlotFlags_NoMenus)) {
         ImPlot::SetupAxes("Frequency (MHz)", "dBFS", ImPlotAxisFlags_NoHighlight,
                           ImPlotAxisFlags_NoHighlight);
         ImPlot::SetupAxisLimits(ImAxis_X1, fromHz / 1e6, toHz / 1e6, ImPlotCond_Always);
-        ImPlot::SetupAxisLimits(ImAxis_Y1, static_cast<double>(view.yMinDb),
-                                static_cast<double>(view.yMaxDb), ImPlotCond_Always);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, static_cast<double>(panelView.yMinDb),
+                                static_cast<double>(panelView.yMaxDb), ImPlotCond_Always);
         if (!view.showGrid) {
             ImPlot::SetupAxes(nullptr, nullptr, ImPlotAxisFlags_NoGridLines,
                               ImPlotAxisFlags_NoGridLines);
@@ -156,14 +157,14 @@ void MainWindow::drawSpectrum() {
         layout.size = ImPlot::GetPlotSize();
 
         // Handed to the waterfall so both panes share one frequency axis.
-        m_spectrumPlotX = layout.origin.x;
-        m_spectrumPlotWidth = layout.size.x;
+        panel.plotX = layout.origin.x;
+        panel.plotWidth = layout.size.x;
 
         // The plot is an ImPlot host for axes, grid and interaction; the trace
         // itself is drawn by hand into the same draw list. Per-pixel min/max
         // envelopes are not something a line series can express, and drawing a
         // million points as a line series would be both slow and wrong.
-        drawSpectrumOverlay(layout);
+        drawSpectrumOverlay(layout, panelView, panel);
 
         ImPlot::EndPlot();
     }
@@ -203,13 +204,13 @@ void MainWindow::drawSpectrum() {
 
         // Two handles: gradient min at the bottom, max at the top.
         const auto handleY = [&](float db) {
-            const float span = view.yMaxDb - view.yMinDb;
-            const float t = span > 0.0F ? (db - view.yMinDb) / span : 0.0F;
+            const float span = panelView.yMaxDb - panelView.yMinDb;
+            const float t = span > 0.0F ? (db - panelView.yMinDb) / span : 0.0F;
             return top + height * (1.0F - std::clamp(t, 0.0F, 1.0F));
         };
 
-        const float maxY = handleY(view.gradientMaxDb);
-        const float minY = handleY(view.gradientMinDb);
+        const float maxY = handleY(panelView.gradientMaxDb);
+        const float minY = handleY(panelView.gradientMinDb);
         const ImU32 handleColor = packed(m_state.theme().chrome().accent);
 
         draw->AddTriangleFilled(ImVec2(origin.x - 6.0F, maxY), ImVec2(origin.x, maxY - 5.0F),
@@ -226,37 +227,43 @@ void MainWindow::drawSpectrum() {
         if (ImGui::IsItemActivated()) {
             const float mouseY = ImGui::GetIO().MousePos.y;
             const bool grabbedMax = std::abs(mouseY - maxY) < std::abs(mouseY - minY);
-            m_dragging = grabbedMax ? DragTarget::GradientMax : DragTarget::GradientMin;
-            m_dragAnchorDb = grabbedMax ? view.gradientMaxDb : view.gradientMinDb;
-            m_dragAnchorY = mouseY;
+            gestures.dragging = grabbedMax ? DragTarget::GradientMax : DragTarget::GradientMin;
+            gestures.dragAnchorDb = grabbedMax ? panelView.gradientMaxDb : panelView.gradientMinDb;
+            gestures.dragAnchorY = mouseY;
         }
 
-        if (ImGui::IsItemActive() &&
-            (m_dragging == DragTarget::GradientMin || m_dragging == DragTarget::GradientMax)) {
+        const bool gradientDrag = gestures.dragging == DragTarget::GradientMin ||
+                                  gestures.dragging == DragTarget::GradientMax;
+        if (ImGui::IsItemActive() && gradientDrag) {
             const float mouseY = ImGui::GetIO().MousePos.y;
-            const float dbPerPixel = height > 0.0F ? (view.yMaxDb - view.yMinDb) / height : 0.0F;
-            const float db = m_dragAnchorDb - (mouseY - m_dragAnchorY) * dbPerPixel;
+            const float dbPerPixel =
+                height > 0.0F ? (panelView.yMaxDb - panelView.yMinDb) / height : 0.0F;
+            const float db = gestures.dragAnchorDb - (mouseY - gestures.dragAnchorY) * dbPerPixel;
 
-            if (m_dragging == DragTarget::GradientMax) {
-                view.gradientMaxDb = std::clamp(db, view.gradientMinDb + 1.0F, view.yMaxDb);
+            if (gestures.dragging == DragTarget::GradientMax) {
+                panelView.gradientMaxDb =
+                    std::clamp(db, panelView.gradientMinDb + 1.0F, panelView.yMaxDb);
             } else {
-                view.gradientMinDb = std::clamp(db, view.yMinDb, view.gradientMaxDb - 1.0F);
+                panelView.gradientMinDb =
+                    std::clamp(db, panelView.yMinDb, panelView.gradientMaxDb - 1.0F);
             }
-        } else if (m_dragging == DragTarget::GradientMin || m_dragging == DragTarget::GradientMax) {
-            m_dragging = DragTarget::None;
+        } else if (gradientDrag) {
+            gestures.dragging = DragTarget::None;
         }
 
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Waterfall gradient\n%.1f .. %.1f dBFS\nDrag a handle to change it.",
-                              static_cast<double>(view.gradientMinDb),
-                              static_cast<double>(view.gradientMaxDb));
+                              static_cast<double>(panelView.gradientMinDb),
+                              static_cast<double>(panelView.gradientMaxDb));
         }
     }
 }
 
 void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hovered,
-                                         FrequencyPane pane, MarkerClicks markerClicks) {
+                                         FrequencyPane pane, PanelView& view, ViewPanel& panel,
+                                         MarkerClicks markerClicks) {
     const SpectrumTheme& colors = m_state.theme().spectrum();
+    PanelGestures& g = panel.gestures;
     const bool placeMarkers = markerClicks == MarkerClicks::Enabled;
     MarkerSet& markers = m_state.markers();
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -286,26 +293,26 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
         const bool addModifier = modifiers.KeyCtrl || modifiers.KeySuper;
 
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && modifiers.KeyShift &&
-            m_dragging == DragTarget::None) {
-            m_selecting = true;
-            m_selectionStartX = mouse.x;
-            m_selectionPane = pane;
+            g.dragging == DragTarget::None) {
+            g.selecting = true;
+            g.selectionStartX = mouse.x;
+            g.selectionPane = pane;
 
-            m_selectionMode = !addModifier       ? SelectionMode::ZoomView
+            g.selectionMode = !addModifier       ? SelectionMode::ZoomView
                               : modifiers.KeyAlt ? SelectionMode::AddSweepRange
                                                  : SelectionMode::SweepRange;
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !addModifier &&
-                   !m_contributions.claimedClick && m_dragging == DragTarget::None) {
+                   !panel.claimedClick && g.dragging == DragTarget::None) {
             // The left button pans, and on release without travel it picks a
             // marker instead. Not with ctrl or command held, which belongs to
             // dismissing a contribution, and not when a flag has already taken
             // the click: moving the view as well would be a side effect of
             // pointing at a label.
-            m_panning = true;
-            m_panPane = pane;
-            m_panAnchorX = mouse.x;
-            m_panStartFromHz = layout.fromHz;
-            m_panStartToHz = layout.toHz;
+            g.panning = true;
+            g.panPane = pane;
+            g.panAnchorX = mouse.x;
+            g.panStartFromHz = layout.fromHz;
+            g.panStartToHz = layout.toHz;
         }
 
         // The right button owns the markers. Not while shift is held, so a
@@ -316,7 +323,7 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
         // destructive.
         if (placeMarkers && !modifiers.KeyShift) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                m_markerDrag = true;
+                g.markerDrag = true;
                 const double hz = layout.hzForX(mouse.x);
 
                 Marker* active = markers.active();
@@ -328,7 +335,7 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
                     active->frequencyHz = hz;
                     active->peakLocked = false;
                 }
-            } else if (m_markerDrag && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            } else if (g.markerDrag && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
                 // Held down, the active marker follows the cursor, so walking
                 // one onto a peak is one gesture rather than a series of clicks.
                 if (Marker* active = markers.active()) {
@@ -378,29 +385,28 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
             // A fifth of the visible span per notch: enough to cross the plot
             // in a few flicks, small enough to land on something.
             const double stepHz = span * 0.2 * -static_cast<double>(panWheel);
-            m_state.setVisibleRange(layout.fromHz + stepHz, layout.toHz + stepHz);
+            setPanelRange(view, layout.fromHz + stepHz, layout.toHz + stepHz);
         } else if (wheelY != 0.0F && !io.KeyCtrl) {
             // Raised to the delta rather than picked from its sign: a whole
             // notch still zooms by a fifth, a tenth of one by two percent, and
             // the frames of a trackpad scroll compose into exactly the zoom
             // their sum describes. The history gutter's wheel already works
             // this way.
-            const double anchor = layout.hzForX(mouse.x);
-            const double factor = std::pow(0.8, static_cast<double>(wheelY));
-            const double newFrom = anchor - (anchor - layout.fromHz) * factor;
-            const double newTo = anchor + (layout.toHz - anchor) * factor;
-            m_state.setVisibleRange(newFrom, newTo);
+            const FrequencySpan zoomed =
+                zoomAbout({layout.fromHz, layout.toHz}, layout.hzForX(mouse.x),
+                          std::pow(0.8, static_cast<double>(wheelY)));
+            setPanelRange(view, zoomed.startHz, zoomed.stopHz);
         }
     }
 
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-        m_markerDrag = false;
+        g.markerDrag = false;
     }
 
     // Panning, tracked outside the hovered test for the same reason the
     // selection below is: a drag that leaves the pane still has to finish.
-    if (m_panning && m_panPane == pane) {
-        const float travel = ImGui::GetIO().MousePos.x - m_panAnchorX;
+    if (g.panning && g.panPane == pane) {
+        const float travel = ImGui::GetIO().MousePos.x - g.panAnchorX;
 
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
@@ -412,14 +418,14 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
             if (travel != 0.0F) {
                 // Against the window the drag started from, so the gesture is
                 // exactly reversible even after pushing into the radio's limits.
-                const double hzPerPx = layout.size.x > 0.0F ? (m_panStartToHz - m_panStartFromHz) /
+                const double hzPerPx = layout.size.x > 0.0F ? (g.panStartToHz - g.panStartFromHz) /
                                                                   static_cast<double>(layout.size.x)
                                                             : 0.0;
                 const double deltaHz = -static_cast<double>(travel) * hzPerPx;
-                m_state.setVisibleRange(m_panStartFromHz + deltaHz, m_panStartToHz + deltaHz);
+                setPanelRange(view, g.panStartFromHz + deltaHz, g.panStartToHz + deltaHz);
             }
         } else {
-            m_panning = false;
+            g.panning = false;
 
             // A gesture that went nowhere was a click, not a pan: it picks the
             // marker under the cursor, and picks nothing when there is none.
@@ -439,11 +445,11 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
     // Tracked outside the hovered test on purpose: a drag that overshoots the
     // edge of the plot should still finish, clamped, rather than being
     // abandoned halfway with the band left on screen.
-    if (m_selecting) {
+    if (g.selecting) {
         const float currentX =
             std::clamp(ImGui::GetIO().MousePos.x, layout.origin.x, layout.origin.x + layout.size.x);
-        const float fromX = std::min(m_selectionStartX, currentX);
-        const float toX = std::max(m_selectionStartX, currentX);
+        const float fromX = std::min(g.selectionStartX, currentX);
+        const float toX = std::max(g.selectionStartX, currentX);
         const float top = layout.origin.y;
         const float bottom = layout.origin.y + layout.size.y;
 
@@ -451,8 +457,8 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
         // the radio and starts a new segment in the session; zooming only
         // changes what is drawn. Those are different enough in consequence
         // that the band should not look the same for both.
-        const bool adding = m_selectionMode == SelectionMode::AddSweepRange;
-        const bool replanning = adding || m_selectionMode == SelectionMode::SweepRange;
+        const bool adding = g.selectionMode == SelectionMode::AddSweepRange;
+        const bool replanning = adding || g.selectionMode == SelectionMode::SweepRange;
 
         // Adding is coloured apart from replacing: one keeps what is already
         // being swept and one throws it away, and finding out which by trying
@@ -479,19 +485,47 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
         draw->AddText(ImVec2((fromX + toX - size.x) * 0.5F, top + 24.0F), packed(colors.markerText),
                       label.c_str());
 
-        if (pane != m_selectionPane) {
+        if (pane != g.selectionPane) {
             // The other pane draws the band so the selection is visible across
             // both, but must not act on it.
             return;
         }
 
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            m_selecting = false;
+            g.selecting = false;
             // A few pixels is a click that happened to have shift held, not a
             // selection. Acting on it would leave a span of essentially
             // nothing and no obvious way back.
+            const bool spans = m_state.view().layout.mode == PanelMode::Spans &&
+                               view.segment.valid() && !m_historyViewerMode;
             if (toX - fromX >= kClickSlopPx) {
-                if (replanning) {
+                if (replanning && spans) {
+                    // In Spans the plan is the panels, so the gesture edits
+                    // this panel's own segment rather than the whole plan:
+                    // ctrl replaces it, ctrl+alt adds one beside it -- which
+                    // is a new panel.
+                    std::vector<SweepSegment> segments = m_state.sweepPlan().segments;
+                    const SweepSegment drawn{.startHz = fromHz, .stopHz = toHz};
+                    if (adding) {
+                        segments.push_back(drawn);
+                    } else {
+                        const auto own =
+                            std::ranges::find_if(segments, [&view](const SweepSegment& segment) {
+                                return std::abs(segment.startHz - view.segment.startHz) < 1.0 &&
+                                       std::abs(segment.stopHz - view.segment.stopHz) < 1.0;
+                            });
+                        if (own != segments.end()) {
+                            own->startHz = fromHz;
+                            own->stopHz = toHz;
+                        } else {
+                            segments.push_back(drawn);
+                        }
+                        view.segment = {fromHz, toHz};
+                        view.viewStartHz = 0.0;
+                        view.viewStopHz = 0.0;
+                    }
+                    applySegments(segments);
+                } else if (replanning) {
                     SweepPlan plan = m_state.sweepPlan();
                     if (adding) {
                         // Merged rather than appended: a range abutting one
@@ -508,17 +542,19 @@ void MainWindow::handleFrequencyGestures(const SpectrumLayout& layout, bool hove
                         toast(ToastSeverity::Error, applied.error().describe());
                     }
                 } else {
-                    m_state.setVisibleRange(fromHz, toHz);
+                    setPanelRange(view, fromHz, toHz);
                 }
             }
         } else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-            m_selecting = false;
+            g.selecting = false;
         }
     }
 }
 
-void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout) {
-    ViewSettings& view = m_state.view();
+void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout, PanelView& panelView,
+                                     ViewPanel& panel) {
+    const ViewSettings& view = m_state.view();
+    PanelGestures& gestures = panel.gestures;
     const SpectrumTheme& colors = m_state.theme().spectrum();
     const TraceStore& traces = m_state.traces();
 
@@ -588,19 +624,20 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout) {
     const std::vector<Contribution> contributions =
         visibleContributions(layout.fromHz, layout.toHz);
 
-    // This runs every frame ahead of the gesture handling below, and clears
-    // `claimedClick` on the way in, so it is also that flag's reset.
+    // This runs every frame ahead of the gesture handling below, and sets
+    // `claimedClick` either way, so it is also that flag's reset.
     // `IsPlotHovered` and not a rectangle test: it goes through ImGui's own
     // hover rules, so an open panel, a popup or a drag elsewhere all take the
     // flags out of the pointer's way rather than only the ones this file could
     // think to check for.
-    drawContributions(draw, layout, contributions,
-                      ContributionStyle{.hoverable = ImPlot::IsPlotHovered(),
-                                        .alpha = colors.contributionAlpha,
-                                        .textTop = kOverlayTextTop,
-                                        .bands = view.showBandContributions,
-                                        .channels = view.showChannelContributions},
-                      m_contributions);
+    panel.claimedClick =
+        drawContributions(draw, layout, contributions,
+                          ContributionStyle{.hoverable = ImPlot::IsPlotHovered(),
+                                            .alpha = colors.contributionAlpha,
+                                            .textTop = kOverlayTextTop,
+                                            .bands = view.showBandContributions,
+                                            .channels = view.showChannelContributions},
+                          m_contributions);
 
     // ---- plugin overlays, under the traces --------------------------------
     //
@@ -631,7 +668,8 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout) {
             return;
         }
 
-        const Envelope& envelope = traces.envelope(kind, layout.fromHz, layout.toHz, pixels);
+        const Envelope& envelope =
+            traces.envelope(kind, layout.fromHz, layout.toHz, pixels, panel.envelopes);
         if (envelope.empty()) {
             return;
         }
@@ -655,9 +693,10 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout) {
                 const float x1 = x0 + columnWidth + 1.0F;
                 const float y = layout.yForDb(value);
 
-                const Color tint = view.fillStyle == 1 ? color
-                                                       : map.sampleDb(value, view.gradientMinDb,
-                                                                      view.gradientMaxDb);
+                const Color tint =
+                    view.fillStyle == 1
+                        ? color
+                        : map.sampleDb(value, panelView.gradientMinDb, panelView.gradientMaxDb);
 
                 draw->AddRectFilled(ImVec2(x0, y), ImVec2(x1, baseY),
                                     packed(tint.withAlpha(colors.fillAlpha)));
@@ -702,28 +741,10 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout) {
 
     // ---- markers ---------------------------------------------------------
 
-    MarkerSet& markers = m_state.markers();
-    for (Marker& marker : markers.items) {
-        // Measured before the visibility test: hiding a marker takes it off the
-        // plot, it does not stop it being a measurement, and the panel lists
-        // the level of every marker in the set.
-        if (marker.peakLocked) {
-            // Around this marker rather than across the whole window. With a
-            // fixed pair it made no difference; with a list of them, every
-            // locked marker searching the whole view would collapse the lot
-            // onto the same peak and leave the operator one cursor.
-            const double reach = (layout.toHz - layout.fromHz) * 0.02;
-            double peakHz = 0.0;
-            float peakDb = 0.0F;
-            if (traces.peakIn(marker.frequencyHz - reach, marker.frequencyHz + reach, peakHz,
-                              peakDb)) {
-                marker.frequencyHz = peakHz;
-                marker.levelDb = peakDb;
-            }
-        } else {
-            marker.levelDb = traces.levelAt(marker.frequencyHz);
-        }
-
+    // Levels and peak locks were refreshed once for the frame, before any
+    // panel drew; see refreshMarkers.
+    const MarkerSet& markers = m_state.markers();
+    for (const Marker& marker : markers.items) {
         if (!marker.visible) {
             continue;
         }
@@ -836,9 +857,9 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout) {
         // The grab point is recorded once, on the frame the drag starts, so
         // the level moves with the cursor instead of jumping to it.
         if (ImGui::IsItemActivated()) {
-            m_dragging = target;
-            m_dragAnchorDb = db;
-            m_dragAnchorY = ImGui::GetIO().MousePos.y;
+            gestures.dragging = target;
+            gestures.dragAnchorDb = db;
+            gestures.dragAnchorY = ImGui::GetIO().MousePos.y;
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
@@ -847,27 +868,30 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout) {
 
     // Top and bottom drag independently, so the operator can stretch either
     // end of the scale without the other moving.
-    yHandle(view.yMaxDb, DragTarget::YMax, "##ymax");
-    yHandle(view.yMinDb, DragTarget::YMin, "##ymin");
+    yHandle(panelView.yMaxDb, DragTarget::YMax, "##ymax");
+    yHandle(panelView.yMinDb, DragTarget::YMin, "##ymin");
 
-    if (m_dragging == DragTarget::YMax || m_dragging == DragTarget::YMin) {
+    if (gestures.dragging == DragTarget::YMax || gestures.dragging == DragTarget::YMin) {
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             // Travelled since the grab, not wherever the cursor is now.
-            const float db = m_dragAnchorDb + layout.dbForY(ImGui::GetIO().MousePos.y) -
-                             layout.dbForY(m_dragAnchorY);
-            if (m_dragging == DragTarget::YMax) {
-                view.yMaxDb = std::clamp(db, view.yMinDb + kMinScaleSpanDb, kScaleCeilingDbfs);
+            const float db = gestures.dragAnchorDb + layout.dbForY(ImGui::GetIO().MousePos.y) -
+                             layout.dbForY(gestures.dragAnchorY);
+            if (gestures.dragging == DragTarget::YMax) {
+                panelView.yMaxDb =
+                    std::clamp(db, panelView.yMinDb + kMinScaleSpanDb, kScaleCeilingDbfs);
             } else {
-                view.yMinDb = std::clamp(db, kScaleFloorDbfs, view.yMaxDb - kMinScaleSpanDb);
+                panelView.yMinDb =
+                    std::clamp(db, kScaleFloorDbfs, panelView.yMaxDb - kMinScaleSpanDb);
             }
         } else {
-            m_dragging = DragTarget::None;
+            gestures.dragging = DragTarget::None;
         }
     }
 
     // ---- interaction -----------------------------------------------------
 
-    handleFrequencyGestures(layout, ImPlot::IsPlotHovered(), FrequencyPane::Spectrum);
+    handleFrequencyGestures(layout, ImPlot::IsPlotHovered(), FrequencyPane::Spectrum, panelView,
+                            panel);
 }
 
 void MainWindow::drawMarkerReadout(const ImVec2& origin, const ImVec2& size) {
@@ -1026,12 +1050,13 @@ std::string formatElapsed(double seconds) {
 
 } // namespace
 
-bool MainWindow::drawWaterfallTimeAxis(float x, float y, float width, float height,
-                                       std::uint32_t visibleLines, std::uint32_t maxScroll) {
+bool MainWindow::drawWaterfallTimeAxis(WaterfallRenderer& renderer, float x, float y, float width,
+                                       float height, std::uint32_t visibleLines,
+                                       std::uint32_t maxScroll) {
     const ImVec2 origin(x, y);
     const ImVec2 size(width, height);
 
-    ViewSettings& view = m_state.view();
+    const ViewSettings& view = m_state.view();
     if (view.waterfallTimeAxis == 0 || visibleLines == 0) {
         return false;
     }
@@ -1057,16 +1082,16 @@ bool MainWindow::drawWaterfallTimeAxis(float x, float y, float width, float heig
     // The anchor is the newest *stored* line rather than the wall clock so the
     // labels hold still when the waterfall is paused or the sweep has stopped,
     // instead of counting up against data that is no longer arriving.
-    const std::uint64_t newest = m_waterfall.timeAtLinesBack(0);
+    const std::uint64_t newest = renderer.timeAtLinesBack(0);
 
     // One label roughly every 70 pixels, snapped to whole rows.
     const auto rowsPerLabel = static_cast<std::uint32_t>(
-        std::max(1.0F, 70.0F * ImGui::GetIO().DisplayFramebufferScale.y));
+        std::max(1.0F, 70.0F * ImGui::GetWindowViewport()->FramebufferScale.y));
     const float pixelsPerRow = size.y / static_cast<float>(visibleLines);
 
     for (std::uint32_t row = 0; row < visibleLines; row += rowsPerLabel) {
         const float rowY = origin.y + static_cast<float>(row) * pixelsPerRow;
-        const std::uint64_t when = m_waterfall.timeAtLinesBack(m_waterfall.scrollLines() + row);
+        const std::uint64_t when = renderer.timeAtLinesBack(renderer.scrollLines() + row);
         if (when == 0 || newest == 0) {
             continue;
         }
@@ -1100,7 +1125,7 @@ bool MainWindow::drawWaterfallTimeAxis(float x, float y, float width, float heig
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
     }
 
-    float scroll = static_cast<float>(m_waterfall.scrollLines());
+    float scroll = static_cast<float>(renderer.scrollLines());
 
     if (hovered && ImGui::GetIO().MouseWheel != 0.0F) {
         scroll -= ImGui::GetIO().MouseWheel *
@@ -1112,7 +1137,7 @@ bool MainWindow::drawWaterfallTimeAxis(float x, float y, float width, float heig
         scroll += ImGui::GetIO().MouseDelta.y / std::max(pixelsPerRow, 0.001F);
     }
 
-    m_waterfall.setScrollLines(
+    renderer.setScrollLines(
         static_cast<std::uint32_t>(std::clamp(scroll, 0.0F, static_cast<float>(maxScroll))));
 
     // The caller suppresses its own frequency gestures while this is true --
@@ -1120,26 +1145,100 @@ bool MainWindow::drawWaterfallTimeAxis(float x, float y, float width, float heig
     return hovered || ImGui::IsItemActive();
 }
 
-void MainWindow::drawWaterfall() {
-    ViewSettings& view = m_state.view();
+namespace {
+
+/// A line `count` bins wide reduced to `bins` columns.
+///
+/// With MAX, never mean: a narrow carrier must survive the reduction, which
+/// is the same reasoning as the spectrum's envelope and the session store's
+/// LOD pyramid. Unmeasured bins take no part -- their sentinel is below every
+/// reading, so a max already ignores them where a column has any measurement,
+/// and a column with none keeps the sentinel and stays a gap.
+///
+/// Column by column over the bins each covers, rather than bin by bin: bin i
+/// belongs to column floor(i * bins / count), so column c starts at
+/// ceil(c * count / bins), and the inner loop is a plain max with nothing to
+/// divide.
+void reduceMax(const float* values, std::size_t count, std::uint32_t bins,
+               std::vector<float>& out) {
+    out.assign(bins, kUnmeasuredDbfs);
+    const auto columns = static_cast<std::uint64_t>(bins);
+    const auto total = static_cast<std::uint64_t>(count);
+    std::uint64_t from = 0;
+    for (std::uint64_t c = 0; c < columns; ++c) {
+        const std::uint64_t to = std::min(((c + 1) * total + columns - 1) / columns, total);
+        float high = kUnmeasuredDbfs;
+        for (std::uint64_t i = from; i < to; ++i) {
+            high = std::max(high, values[i]);
+        }
+        out[c] = high;
+        from = to;
+    }
+}
+
+/// One row into a waterfall. `reduced` says it was squeezed from a wider
+/// grid, which is when a scrolled-back view is held on what it was showing.
+void pushWaterfallLine(WaterfallRenderer& renderer, const float* values, std::uint32_t bins,
+                       std::uint64_t ns, bool reduced) {
+    renderer.pushLine(values, bins, ns);
+
+    // Scrolled back means anchored to what is being read, not to a fixed
+    // distance from the newest line. Without this, every new line would drag
+    // the view forward under the operator -- the scrollback equivalent of a
+    // terminal that jumps to the bottom while you are reading.
+    if (reduced && renderer.scrollLines() > 0) {
+        renderer.setScrollLines(renderer.scrollLines() + 1);
+    }
+}
+
+} // namespace
+
+const std::vector<float>& MainWindow::reducedLine(std::size_t index, std::uint32_t bins) {
+    std::vector<std::vector<float>>& lines = m_reducedLines[bins];
+    if (lines.size() != m_frameLines.size()) {
+        lines.assign(m_frameLines.size(), {});
+    }
+    std::vector<float>& line = lines[index];
+    if (line.empty()) {
+        const std::vector<float>& source = m_frameLines[index].dbfs;
+        reduceMax(source.data(), source.size(), bins, line);
+    }
+    return line;
+}
+
+void MainWindow::drawWaterfall(PanelView& view, ViewPanel& panel) {
+    const ViewSettings& settings = m_state.view();
 
     const ImVec2 available = ImGui::GetContentRegionAvail();
-    // No footer any more: the sweep rate, line rate and frame rate moved to
-    // the status bar, where the rest of the at-a-glance numbers live. The pane
-    // takes the height back.
-    constexpr float footerHeight = 0.0F;
 
     // Exactly the spectrum's plot rectangle, so a signal sits at the same x in
     // both panes. The spectrum's data area is inset from its child by the
     // Y-axis labels on the left and the gradient bar on the right; matching
     // the child instead would shift the waterfall by ~70 px and silently
     // misalign every frequency.
-    const bool aligned = m_spectrumPlotWidth > 16.0F;
-    const ImVec2 plotSize(aligned ? m_spectrumPlotWidth : available.x - kGradientBarWidth - 8.0F,
-                          available.y - footerHeight);
+    const bool aligned = panel.plotWidth > 16.0F;
+    const ImVec2 plotSize(aligned ? panel.plotWidth : available.x - kGradientBarWidth - 8.0F,
+                          available.y);
     if (plotSize.x <= 16.0F || plotSize.y <= 16.0F) {
         return;
     }
+
+    if (!panel.waterfall) {
+        panel.waterfall = std::make_unique<WaterfallRenderer>();
+    }
+    WaterfallRenderer& renderer = *panel.waterfall;
+
+    // In Spans the panel stores only its own segment's bins, cut out of each
+    // line by the same rule for every line, so the stored rows mean the same
+    // frequencies however the rest of the plan moves.
+    const TraceStore& traces = m_state.traces();
+    const bool spans = settings.layout.mode == PanelMode::Spans && view.segment.valid();
+    const BinSlice grid =
+        spans ? segmentBins(traces.startHz(), traces.binWidthHz(), traces.binCount(), view.segment)
+              : BinSlice{.first = 0,
+                         .count = traces.binCount(),
+                         .startHz = traces.startHz(),
+                         .stopHz = traces.stopHz()};
 
     // The texture is sized to the *acquisition's* bin count, not the widget's
     // width.
@@ -1151,39 +1250,35 @@ void MainWindow::drawWaterfall() {
     // would become a patchwork. At acquisition resolution the rows are
     // zoom-independent and the view is a UV transform in the shader.
     //
-    // It also gives real headroom to zoom into: a 4096-point FFT stores ~3x
-    // more columns than a 1400 px pane can show. Beyond that the display
-    // interpolates -- detail that was never stored cannot be recovered, and
-    // the full-resolution answer is the session history store.
     // Before the first frame there is no acquisition grid yet, so the pane's
     // own width is a reasonable placeholder; the texture is resized once real
     // bins arrive.
     //
     // Only before the FIRST one, though. Acquisition restarts whenever the plan
-    // changes -- a sample-rate change re-plans the sweep -- and the trace store
-    // is cleared for the few frames until the new grid arrives, so `binCount()`
-    // reads zero again. Taking the placeholder in that gap would resize the
-    // texture down to the pane width and back up moments later, and every one
-    // of those round trips runs the whole history through a max-decimation:
-    // one-bin carriers come back four bins wide, then sixteen, growing without
-    // limit for as long as the operator keeps changing the rate. Holding the
-    // width the texture already has costs nothing -- there is nothing to draw
-    // during the gap anyway.
-    const std::size_t sourceBins = m_state.traces().binCount();
-    const std::size_t fallbackBins = m_waterfall.valid() && m_waterfall.bins() > 0
-                                         ? static_cast<std::size_t>(m_waterfall.bins())
+    // changes, and the trace store is cleared for the few frames until the new
+    // grid arrives, so the bin count reads zero again. Taking the placeholder
+    // in that gap would resize the texture down to the pane width and back up
+    // moments later, and every one of those round trips runs the whole history
+    // through a max-decimation: one-bin carriers come back four bins wide, then
+    // sixteen, growing without limit for as long as the operator keeps
+    // changing the rate. Holding the width the texture already has costs
+    // nothing -- there is nothing to draw during the gap anyway.
+    const std::size_t sourceBins = grid.count;
+    const std::size_t fallbackBins = renderer.valid() && renderer.bins() > 0
+                                         ? static_cast<std::size_t>(renderer.bins())
                                          : static_cast<std::size_t>(plotSize.x);
-    const auto bins = static_cast<std::uint32_t>(
-        std::clamp<std::size_t>(sourceBins > 0 ? sourceBins : fallbackBins, 256, 8192));
+    const auto bins = static_cast<std::uint32_t>(std::clamp<std::size_t>(
+        sourceBins > 0 ? sourceBins : fallbackBins, spans ? 16 : 256, 8192));
+
     // The ring has to be larger than the pane, or there is no history behind
     // what is already drawn and scrolling back has nowhere to go.
     //
     // The pane is measured in *framebuffer* rows: 660 points on a 2x display is
-    // 1320 rows, so the 1024-line default was already smaller than one
-    // screenful. The requested size is treated as a minimum and a screenful is
+    // 1320 rows. The requested size is treated as a minimum and a screenful is
     // guaranteed on top of it.
-    const auto paneRows = static_cast<int>(plotSize.y * ImGui::GetIO().DisplayFramebufferScale.y);
-    const int wanted = std::max(view.waterfallLines, paneRows + paneRows / 2);
+    const ImVec2 framebufferScale = ImGui::GetWindowViewport()->FramebufferScale;
+    const auto paneRows = static_cast<int>(plotSize.y * framebufferScale.y);
+    const int wanted = std::max(settings.waterfallLines, paneRows + paneRows / 2);
 
     // Rounded up to a coarse step rather than tracking the pane exactly.
     //
@@ -1194,87 +1289,72 @@ void MainWindow::drawWaterfall() {
     constexpr int kDepthStep = 1024;
 
     // The driver's limit, not a constant: one line is one texture row, so a
-    // depth past GL_MAX_TEXTURE_SIZE fails to allocate. Asking the driver keeps
-    // this and the settings slider agreeing on one number.
+    // depth past GL_MAX_TEXTURE_SIZE fails to allocate.
     const std::uint32_t maxTexture = WaterfallRenderer::maxTextureSize();
     const auto ceiling = static_cast<int>(maxTexture > 0 ? maxTexture : 16384U);
     const auto lines = static_cast<std::uint32_t>(
         std::clamp((wanted + kDepthStep - 1) / kDepthStep * kDepthStep, 256, ceiling));
 
-    if (!m_waterfall.valid() || m_waterfall.bins() != bins || m_waterfall.lines() != lines) {
-        if (auto resized = m_waterfall.resize(bins, lines); !resized) {
+    if (!renderer.valid() || renderer.bins() != bins || renderer.lines() != lines) {
+        if (auto resized = renderer.resize(bins, lines); !resized) {
             ImGui::TextDisabled("waterfall unavailable: %s", resized.error().c_str());
             return;
         }
-        m_waterfall.setColorMap(m_state.theme().waterfallColorMap());
+        renderer.setColorMap(m_state.theme().waterfallColorMap());
     }
 
-    m_waterfall.setGradientRange(view.gradientMinDb, view.gradientMaxDb);
-    m_waterfall.setPeakDetect(view.waterfallPeakDetect);
-
-    double fromHz = 0.0;
-    double toHz = 0.0;
-    m_state.visibleRange(fromHz, toHz);
+    renderer.setGradientRange(view.gradientMinDb, view.gradientMaxDb);
+    renderer.setPeakDetect(settings.waterfallPeakDetect);
 
     // Declares what the texture's width means. A retune or a span change
     // clears the history inside setSpan, for the same reason a session opens a
-    // new segment: old rows cannot be reinterpreted under a new grid.
+    // new segment: old rows cannot be reinterpreted under a new grid. In Spans
+    // these are the slice's bin edges, which stay put while another panel's
+    // segment is edited, so this panel keeps its history through that.
     if (sourceBins > 0) {
-        m_waterfall.setSpan(m_state.traces().startHz(), m_state.traces().stopHz());
+        renderer.setSpan(grid.startHz, grid.stopHz);
     }
 
-    // Drain the lines the UI thread parked. Done here rather than in the frame
-    // callback so no GL call ever happens off the render thread.
-    for (const std::vector<float>& line : m_state.takePendingWaterfallLines()) {
-        if (line.empty()) {
-            continue;
-        }
-
-        if (line.size() == bins) {
-            // The common case: stored verbatim, at full acquisition resolution.
-            m_waterfall.pushLine(line.data(), bins, monotonicNs());
-        } else {
-            // A sweep grid wider than the texture. Reduce with MAX, never
-            // mean: a narrow carrier must survive the reduction, which is the
-            // same reasoning as the spectrum's envelope and the session
-            // store's LOD pyramid.
-            //
-            // Unmeasured bins take no part. Their sentinel is below every
-            // reading, so a max already ignores them where a column has any
-            // measurement -- and a column with none keeps the sentinel and
-            // stays a gap.
-            std::vector<float> reduced(bins, kUnmeasuredDbfs);
-            for (std::size_t i = 0; i < line.size(); ++i) {
-                if (!measured(line[i])) {
-                    continue;
-                }
-                const auto column = static_cast<std::size_t>(static_cast<double>(i) * bins /
-                                                             static_cast<double>(line.size()));
-                if (column < reduced.size()) {
-                    reduced[column] = std::max(reduced[column], line[i]);
-                }
+    // This frame's lines, taken once for every panel. Uploaded here rather
+    // than in the frame callback so no GL call ever happens off the render
+    // thread.
+    //
+    // A Mirror panel takes the whole line, reduced once per texture width and
+    // shared, so a second panel of the same width costs an upload and not
+    // another pass over a megabin grid.
+    if (!view.waterfallPaused) {
+        for (std::size_t i = 0; i < m_frameLines.size(); ++i) {
+            const AppState::WaterfallLine& line = m_frameLines[i];
+            if (line.dbfs.empty()) {
+                continue;
             }
-            m_waterfall.pushLine(reduced.data(), bins, monotonicNs());
-
-            // Scrolled back means anchored to what is being read, not to a
-            // fixed distance from the newest line. Without this, every new
-            // line would drag the view forward under the operator -- the
-            // scrollback equivalent of a terminal that jumps to the bottom
-            // while you are reading.
-            if (m_waterfall.scrollLines() > 0) {
-                m_waterfall.setScrollLines(m_waterfall.scrollLines() + 1);
+            if (!spans) {
+                const bool reduce = line.dbfs.size() != bins;
+                const float* values = reduce ? reducedLine(i, bins).data() : line.dbfs.data();
+                pushWaterfallLine(renderer, values, bins, line.ns, reduce);
+                continue;
+            }
+            const BinSlice cut =
+                segmentBins(line.startHz, line.binWidthHz, line.dbfs.size(), view.segment);
+            if (cut.empty()) {
+                continue;
+            }
+            const float* first = line.dbfs.data() + cut.first;
+            if (cut.count == bins) {
+                pushWaterfallLine(renderer, first, bins, line.ns, false);
+            } else {
+                reduceMax(first, cut.count, bins, m_reduceScratch);
+                pushWaterfallLine(renderer, m_reduceScratch.data(), bins, line.ns, true);
             }
         }
-
-        m_state.telemetry().render().waterfallLines.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // The GL draw happens after ImGui's own rendering has been set up, so it
-    // is queued as a callback rather than issued inline.
+    const FrequencySpan range = panelRange(view);
+
     if (aligned) {
         // Screen coordinates are absolute, so the pane can be placed under the
         // spectrum's plot area even though it lives in a different child.
-        ImGui::SetCursorScreenPos(ImVec2(m_spectrumPlotX, ImGui::GetCursorScreenPos().y));
+        ImGui::SetCursorScreenPos(ImVec2(panel.plotX, ImGui::GetCursorScreenPos().y));
     }
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##waterfallsurface", plotSize);
@@ -1283,19 +1363,24 @@ void MainWindow::drawWaterfall() {
     // Gestures are handled after the pane has painted, not before: the
     // selection band is drawn into the same list, and the waterfall's own
     // content is a GL callback that would otherwise cover it. The readout card
-    // is queued here for the same reason.
+    // is queued here for the same reason, and only in the focused panel -- one
+    // card per marker, where the toolbar is pointed.
+    const bool focused = settings.layout.focusedId == view.id;
     const auto gestures = [&]() {
         SpectrumLayout waterfallLayout;
         waterfallLayout.origin = origin;
         waterfallLayout.size = plotSize;
-        waterfallLayout.fromHz = fromHz;
-        waterfallLayout.toHz = toHz;
+        waterfallLayout.fromHz = range.startHz;
+        waterfallLayout.toHz = range.stopHz;
 
-        drawMarkerReadout(origin, plotSize);
-        handleFrequencyGestures(waterfallLayout, surfaceHovered, FrequencyPane::Waterfall);
+        if (focused) {
+            drawMarkerReadout(origin, plotSize);
+        }
+        handleFrequencyGestures(waterfallLayout, surfaceHovered, FrequencyPane::Waterfall, view,
+                                panel);
     };
 
-    if (m_waterfall.linesPushed() == 0) {
+    if (renderer.linesPushed() == 0) {
         // Painted flat rather than left to the shader. An empty texture is all
         // zeros, which maps to the *bottom* of the colour map and would fill
         // the pane with whatever colour that is -- indistinguishable from a
@@ -1321,18 +1406,17 @@ void MainWindow::drawWaterfall() {
         float scaleY;
     };
 
-    const ImVec2 framebufferScale = ImGui::GetIO().DisplayFramebufferScale;
-
     // Relative to the viewport that owns this window, not to the desktop.
     //
     // The renderer scales these straight into glViewport/glScissor, which are
     // framebuffer coordinates of whichever window is being drawn. With
-    // multi-viewport enabled ImGui's screen coordinates became desktop-absolute,
-    // so passing them raw offset the waterfall by wherever the window happened
-    // to sit on screen -- it drew as a thin band well below its pane.
+    // multi-viewport enabled ImGui's screen coordinates are desktop-absolute,
+    // so passing them raw would offset the waterfall by wherever the window
+    // happened to sit on screen. The scale is that viewport's too: a panel
+    // torn off onto a monitor of a different density has its own.
     const ImGuiViewport* hostViewport = ImGui::GetWindowViewport();
 
-    const DrawContext context{.renderer = &m_waterfall,
+    const DrawContext context{.renderer = &renderer,
                               .x = origin.x - hostViewport->Pos.x,
                               .y = origin.y - hostViewport->Pos.y,
                               .width = plotSize.x,
@@ -1341,15 +1425,14 @@ void MainWindow::drawWaterfall() {
                               // shows twice the history rather than a doubled-up smear.
                               .visibleLines =
                                   static_cast<std::uint32_t>(plotSize.y * framebufferScale.y),
-                              .viewStartHz = fromHz,
-                              .viewStopHz = toHz,
+                              .viewStartHz = range.startHz,
+                              .viewStopHz = range.stopHz,
                               .scaleX = framebufferScale.x,
                               .scaleY = framebufferScale.y};
 
     // The context is copied into the draw list rather than pointed at: the
     // callback runs after this frame's UI code has returned, so anything on
-    // the stack would be gone, and a static would break the moment there were
-    // two waterfalls.
+    // the stack would be gone.
     ImGui::GetWindowDrawList()->AddCallback(
         [](const ImDrawList*, const ImDrawCmd* cmd) {
             const auto* ctx = static_cast<const DrawContext*>(cmd->UserCallbackData);
@@ -1387,8 +1470,8 @@ void MainWindow::drawWaterfall() {
         SpectrumLayout waterfallLayout;
         waterfallLayout.origin = origin;
         waterfallLayout.size = plotSize;
-        waterfallLayout.fromHz = fromHz;
-        waterfallLayout.toHz = toHz;
+        waterfallLayout.fromHz = range.startHz;
+        waterfallLayout.toHz = range.stopHz;
 
         const Marker* active = m_state.markers().active();
         const double markerHz = active != nullptr && active->visible ? active->frequencyHz : 0.0;
@@ -1403,8 +1486,9 @@ void MainWindow::drawWaterfall() {
 
     // Drawn after the pane, so it sits over the waterfall rather than under
     // the GL callback that paints it.
-    if (drawWaterfallTimeAxis(origin.x, origin.y, plotSize.x, plotSize.y, context.visibleLines,
-                              m_waterfall.maxScrollLines(context.visibleLines))) {
+    if (drawWaterfallTimeAxis(renderer, origin.x, origin.y, plotSize.x, plotSize.y,
+                              context.visibleLines,
+                              renderer.maxScrollLines(context.visibleLines))) {
         surfaceHovered = false;
     }
 
@@ -1417,31 +1501,27 @@ void MainWindow::drawHistoryWaterfall() {
         return;
     }
 
-    // Taken from the shared visible range here, immediately before the
-    // composite, rather than after both panes have drawn.
+    // Taken from the panel's window here, immediately before the composite,
+    // rather than after both panes have drawn.
     //
-    // The spectrum reads that range and its gestures mutate it mid-frame, so a
-    // waterfall built from the view's own copy was drawing the window from the
+    // The spectrum reads that window and its gestures mutate it mid-frame, so
+    // a waterfall built from an earlier copy would draw the window from the
     // frame before: mid-zoom the trace extended past the edge of the data
-    // underneath it, and only for as long as the gesture lasted. Syncing here
-    // makes both panes draw the same window whichever one the gesture came
-    // from -- a gesture on the waterfall lands after this point, so that frame
-    // has the spectrum and the waterfall agreeing on the old window, and the
-    // next has them agreeing on the new one.
-    double fromHz = 0.0;
-    double toHz = 0.0;
-    m_state.visibleRange(fromHz, toHz);
-    m_history.setFrequencyRange(fromHz, toHz);
+    // underneath it. Syncing here makes both panes draw the same window
+    // whichever one the gesture came from.
+    const FrequencySpan range = panelRange(m_historyView);
+    m_history.setFrequencyRange(range.startHz, range.stopHz);
 
     // Aligned to the spectrum's plot rectangle for the same reason the live
     // waterfall is: a signal has to sit at the same x in both panes.
-    const float x = m_spectrumPlotX > 0.0F ? m_spectrumPlotX : ImGui::GetCursorScreenPos().x;
-    const float width = m_spectrumPlotWidth > 0.0F ? m_spectrumPlotWidth : available.x;
+    const float x =
+        m_historyPanel.plotX > 0.0F ? m_historyPanel.plotX : ImGui::GetCursorScreenPos().x;
+    const float width = m_historyPanel.plotWidth > 0.0F ? m_historyPanel.plotWidth : available.x;
 
     const ImVec2 origin(x, ImGui::GetCursorScreenPos().y);
     const ImVec2 size(width, available.y);
 
-    const ImVec2 scale = ImGui::GetIO().DisplayFramebufferScale;
+    const ImVec2 scale = ImGui::GetWindowViewport()->FramebufferScale;
     const std::uint32_t texture = m_history.texture(static_cast<std::uint32_t>(size.x * scale.x),
                                                     static_cast<std::uint32_t>(size.y * scale.y));
 
@@ -1534,8 +1614,10 @@ void MainWindow::drawHistoryWaterfall() {
     SpectrumLayout layout;
     layout.origin = origin;
     layout.size = size;
-    m_state.visibleRange(layout.fromHz, layout.toHz);
-    handleFrequencyGestures(layout, hovered, FrequencyPane::Waterfall, MarkerClicks::Disabled);
+    layout.fromHz = range.startHz;
+    layout.toHz = range.stopHz;
+    handleFrequencyGestures(layout, hovered, FrequencyPane::Waterfall, m_historyView,
+                            m_historyPanel, MarkerClicks::Disabled);
 
     // Picked on release rather than on press, and only when the pointer did not
     // travel: the same click also begins a shift+drag band selection, and a

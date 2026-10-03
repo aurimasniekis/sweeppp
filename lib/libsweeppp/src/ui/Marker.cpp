@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <sweeppp/ui/Marker.hpp>
+#include <sweeppp/ui/TraceStore.hpp>
 
 namespace sweeppp::ui {
 
@@ -91,6 +92,20 @@ Marker* MarkerSet::nearest(double hz, double toleranceHz) noexcept {
     }
 
     return best;
+}
+
+void refreshMarkerLevel(Marker& marker, const TraceStore& traces, double reachHz) {
+    if (marker.peakLocked) {
+        double peakHz = 0.0;
+        float peakDb = 0.0F;
+        if (traces.peakIn(marker.frequencyHz - reachHz, marker.frequencyHz + reachHz, peakHz,
+                          peakDb)) {
+            marker.frequencyHz = peakHz;
+            marker.levelDb = peakDb;
+        }
+        return;
+    }
+    marker.levelDb = traces.levelAt(marker.frequencyHz);
 }
 
 } // namespace sweeppp::ui

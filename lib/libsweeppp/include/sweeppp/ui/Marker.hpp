@@ -7,6 +7,8 @@
 
 namespace sweeppp::ui {
 
+class TraceStore;
+
 /// A measurement cursor the operator placed.
 struct Marker {
     /// Stable name; never renumbered while the marker exists.
@@ -79,5 +81,14 @@ struct MarkerSet {
     /// than `toleranceHz`.
     [[nodiscard]] Marker* nearest(double hz, double toleranceHz) noexcept;
 };
+
+/// Re-reads a marker's level from the live trace, and moves a peak-locked one
+/// onto the loudest bin within `reachHz` of where it is.
+///
+/// Around the marker rather than across a whole view: with several locked
+/// markers, each searching the full window would collapse them all onto one
+/// peak. Run once per frame, not once per plot, so a marker shown in several
+/// panels cannot be walked further by each of them.
+void refreshMarkerLevel(Marker& marker, const TraceStore& traces, double reachHz);
 
 } // namespace sweeppp::ui

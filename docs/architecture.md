@@ -321,10 +321,13 @@ withdrawn, which is what marks a plugin **restart needed**.
   records into a hidden working file in the sessions folder, and the operator
   decides later whether to keep it.
 - **`MainWindow`** is split by screen region:
-  - `MainWindow.cpp`: the root window, top bar, info row, the spectrum and
-    waterfall split, status bar, toasts, and floating windows;
+  - `MainWindow.cpp`: the root window, top bar, status bar, toasts, and
+    floating windows;
+  - `MainWindowViews.cpp`: the panels -- arrangement and splitters, each
+    panel's header, torn-off panel windows, Spans binding and the overview
+    strip;
   - `MainWindowPlots.cpp`: the spectrum and waterfall plots, overlays and
-    markers;
+    markers, each drawn for one panel;
   - `MainWindowPanels.cpp`: the top-bar panels, menu sections, benchmark,
     Performance window, and the whole History viewer;
   - `ContributionOverlay.*`: hover and overflow lists for labels.
@@ -334,6 +337,30 @@ withdrawn, which is what marks a plugin **restart needed**.
   - `HistoryView`: the History viewer's CPU composite, uploaded as one texture.
 - Also `Snapshot`, `FileDialog` (nativefiledialog-extended), `UpdateCheck`
   (libcurl) and `FftBenchmarkRunner`.
+
+### Panels
+
+- **`PanelLayout`** (`libsweeppp`, `ui/PanelLayout.hpp`) is data: the mode,
+  the arrangement, the splits, and per panel its window, levels, waterfall
+  split, pause, detached flag and Spans segment. It lives in `ViewSettings`
+  and is saved in a profile. The tiling, view clamping, bin slicing and
+  segment rebinding are pure functions there, unit-tested.
+- **`ViewPanel`** (`ViewPanel.hpp`) is the runtime half, matched to a
+  `PanelView` by id each frame: the `WaterfallRenderer`, the gesture state,
+  the plot rectangle and an `EnvelopeCache`. Every panel draws from the one
+  `TraceStore`; the caches are per panel so zoomed panels do not evict each
+  other. Zoomed out, an envelope reads a min/max pyramid the store builds once
+  per update, and Mirror panels share each waterfall line's reduction, so a
+  panel costs little more than its own drawing.
+- **Frame order:** `pumpFrames`, then the pending waterfall lines are taken
+  once and every unpaused panel pushes them (sliced to its segment in Spans),
+  marker levels are refreshed once, the attached panels draw, the root ends,
+  the floating panels draw, and marker changes are published.
+- **Multi-viewport:** a detached panel is an ImGui window with `NoAutoMerge`,
+  so it is always its own OS window. `AppWindow::endFrame` flushes the main
+  context before rendering the platform windows, because their contexts share
+  its textures. Vertex arrays are not shared, so `WaterfallRenderer` makes one
+  per draw, and each draw uses its own viewport's framebuffer scale.
 
 ## Licence boundaries
 

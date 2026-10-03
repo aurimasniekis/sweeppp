@@ -7,6 +7,7 @@
 #include "ContributionOverlay.hpp"
 #include "FftBenchmarkRunner.hpp"
 #include "UpdateCheck.hpp"
+#include "ViewPanel.hpp"
 #include "render/HistoryView.hpp"
 #include "render/WaterfallRenderer.hpp"
 
@@ -113,7 +114,9 @@ private:
                             void (MainWindow::*body)(), float minWidth = 360.0F,
                             float maxWidth = 440.0F);
 
-    void drawInfoRow();
+    /// One row over a panel: its number, the window it shows, and its own
+    /// pause, detach and close.
+    void drawPanelHeader(PanelView& view, ViewPanel& panel);
 
     /// Elapsed-time labels down one edge of the waterfall, and the scrolling
     /// they accept.
@@ -121,16 +124,84 @@ private:
     /// Drawn over the pane rather than beside it, so the waterfall keeps the
     /// spectrum's exact horizontal extent and a signal stays at the same x in
     /// both.
-    bool drawWaterfallTimeAxis(float x, float y, float width, float height,
-                               std::uint32_t visibleLines, std::uint32_t maxScroll);
+    bool drawWaterfallTimeAxis(WaterfallRenderer& renderer, float x, float y, float width,
+                               float height, std::uint32_t visibleLines, std::uint32_t maxScroll);
 
     /// The draggable divider between the spectrum and the waterfall.
-    /// `budget` is the height the two panes share.
-    void drawPaneSplitter(float budget);
+    /// `budget` is the height the two panes share; `fraction` the waterfall's.
+    void drawPaneSplitter(float budget, float& fraction);
 
-    void drawSpectrum();
-    void drawWaterfall();
+    void drawSpectrum(PanelView& view, ViewPanel& panel);
+    void drawWaterfall(PanelView& view, ViewPanel& panel);
     void drawStatusBar();
+
+    // ---- panels (MainWindowViews.cpp) ------------------------------------
+
+    /// Brings `m_panels` in line with the layout: one runtime half per view,
+    /// matched by id, created and dropped as views come and go.
+    void syncPanels();
+    [[nodiscard]] ViewPanel& runtimeFor(const PanelView& view);
+
+    /// The plot area: the overview strip in Spans mode, then the attached
+    /// panels in their arrangement with the splitters between them.
+    void drawPanels();
+
+    /// One panel -- header, spectrum, splitter, waterfall -- filling the
+    /// current window from the cursor down.
+    void drawPanelBody(PanelView& view, ViewPanel& panel);
+
+    /// Closes a panel after the frame has drawn, so no list is changed under a
+    /// loop still walking it. In Spans its segment leaves the sweep with it.
+    void closePanel(int id);
+
+    /// Panels torn off into windows of their own. Drawn after the root window
+    /// has ended, since a window cannot be begun inside another's child.
+    void drawFloatingPanels();
+
+    /// The splits between arranged panels, drawn over the gaps.
+    void drawLayoutSplitters(PanelArrangement arrangement, const std::vector<PanelRect>& rects,
+                             const PanelRect& area, float gap);
+
+    /// What a view may not leave, and what it shows with no window of its own:
+    /// the radio's reach and the data in Mirror, the bound segment in Spans,
+    /// the session in the viewer.
+    [[nodiscard]] ViewLimits panelLimits(const PanelView& view) const;
+    [[nodiscard]] FrequencySpan panelFit(const PanelView& view) const;
+    [[nodiscard]] FrequencySpan panelRange(const PanelView& view) const;
+
+    /// Moves a panel's window, clamped to its limits. The one way any gesture
+    /// or button changes a view.
+    void setPanelRange(PanelView& view, double fromHz, double toHz);
+
+    /// This frame's line `index` reduced to `bins` columns.
+    [[nodiscard]] const std::vector<float>& reducedLine(std::size_t index, std::uint32_t bins);
+
+    /// Hands the theme's colormap to every waterfall that exists.
+    void applyWaterfallColorMap();
+
+    /// Marker levels and peak locks, once a frame before any panel draws.
+    void refreshMarkers();
+
+    /// Puts every view back to fit when the plan's outer bounds have moved,
+    /// and rebinds the Spans panels when its segments have.
+    void followPlan();
+
+    /// Clones the focused panel into new slots or drops trailing attached
+    /// panels, until the attached ones fill `arrangement`.
+    void setArrangement(PanelArrangement arrangement);
+
+    void setPanelMode(PanelMode mode);
+    void drawPanelsPopup();
+
+    /// Binds each panel to a segment of the plan, by overlap.
+    void rebindSpans();
+
+    /// Replaces the plan with `segments`, normalised through `addSegment`.
+    void applySegments(const std::vector<SweepSegment>& segments);
+
+    /// The whole range above the Spans panels: a coarse live trace with each
+    /// segment marked, and the gestures that add and pick segments.
+    void drawOverviewStrip(float height);
 
     /// The message stack in the top-right corner.
     ///
@@ -317,13 +388,6 @@ private:
     /// that renders any radio.
     void drawDeviceParameters();
 
-    /// Which pane a gesture is happening in.
-    ///
-    /// The two share one frequency axis, so a drag started in either means the
-    /// same thing -- but only the pane it started in may act on the release,
-    /// or a selection would be applied twice.
-    enum class FrequencyPane { Spectrum, Waterfall };
-
     /// Whether a pane's clicks reach the markers at all.
     ///
     /// The viewer's waterfall says which *line* to plot, so an unmodified click
@@ -340,11 +404,13 @@ private:
     /// the other is arbitrary from the operator's side -- and the waterfall is
     /// often the pane a signal is spotted in first.
     void handleFrequencyGestures(const struct SpectrumLayout& layout, bool hovered,
-                                 FrequencyPane pane, MarkerClicks markers = MarkerClicks::Enabled);
+                                 FrequencyPane pane, PanelView& view, ViewPanel& panel,
+                                 MarkerClicks markers = MarkerClicks::Enabled);
 
     /// Custom-drawn spectrum layer over the ImPlot host: envelope band,
     /// gradient fill, markers, Y handles and the gradient bar.
-    void drawSpectrumOverlay(const struct SpectrumLayout& layout);
+    void drawSpectrumOverlay(const struct SpectrumLayout& layout, PanelView& view,
+                             ViewPanel& panel);
 
     /// The card over the waterfall: what is under the selected marker, and the
     /// measurements between it and the previous visible one.
@@ -367,21 +433,31 @@ private:
     void publishMarkerChanges();
 
     AppState& m_state;
-    WaterfallRenderer m_waterfall;
 
-    /// Screen-space X and width of the spectrum's plot area, captured each
-    /// frame.
-    ///
-    /// The waterfall is drawn to exactly this rectangle rather than to its own
-    /// child's full width. Otherwise the two panes would use different
-    /// horizontal extents -- the spectrum's is inset by its Y-axis labels and
-    /// the gradient bar -- and a signal would appear at a different x in each,
-    /// which makes the pair actively misleading.
-    float m_spectrumPlotX = 0.0F;
-    float m_spectrumPlotWidth = 0.0F;
+    /// The runtime half of each panel in the layout, in no particular order.
+    std::vector<ViewPanel> m_panels;
 
-    /// Screen rectangle the snapshot is cut from -- the info row and both
-    /// panes -- in ImGui points, captured each frame.
+    /// This frame's waterfall lines, taken once and fanned out to every panel
+    /// that is not paused.
+    std::vector<AppState::WaterfallLine> m_frameLines;
+
+    /// `m_frameLines` reduced to a texture width, by width, made on first use
+    /// this frame and shared by every Mirror panel that width.
+    std::map<std::uint32_t, std::vector<std::vector<float>>> m_reducedLines;
+    std::vector<float> m_reduceScratch;
+
+    /// The plan generation and segments the views were last fitted and bound
+    /// to. Empty until the first frame, which adopts whatever the saved
+    /// layout brought rather than resetting it.
+    std::optional<std::uint64_t> m_viewResetSeen;
+    std::vector<SweepSegment> m_boundSegments;
+    bool m_segmentsBound = false;
+
+    /// A panel whose close button was pressed this frame, or zero.
+    int m_closePanelId = 0;
+
+    /// Screen rectangle the snapshot is cut from -- every attached panel --
+    /// in ImGui points relative to the main viewport, captured each frame.
     ImVec4 m_snapshotRect{};
     std::function<void(std::function<void()>)> m_frameCaptureRequest;
     std::function<void(float)> m_fontWeightRequest;
@@ -467,6 +543,13 @@ private:
     };
 
     HistoryView m_history;
+
+    /// The viewer's one panel. Bounded by the session rather than by any one
+    /// segment of it, so the zoom holds as the playhead crosses boundaries.
+    /// Never saved.
+    PanelView m_historyView;
+    ViewPanel m_historyPanel;
+    bool m_historyLevelsAdopted = false;
     /// True when this process is a viewer rather than the instrument.
     bool m_historyViewerMode = false;
     std::optional<HistoryLoad> m_historyLoad;
@@ -546,55 +629,12 @@ private:
     /// Set when quitting is waiting on a session being written.
     bool m_quitWhenSessionSaved = false;
 
-    /// Which handle the operator is currently dragging, so a drag that leaves
-    /// the widget still tracks.
-    enum class DragTarget { None, YMin, YMax, GradientMin, GradientMax };
-    DragTarget m_dragging = DragTarget::None;
-
-    /// Where a level drag started: the handle's value, and the cursor position
-    /// at the moment it was grabbed.
-    ///
-    /// Levels move by how far the cursor has travelled since the grab, not to
-    /// wherever it happens to be. Setting them from the absolute position
-    /// makes the handle jump to meet the cursor the instant it is touched --
-    /// and since a hit box is deliberately larger than the handle it draws
-    /// (and the gradient bar's covers the whole bar), a click that lands even
-    /// slightly off, or a brief touch anywhere on the bar, throws the level
-    /// across the scale before the drag has begun.
-    float m_dragAnchorDb = 0.0F;
-    float m_dragAnchorY = 0.0F;
-
-    /// Shift-drag band selection on the spectrum, in screen X.
-    ///
-    /// The same gesture aimed at two different things: the display, or the
-    /// radio. Which one is decided when the drag starts and held for its
-    /// duration, so releasing the modifier mid-drag cannot change what
-    /// happens on release.
-    enum class SelectionMode { ZoomView, SweepRange, AddSweepRange };
-    bool m_selecting = false;
-    SelectionMode m_selectionMode = SelectionMode::ZoomView;
-    float m_selectionStartX = 0.0F;
-
-    /// Which pane the current drag began in. Only that pane applies it.
-    FrequencyPane m_selectionPane = FrequencyPane::Spectrum;
-
-    /// Left-drag panning, anchored to the window the drag started from.
-    ///
-    /// The whole gesture is computed from where the cursor is now against where
-    /// it went down, never integrated from MouseDelta. `setVisibleRange` clamps
-    /// to what the radio can reach, so an incremental pan pushed against either
-    /// end loses the excess every frame and dragging back lands somewhere else
-    /// than it started -- the same reason the level handles record their grab
-    /// point.
-    bool m_panning = false;
-    FrequencyPane m_panPane = FrequencyPane::Spectrum;
-    float m_panAnchorX = 0.0F;
-    double m_panStartFromHz = 0.0;
-    double m_panStartToHz = 0.0;
-
-    /// Whether the right button went down on a pane, so holding it walks the
-    /// active marker along rather than any right-drag from elsewhere doing so.
-    bool m_markerDrag = false;
+    /// The overview strip's own window, independent of every panel's; zero
+    /// means fit. And its shift-drag in progress.
+    FrequencySpan m_overviewView;
+    bool m_overviewSelecting = false;
+    float m_overviewSelectStartX = 0.0F;
+    EnvelopeCache m_overviewEnvelopes;
 
     /// Which marker's row in the panel has its editor open, or zero.
     ///

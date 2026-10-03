@@ -38,13 +38,15 @@ From left to right:
 | **Markers**             | The marker list and marker presets. See [Markers](#markers).                                                                          |
 | **Bands**, **Channels** | Turn the band-plan and channel labels on and off. Right-click either for its list. These two buttons come from plugins.               |
 | **Range** (centre)      | Shows what is being swept. Click it to change the range.                                                                              |
-| **Zoom**                | Reset zoom, zoom out, zoom in.                                                                                                        |
+| **Zoom**                | Reset zoom, zoom out, zoom in, on the focused panel.                                                                                  |
 | **Chart**               | Spectrum drawing options: smoothing, number of display points, fill under the trace.                                                  |
 | **Waterfall**           | Waterfall options. See [Spectrum and waterfall](#spectrum-and-waterfall).                                                             |
+| **Panels**              | Layout, Mirror or Spans, and the overview strip. See [Panels](#panels).                                                               |
 | **Start / Stop**        | Start or stop the radio.                                                                                                              |
 
-Under the top bar, a row shows the **Start**, **Center**, **Span** and **Stop**
-of what is on screen.
+Each panel has a row over it with the **Start**, **Center**, **Span** and
+**Stop** of what it shows. With more than one panel it also has its own pause,
+detach and close buttons.
 
 ### Status bar
 
@@ -245,6 +247,7 @@ press Start.
 - Narrow signals stay visible when zoomed out: each column of pixels shows the
   highest and lowest value it covers.
 - Drag the handles on the level axis to change the top and bottom of the scale.
+  Each panel has its own.
 - The text along the top shows the RBW, FFT size and gains on the left, and the
   VBW and display points on the right.
 
@@ -254,25 +257,68 @@ press Start.
 - Lines are stored at full resolution, so you can zoom into old data.
 - Scroll over the time axis, or drag it, to look back in time.
 - Drag the two handles on the colour bar to the right of the spectrum to set
-  the waterfall's colour range.
+  that panel's waterfall colour range.
 - Drag the divider between the spectrum and the waterfall to resize them.
 
 The **Waterfall** popover in the top bar has:
 
-- **Pause**, which freezes the waterfall and shows a PAUSED badge;
+- **Pause**, which freezes the focused panel's waterfall and shows a PAUSED
+  badge;
 - **Peak detect**;
 - **History**, how many lines are kept in memory for scrolling back, with the
   memory used and roughly how much time that covers. This is only the live
   view. The recording keeps everything; see [Recording](#recording);
 - **Time axis** (off, left or right) and **Time lines**;
-- the colour range, **Edit gradient**, **Clear** and **Reset settings**.
+- the focused panel's colour range, **Edit gradient**, **Clear** and
+  **Reset settings**.
 
 ### Zoom and pan
 
 - Scroll to zoom around the pointer.
 - Drag to pan, or **Shift**-scroll, or scroll sideways.
 - **Shift**-drag to zoom to a band.
-- The zoom buttons in the top bar zoom in, zoom out and reset.
+- The zoom buttons in the top bar zoom in, zoom out and reset the focused
+  panel.
+
+Mouse gestures act on the panel under the pointer. Clicking or scrolling in a
+panel focuses it; with more than one panel, the focused one has an accent
+border.
+
+## Panels
+
+The **Panels** popover in the top bar sets how many plots there are and what
+they show. Each panel has its own zoom, level range, colour range, divider and
+pause.
+
+| Setting            | What it does                                                                                   |
+|--------------------|------------------------------------------------------------------------------------------------|
+| **Mirror**         | Every panel shows the same data, zoomed on its own.                                            |
+| **Spans**          | One panel per swept range. A panel can't be panned or zoomed out of its range.                 |
+| **Layout**         | One, two side by side, two stacked, three, or a 2×2, 3×2 or 3×3 grid. Drag the gaps to resize. |
+| **Overview strip** | In Spans, a strip above the panels with the whole range and each segment numbered.             |
+| **Reset splits**   | Even out every divider.                                                                        |
+
+Picking a layout with more panels copies the focused one; fewer drops the last
+ones.
+
+### Spans
+
+- Edit a panel's **Start** or **Stop** in its row to change its range.
+- **Shift + Ctrl**-drag in a panel replaces its range; add **Alt** to add a new
+  range, which opens a new panel.
+- **x** removes that range from the sweep.
+- Ranges that merge share one panel; the others close.
+- Up to nine panels. Further ranges are still swept and shown dimmed on the
+  overview strip; click one to show it in the focused panel.
+
+On the overview strip: click a range to focus its panel, **Shift**-drag to add
+a range, scroll to zoom, double-click to reset.
+
+### Floating panels
+
+Click a panel's detach button to move it into a window of its own, which you
+can put on another monitor. Close the window to put the panel back. At least
+one panel always stays in the main window.
 
 ## Markers
 
@@ -506,8 +552,9 @@ and never changes your settings.
 
 ## Snapshots
 
-Click **Snapshot** in the status bar to copy a PNG of the frequency readout
-row, the spectrum and the waterfall to the clipboard.
+Click **Snapshot** in the status bar to copy a PNG of every panel in the main
+window, with their frequency rows, to the clipboard. Floating panels are not
+included.
 
 **Shift-click** saves it to a file instead: a save dialog opens in the sessions
 folder with `sweeppp-<time>.png` suggested as the name.
@@ -529,8 +576,9 @@ folder with `sweeppp-<time>.png` suggested as the name.
 ### Display
 
 **Menu → Display**: grid, antenna range shading, max hold, min hold, average
-(and how many frames it averages), **Reset holds**, the level range, the
-waterfall colour range, and where the marker readout card goes.
+(and how many frames it averages), **Reset holds**, the focused panel's level
+and colour ranges, and where the marker readout card goes. The readout card is
+drawn in the focused panel.
 
 ### Appearance
 
@@ -540,8 +588,9 @@ picks one for your screen), text size and text weight.
 ### Profiles
 
 A profile saves your whole setup under a name: the radio and its settings, the
-ranges, analysis settings, display settings including markers, and plugin
-settings.
+ranges, analysis settings, display settings including markers and panels, and
+plugin settings. Each panel's levels are saved; its zoom is saved only with
+more than one Mirror panel.
 
 In **Menu → Profiles**, type a name and click **Save**. Click a saved profile
 to load it, or **x** to delete it.
@@ -574,21 +623,22 @@ History viewer.
 
 ### Mouse, on the spectrum and waterfall
 
-| Action                             | Does                                               |
-|------------------------------------|----------------------------------------------------|
-| Scroll                             | Zoom around the pointer.                           |
-| Shift + scroll, or scroll sideways | Pan.                                               |
-| Drag                               | Pan.                                               |
-| Click                              | Select the nearest marker.                         |
-| Right-click                        | Move the selected marker here, or place a new one. |
-| Right-drag                         | Slide the selected marker.                         |
-| Ctrl + right-click (Cmd on macOS)  | Add a marker.                                      |
-| Shift + drag                       | Zoom to a band.                                    |
-| Shift + Ctrl + drag                | Sweep only that band.                              |
-| Shift + Ctrl + Alt + drag          | Add that band to the ranges.                       |
-| Click a label                      | Mark its extent.                                   |
-| Ctrl + click a label               | Hide it.                                           |
-| Right-click a plugin button        | Open its panel.                                    |
+| Action                             | Does                                                        |
+|------------------------------------|-------------------------------------------------------------|
+| Scroll                             | Zoom around the pointer.                                    |
+| Shift + scroll, or scroll sideways | Pan.                                                        |
+| Drag                               | Pan.                                                        |
+| Click                              | Select the nearest marker.                                  |
+| Right-click                        | Move the selected marker here, or place a new one.          |
+| Right-drag                         | Slide the selected marker.                                  |
+| Ctrl + right-click (Cmd on macOS)  | Add a marker.                                               |
+| Shift + drag                       | Zoom to a band.                                             |
+| Shift + Ctrl + drag                | Sweep only that band. In Spans, replace this panel's range. |
+| Shift + Ctrl + Alt + drag          | Add that band to the ranges.                                |
+| Click or scroll                    | Focus that panel.                                           |
+| Click a label                      | Mark its extent.                                            |
+| Ctrl + click a label               | Hide it.                                                    |
+| Right-click a plugin button        | Open its panel.                                             |
 
 ## Where settings are stored
 
