@@ -8,6 +8,7 @@ set(SWEEPPP_TEST_SOURCES
     test_format.cpp
     test_golden.cpp
     test_marker.cpp
+    test_panels.cpp
     test_pipeline.cpp
     test_plugin.cpp
     test_session.cpp

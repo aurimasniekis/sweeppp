@@ -2480,13 +2480,14 @@ void MainWindow::drawDisplaySection() {
     }
 
     ImGui::SeparatorText("Levels");
-    field("Y range");
+    PanelView& levels = view.layout.focused();
+    field("Y range", "The focused panel's.");
     ImGui::SetNextItemWidth(rangeItemWidth());
-    ImGui::DragFloatRange2("##yrange", &view.yMinDb, &view.yMaxDb, 0.5F, kScaleFloorDbfs,
+    ImGui::DragFloatRange2("##yrange", &levels.yMinDb, &levels.yMaxDb, 0.5F, kScaleFloorDbfs,
                            kScaleCeilingDbfs, "%.0f dB", "%.0f dB");
-    field("Gradient");
+    field("Gradient", "The focused panel's.");
     ImGui::SetNextItemWidth(rangeItemWidth());
-    ImGui::DragFloatRange2("##gradrange", &view.gradientMinDb, &view.gradientMaxDb, 0.5F,
+    ImGui::DragFloatRange2("##gradrange", &levels.gradientMinDb, &levels.gradientMaxDb, 0.5F,
                            kScaleFloorDbfs, kScaleCeilingDbfs, "%.0f dB", "%.0f dB");
 
     // The markers themselves are their own panel on the bar. What stays here is
@@ -2703,13 +2704,10 @@ void MainWindow::drawMarkersSection() {
         const float width = footerButtonWidth(2);
 
         if (ImGui::Button("Add at centre", ImVec2(width, 0))) {
-            double fromHz = 0.0;
-            double toHz = 0.0;
-            m_state.visibleRange(fromHz, toHz);
-            markers.add((fromHz + toHz) * 0.5);
+            markers.add(panelRange(m_state.view().layout.focused()).centre());
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Place a marker in the middle of the visible span");
+            ImGui::SetTooltip("Place a marker in the middle of the focused panel");
         }
 
         ImGui::SameLine();
@@ -2962,7 +2960,7 @@ void MainWindow::drawThemeSection() {
                 // it works because the LUT and the ImGui style are both
                 // rebuilt from the theme on the spot.
                 m_state.setTheme(theme.name());
-                m_waterfall.setColorMap(m_state.theme().waterfallColorMap());
+                applyWaterfallColorMap();
             }
         }
         ImGui::EndCombo();
@@ -2996,7 +2994,7 @@ void MainWindow::drawThemeSection() {
             const_cast<Theme&>(m_state.theme()).waterfall().colorMap = map.name();
             const_cast<Theme&>(m_state.theme()).spectrum().fillColorMap = map.name();
             m_state.refreshTheme();
-            m_waterfall.setColorMap(m_state.theme().waterfallColorMap());
+            applyWaterfallColorMap();
         }
         ImGui::SameLine(0.0F, 4.0F);
         swatch(map, 120.0F);
@@ -3041,7 +3039,7 @@ void MainWindow::drawThemeSection() {
         if (auto saved = theme.saveToToml(path); saved) {
             m_state.reloadThemes();
             m_state.setTheme(name);
-            m_waterfall.setColorMap(m_state.theme().waterfallColorMap());
+            applyWaterfallColorMap();
             m_newThemeName.clear();
             toast(ToastSeverity::Success, std::format("theme written to {}", path.string()));
         } else {
@@ -3522,22 +3520,39 @@ void MainWindow::drawChartSettingsPopup() {
 
     ImGui::SeparatorText("Levels");
 
-    field("Y axis", "Also draggable on the plot.");
+    // The focused panel's: each panel keeps its own levels.
+    PanelView& levels = view.layout.focused();
+    field("Y axis", "The focused panel's. Also draggable on the plot.");
     ImGui::SetNextItemWidth(rangeItemWidth());
-    ImGui::DragFloatRange2("##ylevels", &view.yMinDb, &view.yMaxDb, 0.5F, kScaleFloorDbfs,
+    ImGui::DragFloatRange2("##ylevels", &levels.yMinDb, &levels.yMaxDb, 0.5F, kScaleFloorDbfs,
                            kScaleCeilingDbfs, "%.0f dB", "%.0f dB");
 
-    field("Gradient", "Shared with the waterfall.");
+    field("Gradient", "The focused panel's. Shared with its waterfall.");
     ImGui::SetNextItemWidth(rangeItemWidth());
-    ImGui::DragFloatRange2("##gradientlevels", &view.gradientMinDb, &view.gradientMaxDb, 0.5F,
+    ImGui::DragFloatRange2("##gradientlevels", &levels.gradientMinDb, &levels.gradientMaxDb, 0.5F,
                            kScaleFloorDbfs, kScaleCeilingDbfs, "%.0f dB", "%.0f dB");
 
     footerRule();
     if (ImGui::Button("Reset settings", ImVec2(-1, 0))) {
+        // The chart's own settings and the focused panel's levels. The panels,
+        // the markers and the theme are not chart settings and stay.
         const ViewSettings defaults;
-        const std::string theme = view.themeName;
-        view = defaults;
-        view.themeName = theme;
+        const PanelView panelDefaults;
+        ViewSettings reset = defaults;
+        reset.layout = std::move(view.layout);
+        reset.markers = std::move(view.markers);
+        reset.themeName = view.themeName;
+        reset.waterfallLines = view.waterfallLines;
+        reset.waterfallPeakDetect = view.waterfallPeakDetect;
+        reset.waterfallTimeAxis = view.waterfallTimeAxis;
+        reset.waterfallTimeLines = view.waterfallTimeLines;
+        view = std::move(reset);
+
+        PanelView& focused = view.layout.focused();
+        focused.yMinDb = panelDefaults.yMinDb;
+        focused.yMaxDb = panelDefaults.yMaxDb;
+        focused.gradientMinDb = panelDefaults.gradientMinDb;
+        focused.gradientMaxDb = panelDefaults.gradientMaxDb;
     }
 
     ImGui::EndPopup();
@@ -3551,9 +3566,14 @@ void MainWindow::drawWaterfallSettingsPopup() {
 
     ViewSettings& view = m_state.view();
 
+    // Pause, Clear, the depth caption and the gradient are the focused
+    // panel's; the rest applies to every waterfall.
+    PanelView& focused = view.layout.focused();
+    WaterfallRenderer* focusedWaterfall = runtimeFor(focused).waterfall.get();
+
     ImGui::SeparatorText("Waterfall");
 
-    ImGui::Checkbox("Pause", &view.waterfallPaused);
+    ImGui::Checkbox("Pause", &focused.waterfallPaused);
 
     ImGui::Checkbox("Peak detect", &view.waterfallPeakDetect);
     helpMarker("Show the loudest bin per pixel instead of the average. Catches narrow carriers "
@@ -3569,7 +3589,9 @@ void MainWindow::drawWaterfallSettingsPopup() {
     const auto depthCeiling =
         static_cast<int>(maxTexture > 0 ? std::min<std::uint32_t>(maxTexture, 65536U) : 16384U);
 
-    const std::uint32_t bins = m_waterfall.bins() > 0 ? m_waterfall.bins() : 4096U;
+    const std::uint32_t bins = focusedWaterfall != nullptr && focusedWaterfall->bins() > 0
+                                   ? focusedWaterfall->bins()
+                                   : 4096U;
     const auto costBytes =
         static_cast<std::uint64_t>(bins) * static_cast<std::uint64_t>(view.waterfallLines);
 
@@ -3607,10 +3629,10 @@ void MainWindow::drawWaterfallSettingsPopup() {
 
     ImGui::SeparatorText("Levels");
 
-    field("Gradient", "Shared with the spectrum fill.");
+    field("Gradient", "The focused panel's. Shared with its spectrum fill.");
     ImGui::SetNextItemWidth(rangeItemWidth());
-    ImGui::DragFloatRange2("##waterfallgradient", &view.gradientMinDb, &view.gradientMaxDb, 0.5F,
-                           kScaleFloorDbfs, kScaleCeilingDbfs, "%.0f dB", "%.0f dB");
+    ImGui::DragFloatRange2("##waterfallgradient", &focused.gradientMinDb, &focused.gradientMaxDb,
+                           0.5F, kScaleFloorDbfs, kScaleCeilingDbfs, "%.0f dB", "%.0f dB");
 
     field("Colours");
     if (ImGui::Button("Edit gradient...", ImVec2(-1, 0))) {
@@ -3621,23 +3643,136 @@ void MainWindow::drawWaterfallSettingsPopup() {
     footerRule();
     {
         const float width = footerButtonWidth(2);
-        if (ImGui::Button("Clear", ImVec2(width, 0))) {
-            m_waterfall.clear();
+        if (ImGui::Button("Clear", ImVec2(width, 0)) && focusedWaterfall != nullptr) {
+            focusedWaterfall->clear();
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Clear the waterfall history");
+            ImGui::SetTooltip("Clear the focused panel's waterfall history");
         }
 
         ImGui::SameLine();
         if (ImGui::Button("Reset settings", ImVec2(width, 0))) {
             const ViewSettings defaults;
-            view.waterfallPaused = defaults.waterfallPaused;
+            const PanelView panelDefaults;
             view.waterfallLines = defaults.waterfallLines;
             view.waterfallTimeAxis = defaults.waterfallTimeAxis;
             view.waterfallTimeLines = defaults.waterfallTimeLines;
             view.waterfallPeakDetect = defaults.waterfallPeakDetect;
-            view.gradientMinDb = defaults.gradientMinDb;
-            view.gradientMaxDb = defaults.gradientMaxDb;
+            focused.waterfallPaused = panelDefaults.waterfallPaused;
+            focused.gradientMinDb = panelDefaults.gradientMinDb;
+            focused.gradientMaxDb = panelDefaults.gradientMaxDb;
+        }
+    }
+
+    ImGui::EndPopup();
+}
+
+void MainWindow::drawPanelsPopup() {
+    const bar::PanelMetrics metrics;
+    if (!ImGui::BeginPopup("##panelssettings")) {
+        return;
+    }
+
+    PanelLayout& layout = m_state.view().layout;
+    const ChromeTheme& chrome = m_state.theme().chrome();
+
+    ImGui::SeparatorText("Panels");
+
+    // Mirror: every panel shows the same sweep at its own zoom. Spans: one
+    // panel per swept range, each held inside its own.
+    int mode = layout.mode == PanelMode::Spans ? 1 : 0;
+    field("Show", "Mirror: the same data in every panel, each zoomed on its own.\n"
+                  "Spans: a panel per sweep range, which it cannot leave.");
+    if (ImGui::RadioButton("Mirror", &mode, 0)) {
+        setPanelMode(PanelMode::Mirror);
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Spans", &mode, 1)) {
+        setPanelMode(PanelMode::Spans);
+    }
+
+    struct Choice {
+        PanelArrangement arrangement;
+        const char* glyph;
+        const char* fallback;
+        const char* tooltip;
+    };
+    constexpr std::array<Choice, 7> kChoices{{
+        {PanelArrangement::Single, icon::kLayoutSingle, "1", "One panel"},
+        {PanelArrangement::Columns, icon::kLayoutColumns, "2|", "Two, side by side"},
+        {PanelArrangement::Rows, icon::kLayoutRows, "2-", "Two, stacked"},
+        {PanelArrangement::Three, icon::kLayoutThree, "3", "Three: one wide, two stacked"},
+        {PanelArrangement::Grid, icon::kLayoutGrid, "4", "Four, in a grid"},
+        {PanelArrangement::Six, icon::kLayoutSix, "6", "Six: three across, two down"},
+        {PanelArrangement::Nine, icon::kLayoutNine, "9", "Nine: three by three"},
+    }};
+
+    const PanelArrangement current = arrangementFor(layout.attachedCount(), layout.rowsForTwo);
+    field("Layout", "More slots copy the focused panel; fewer drop the last ones.");
+    for (std::size_t i = 0; i < kChoices.size(); ++i) {
+        const Choice& choice = kChoices[i];
+        if (i > 0) {
+            ImGui::SameLine();
+        }
+        const bool selected = choice.arrangement == current;
+        if (selected) {
+            ImGui::PushStyleColor(ImGuiCol_Button, bar::toVec4(chrome.accent.withAlpha(0.45F)));
+        }
+        const std::string label =
+            std::format("{}##layout{}", icon::glyphOr(choice.glyph, choice.fallback), i);
+        if (ImGui::Button(label.c_str())) {
+            setArrangement(choice.arrangement);
+        }
+        if (selected) {
+            ImGui::PopStyleColor();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", choice.tooltip);
+        }
+    }
+
+    // Mirror's counterpart to Spans, for a moment rather than for good: each
+    // panel lands on a range, and is still free to be moved off it.
+    if (layout.mode == PanelMode::Mirror) {
+        const std::size_t ranges = m_state.sweepPlan().segments.size();
+        ImGui::BeginDisabled(!m_state.sweeping() || ranges == 0);
+        if (ImGui::Button("Fit to ranges", ImVec2(-1, 0))) {
+            fitPanelsToRanges();
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(ranges > layout.panels.size()
+                                  ? "Zoom each panel onto a swept range, lowest first.\n"
+                                    "More ranges than panels: the closest share one."
+                                  : "Zoom each panel onto a swept range, lowest first.");
+        }
+    }
+
+    ImGui::Spacing();
+    {
+        ImGui::BeginDisabled(layout.mode != PanelMode::Spans);
+        ImGui::Checkbox("Overview strip", &layout.overview);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("The whole range above the Spans panels");
+        }
+
+        ImGui::SameLine();
+        const float width =
+            ImGui::CalcTextSize("Reset splits").x + (ImGui::GetStyle().FramePadding.x * 2.0F);
+        ImGui::SetCursorPosX(
+            std::max(ImGui::GetCursorPosX(),
+                     ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - width));
+        if (ImGui::Button("Reset splits")) {
+            const PanelLayout defaults;
+            const PanelView panelDefaults;
+            layout.splits = defaults.splits;
+            for (PanelView& view : layout.panels) {
+                view.waterfallFraction = panelDefaults.waterfallFraction;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Even out the splits between panels and inside each");
         }
     }
 
@@ -3811,7 +3946,7 @@ void MainWindow::drawGradientEditor() {
         const_cast<Theme&>(m_state.theme()).waterfall().colorMap = m_newColorMapName;
         const_cast<Theme&>(m_state.theme()).spectrum().fillColorMap = m_newColorMapName;
         m_state.refreshTheme();
-        m_waterfall.setColorMap(m_state.theme().waterfallColorMap());
+        applyWaterfallColorMap();
     }
 
     ImGui::SameLine();
@@ -5041,6 +5176,10 @@ void MainWindow::pollHistoryOpen() {
     m_history.adopt(std::move(result.reader), path);
     m_historyMessage.clear();
 
+    // Adopting resets the view onto the whole session, so the panel follows.
+    m_historyView.viewStartHz = 0.0;
+    m_historyView.viewStopHz = 0.0;
+
     // The cached spectrum belongs to the reader that has just been replaced,
     // so it goes whatever brought the new one in. The playhead only goes when
     // this is a different file: a session reloaded to pick up its tail should
@@ -5144,6 +5283,8 @@ void MainWindow::drawHistoryToolbar() {
         if (ImGui::Button(
                 icon::glyphOr(icon::kResetZoom, "Reset view").append("##histreset").c_str())) {
             m_history.resetView();
+            m_historyView.viewStartHz = 0.0;
+            m_historyView.viewStopHz = 0.0;
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Back to the start");
@@ -5493,7 +5634,7 @@ void MainWindow::drawHistoryOverview(float height) {
         return;
     }
 
-    const ImVec2 scale = ImGui::GetIO().DisplayFramebufferScale;
+    const ImVec2 scale = ImGui::GetWindowViewport()->FramebufferScale;
     const std::uint32_t texture = m_history.overviewTexture(
         static_cast<std::uint32_t>(size.x * scale.x),
         static_cast<std::uint32_t>(std::max(height * scale.y, 8.0F)), centerHz, bandHz);
@@ -5657,17 +5798,21 @@ void MainWindow::refreshHistorySpectrum() {
 }
 
 void MainWindow::drawHistoryTimeline() {
-    const session::SessionReader& reader = *m_history.reader();
-    const session::SessionSummary& summary = reader.summary();
+    // The viewer's panel starts from the levels the instrument's focused panel
+    // was saved with, so a recording opens looking like the sweep it was.
+    if (!m_historyLevelsAdopted) {
+        const PanelView& saved = m_state.view().layout.focused();
+        m_historyView.yMinDb = saved.yMinDb;
+        m_historyView.yMaxDb = saved.yMaxDb;
+        m_historyView.gradientMinDb = saved.gradientMinDb;
+        m_historyView.gradientMaxDb = saved.gradientMaxDb;
+        m_historyView.waterfallFraction = saved.waterfallFraction;
+        m_historyLevelsAdopted = true;
+    }
 
     m_history.setColorMap(m_state.theme().waterfallColorMap());
-    m_history.setGradientRange(m_state.view().gradientMinDb, m_state.view().gradientMaxDb);
+    m_history.setGradientRange(m_historyView.gradientMinDb, m_historyView.gradientMaxDb);
     m_history.setPeakDetect(m_state.view().waterfallPeakDetect);
-
-    // Bound to the session, not to whichever segment the playhead is in.
-    // Segments cover different ranges, so clamping per segment snapped the zoom
-    // back every time the playhead crossed a boundary.
-    m_state.setViewBounds(summary.lowestHz, summary.highestHz);
 
     advanceHistoryPlayback();
     refreshHistorySpectrum();
@@ -5676,11 +5821,9 @@ void MainWindow::drawHistoryTimeline() {
     // the instrument keeps the same numbers, and printing them twice on one
     // screen was most of what made this window look unrelated to that one.
 
-    // The spectrum reads its window from AppState, which is also what the
-    // shared gestures mutate -- so handing it the history's range before and
-    // taking it back after is what makes wheel-zoom and shift-drag behave
-    // exactly as they do on the live plot.
-    m_state.setVisibleRange(m_history.viewFromHz(), m_history.viewToHz());
+    // The spectrum and the waterfall both draw the viewer's panel, and the
+    // shared gestures move it, which is what makes wheel-zoom and shift-drag
+    // behave exactly as they do on the live plots.
 
     // Everything below the plots is a fixed cost and all of it has to come out
     // of the budget, or the content outruns the window and it scrolls. The
@@ -5707,15 +5850,15 @@ void MainWindow::drawHistoryTimeline() {
         constexpr float kMinPaneHeight = 70.0F;
         const float budget = available - bar::splitterThickness() - spacing * 2.0F;
         const float waterfallHeight =
-            std::clamp(budget * m_state.waterfallFraction(), std::min(kMinPaneHeight, budget),
+            std::clamp(budget * m_historyView.waterfallFraction, std::min(kMinPaneHeight, budget),
                        std::max(budget - kMinPaneHeight, 1.0F));
 
         ImGui::BeginChild("##historyspectrumpane", ImVec2(0, budget - waterfallHeight), 0,
                           kPaneFlags);
-        drawSpectrum();
+        drawSpectrum(m_historyView, m_historyPanel);
         ImGui::EndChild();
 
-        drawPaneSplitter(budget);
+        drawPaneSplitter(budget, m_historyView.waterfallFraction);
 
         ImGui::BeginChild("##historywaterfallpane", ImVec2(0, waterfallHeight), 0, kPaneFlags);
         drawHistoryWaterfall();
@@ -5727,10 +5870,8 @@ void MainWindow::drawHistoryTimeline() {
     drawHistoryStripSplitter();
     drawHistoryOverview(m_historyOverviewHeight);
 
-    double fromHz = 0.0;
-    double toHz = 0.0;
-    m_state.visibleRange(fromHz, toHz);
-    m_history.setFrequencyRange(fromHz, toHz);
+    const FrequencySpan range = panelRange(m_historyView);
+    m_history.setFrequencyRange(range.startHz, range.stopHz);
 
     drawHistoryStatusBar();
 }

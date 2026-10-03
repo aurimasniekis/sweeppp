@@ -409,7 +409,6 @@ void paint(ImDrawList* draw, const SpectrumLayout& layout, const Contribution& e
 void drawOverflow(ImDrawList* draw, const SpectrumLayout& layout, const ContributionStyle& style,
                   const std::vector<const Contribution*>& overflow, std::size_t row,
                   ContributionOverflowList& list) {
-    list.hoveredChip = false;
     if (overflow.empty()) {
         return;
     }
@@ -476,15 +475,17 @@ void drawOverflow(ImDrawList* draw, const SpectrumLayout& layout, const Contribu
 
 } // namespace
 
-void drawContributions(ImDrawList* draw, const SpectrumLayout& layout,
+void beginContributionFrame(ContributionInteraction& state) {
+    state.overflow.hoveredChip = false;
+}
+
+bool drawContributions(ImDrawList* draw, const SpectrumLayout& layout,
                        std::span<const Contribution> ranked, const ContributionStyle& style,
                        ContributionInteraction& state) {
     ContributionSelection& picked = state.picked;
-    state.claimedClick = false;
 
     if (draw == nullptr || ranked.empty()) {
-        state.overflow.hoveredChip = false;
-        return;
+        return false;
     }
 
     const float alpha = style.alpha > 0.0F ? style.alpha : 0.18F;
@@ -588,7 +589,7 @@ void drawContributions(ImDrawList* draw, const SpectrumLayout& layout,
         picked.clear();
     }
 
-    state.claimedClick = claimed;
+    return claimed;
 }
 
 void drawContributionOverflow(ContributionInteraction& state) {

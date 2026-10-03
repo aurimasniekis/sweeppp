@@ -51,6 +51,7 @@ set(SWEEPPP_SOURCES
     src/ui/ColorMap.cpp
     src/ui/Marker.cpp
     src/ui/MarkerPreset.cpp
+    src/ui/PanelLayout.cpp
     src/ui/Theme.cpp
     src/ui/ToastCenter.cpp
     src/ui/TraceStore.cpp

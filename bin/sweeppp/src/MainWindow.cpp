@@ -37,10 +37,6 @@ using bar::statusChip;
 using bar::statusFramePadding;
 using bar::toolbarHeight;
 
-float infoRowHeight() {
-    return ImGui::GetTextLineHeight() + bar::padding() * 2.0F;
-}
-
 /// How tall a popover hanging off the toolbar may grow.
 ///
 /// Measured from the viewport rather than fixed, because the analysis panel in
@@ -254,7 +250,9 @@ void MainWindow::takeSnapshot(bool toFile) {
 
     // Points to framebuffer pixels: on a Retina display the two differ by 2x,
     // and reading the rectangle in points would capture the top-left quarter.
-    const ImVec2 scale = ImGui::GetIO().DisplayFramebufferScale;
+    // The rectangle is already relative to the main viewport, which is the
+    // framebuffer being read.
+    const ImVec2 scale = ImGui::GetMainViewport()->FramebufferScale;
     const int x = static_cast<int>(m_snapshotRect.x * scale.x);
     const int y = static_cast<int>(m_snapshotRect.y * scale.y);
     const int width = static_cast<int>(m_snapshotRect.z * scale.x);
@@ -405,11 +403,19 @@ void MainWindow::draw() {
     m_state.applyPendingStyle();
 
     if (m_historyViewerMode) {
+        refreshMarkers();
+        beginContributionFrame(m_contributions);
         drawHistoryWindow();
         return;
     }
 
     m_state.pumpFrames();
+
+    // Once a frame, for every panel: each pushes these unless it is paused.
+    m_frameLines = m_state.takePendingWaterfallLines();
+    m_reducedLines.clear();
+    m_state.telemetry().render().waterfallLines.fetch_add(m_frameLines.size(),
+                                                          std::memory_order_relaxed);
 
     // The radio the saved profile named is opened on a worker thread; this is
     // where it lands, between frames, on the thread that owns the engine.
@@ -431,6 +437,13 @@ void MainWindow::draw() {
     }
 
     updateInstrumentTitle();
+
+    // The views follow the plan before anything is drawn from them, and the
+    // markers are measured once for every panel that will show them.
+    followPlan();
+    syncPanels();
+    refreshMarkers();
+    beginContributionFrame(m_contributions);
 
     // A radio arriving answers the question the chooser was asking. The latch
     // is only cleared on the transition, so "Change device" -- which puts the
@@ -541,41 +554,22 @@ void MainWindow::draw() {
     // the gap between the panes all sit on the same black as the plots
     // themselves, rather than framing them as separate panels.
     ImGui::PushStyleColor(ImGuiCol_ChildBg, toImVec4(m_state.theme().spectrum().background));
-    ImGui::BeginChild("##plots", ImVec2(0, bodyHeight));
+    ImGui::BeginChild("##plots", ImVec2(0, bodyHeight), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     {
-        // Where a snapshot is cut from. Taken before the info row rather than
-        // after it: the centre, span and RBW are what make a picture of a
-        // trace mean anything a week later.
+        // Where a snapshot is cut from: every attached panel, headers
+        // included -- the centre, span and RBW are what make a picture of a
+        // trace mean anything a week later. Relative to the main viewport,
+        // whose framebuffer is what gets read, since with viewports on screen
+        // coordinates are the desktop's.
         const ImVec2 snapshotTopLeft = ImGui::GetCursorScreenPos();
-        const float snapshotWidth = ImGui::GetContentRegionAvail().x;
+        const ImVec2 snapshotSize = ImGui::GetContentRegionAvail();
+        const ImVec2 mainOrigin = ImGui::GetMainViewport()->Pos;
 
-        drawInfoRow();
+        drawPanels();
 
-        const float available = ImGui::GetContentRegionAvail().y;
-        const float spacing = ImGui::GetStyle().ItemSpacing.y;
-
-        // Both panes keep a floor, so the split can never be dragged to the
-        // point where one of them has no usable height and the other cannot be
-        // dragged back.
-        constexpr float kMinPaneHeight = 90.0F;
-        const float budget = available - splitterThickness() - spacing * 2.0F;
-        const float waterfallHeight =
-            std::clamp(budget * m_state.waterfallFraction(), std::min(kMinPaneHeight, budget),
-                       std::max(budget - kMinPaneHeight, 0.0F));
-        const float spectrumHeight = budget - waterfallHeight;
-
-        ImGui::BeginChild("##spectrum", ImVec2(0, spectrumHeight));
-        drawSpectrum();
-        ImGui::EndChild();
-
-        drawPaneSplitter(budget);
-
-        ImGui::BeginChild("##waterfall", ImVec2(0, 0));
-        drawWaterfall();
-        ImGui::EndChild();
-
-        m_snapshotRect = ImVec4(snapshotTopLeft.x, snapshotTopLeft.y, snapshotWidth,
-                                ImGui::GetCursorScreenPos().y - snapshotTopLeft.y);
+        m_snapshotRect = ImVec4(snapshotTopLeft.x - mainOrigin.x, snapshotTopLeft.y - mainOrigin.y,
+                                snapshotSize.x, snapshotSize.y);
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -585,6 +579,15 @@ void MainWindow::draw() {
     drawSessionSaveCard();
 
     ImGui::End();
+
+    // Torn-off panels are windows of their own, so they are begun here, after
+    // the root has ended, and before the markers are published below so a
+    // gesture in one of them is published this frame too.
+    drawFloatingPanels();
+
+    if (m_closePanelId != 0) {
+        closePanel(std::exchange(m_closePanelId, 0));
+    }
 
     // After the panes, because every gesture that moves a marker has run by
     // now, and before the plugin windows below, so one opened on a marker sees
@@ -749,36 +752,34 @@ void MainWindow::drawToolbar() {
     ImGui::TextDisabled("|");
     ImGui::SameLine(0.0F, 16.0F);
 
+    // The zoom buttons act on the focused panel; the wheel and the drags act
+    // on whichever panel they happen in.
+    PanelView& focused = m_state.view().layout.focused();
     if (ImGui::Button(icon::glyphOr(icon::kResetZoom, "Reset zoom").append("##resetzoom").c_str(),
                       ImVec2(0, 0))) {
-        m_state.resetZoom();
+        focused.viewStartHz = 0.0;
+        focused.viewStopHz = 0.0;
     }
 
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Fit the whole swept span");
+        ImGui::SetTooltip("Fit the whole span in the focused panel");
     }
 
     ImGui::SameLine();
     if (ImGui::Button(icon::glyphOr(icon::kZoomOut, "-").append("##zoomout").c_str(),
                       ImVec2(0, 0))) {
-        double from = 0.0;
-        double to = 0.0;
-        m_state.visibleRange(from, to);
-        const double center = (from + to) * 0.5;
-        const double half = (to - from) * 0.75;
-        m_state.setVisibleRange(center - half, center + half);
+        const FrequencySpan range = panelRange(focused);
+        const FrequencySpan wider = zoomAbout(range, range.centre(), 1.5);
+        setPanelRange(focused, wider.startHz, wider.stopHz);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Zoom out");
     }
     ImGui::SameLine();
     if (ImGui::Button(icon::glyphOr(icon::kZoomIn, "+").append("##zoomin").c_str(), ImVec2(0, 0))) {
-        double from = 0.0;
-        double to = 0.0;
-        m_state.visibleRange(from, to);
-        const double center = (from + to) * 0.5;
-        const double half = (to - from) * 0.25;
-        m_state.setVisibleRange(center - half, center + half);
+        const FrequencySpan range = panelRange(focused);
+        const FrequencySpan narrower = zoomAbout(range, range.centre(), 0.5);
+        setPanelRange(focused, narrower.startHz, narrower.stopHz);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Zoom in");
@@ -807,6 +808,17 @@ void MainWindow::drawToolbar() {
     }
     anchorPopoverUnderItem();
     drawWaterfallSettingsPopup();
+
+    ImGui::SameLine();
+    if (ImGui::Button(icon::glyphOr(icon::kLayoutGrid, "Panels").append("##panelsbtn").c_str(),
+                      ImVec2(0, 0))) {
+        ImGui::OpenPopup("##panelssettings");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Panels: layout, mirror or spans, and the overview strip");
+    }
+    anchorPopoverUnderItem();
+    drawPanelsPopup();
 
     // Start / stop, right-aligned and alone.
     //
@@ -845,7 +857,7 @@ void MainWindow::drawToolbar() {
     ImGui::EndChild();
 }
 
-void MainWindow::drawPaneSplitter(float budget) {
+void MainWindow::drawPaneSplitter(float budget, float& fraction) {
     ImGui::InvisibleButton("##panesplit", ImVec2(-1.0F, splitterThickness()));
 
     if (ImGui::IsItemActive() && budget > 0.0F) {
@@ -853,8 +865,7 @@ void MainWindow::drawPaneSplitter(float budget) {
         // as a delta rather than from the cursor's absolute position, so
         // grabbing the divider anywhere along its height moves it by how far
         // the cursor travels instead of snapping it under the pointer.
-        m_state.setWaterfallFraction(std::clamp(
-            m_state.waterfallFraction() - ImGui::GetIO().MouseDelta.y / budget, 0.05F, 0.95F));
+        fraction = std::clamp(fraction - ImGui::GetIO().MouseDelta.y / budget, 0.05F, 0.95F);
     }
     if (ImGui::IsItemActive() || ImGui::IsItemHovered()) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
@@ -1023,77 +1034,6 @@ void MainWindow::drawMenuSection() {
     }
 }
 
-void MainWindow::drawInfoRow() {
-    double fromHz = 0.0;
-    double toHz = 0.0;
-    m_state.visibleRange(fromHz, toHz);
-
-    ImGui::BeginChild("##inforow", ImVec2(0, infoRowHeight()), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_NoScrollbar);
-
-    struct Field {
-        const char* label;
-        std::string value;
-    };
-
-    const std::array<Field, 4> fields{{
-        {"Start", toml_util::formatFrequency(fromHz, 3)},
-        {"Center", toml_util::formatFrequency((fromHz + toHz) * 0.5, 3)},
-        {"Span", toml_util::formatFrequency(toHz - fromHz, 3)},
-        {"Stop", toml_util::formatFrequency(toHz, 3)},
-    }};
-
-    constexpr float kLabelGap = 4.0F;  // between a label and its value
-    constexpr float kFieldGap = 22.0F; // between one field and the next
-
-    // Every value gets the same reserved width, taken from the widest one that
-    // can occur rather than from the text currently in it.
-    //
-    // These change constantly while tuning -- "1.000 MHz" against
-    // "868.300 MHz" -- and sizing each to its own text means all four fields
-    // shuffle sideways whenever any one of them gains a digit. Reserving the
-    // worst case pins each field in place and lets only the digits move, which
-    // is the difference between a readout that can be watched and one that has
-    // to be re-found every second.
-    const float valueWidth = ImGui::CalcTextSize("8888.888 MHz").x;
-
-    float totalWidth = 0.0F;
-    for (const Field& entry : fields) {
-        totalWidth += ImGui::CalcTextSize(entry.label).x + kLabelGap + valueWidth;
-    }
-    totalWidth += kFieldGap * static_cast<float>(fields.size() - 1);
-
-    // Centred on the plot's data area, not on the window: the row describes
-    // the spectrum, so it should sit over it. The rect comes from the previous
-    // frame -- the spectrum has not been drawn yet this one -- which is
-    // imperceptible except for a single frame after a resize.
-    ImGui::SetCursorPos(ImVec2(bar::padding(), bar::padding()));
-
-    if (m_spectrumPlotWidth > 16.0F) {
-        const float centred = m_spectrumPlotX + (m_spectrumPlotWidth - totalWidth) * 0.5F;
-        ImGui::SetCursorScreenPos(
-            ImVec2(std::max(centred, m_spectrumPlotX), ImGui::GetCursorScreenPos().y));
-    }
-
-    for (std::size_t i = 0; i < fields.size(); ++i) {
-        const float fieldStart = ImGui::GetCursorPosX();
-
-        ImGui::TextDisabled("%s", fields[i].label);
-        ImGui::SameLine(0.0F, kLabelGap);
-        ImGui::TextUnformatted(fields[i].value.c_str());
-
-        // One absolute placement, not a relative one after it: SameLine with a
-        // spacing argument measures from where the last item ended, which is
-        // exactly the text-dependent position being avoided here.
-        if (i + 1 < fields.size()) {
-            ImGui::SameLine(fieldStart + ImGui::CalcTextSize(fields[i].label).x + kLabelGap +
-                            valueWidth + kFieldGap);
-        }
-    }
-
-    ImGui::EndChild();
-}
-
 void MainWindow::drawRxPortChip(const ChromeTheme& chrome) {
     const ISdrDevice* device = m_state.device();
     if (device == nullptr) {
@@ -1187,16 +1127,13 @@ void MainWindow::drawStatusBar() {
     // answer the same frequency and the operator decides which of them titles
     // the chip -- a plugin drawing its own could only ever speak for itself.
     {
-        double fromHz = 0.0;
-        double toHz = 0.0;
-        m_state.visibleRange(fromHz, toHz);
-
-        // The selected marker when there is one, the middle of the view when
-        // there is not, so the chip always describes the same frequency the
-        // plot is.
+        // The selected marker when there is one, the middle of the focused
+        // panel when there is not, so the chip always describes the same
+        // frequency the plot the operator is working in does.
         const Marker* selected = m_state.markers().active();
-        const double queryHz = selected != nullptr && selected->visible ? selected->frequencyHz
-                                                                        : (fromHz + toHz) * 0.5;
+        const double queryHz = selected != nullptr && selected->visible
+                                   ? selected->frequencyHz
+                                   : panelRange(m_state.view().layout.focused()).centre();
 
         drawContributionChip(queryHz, chrome);
         ImGui::SameLine(0.0F, 24.0F);

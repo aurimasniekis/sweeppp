@@ -51,9 +51,6 @@ struct Profile {
 
     ui::ViewSettings view;
 
-    /// Split between the spectrum and the waterfall, as a fraction.
-    float waterfallFraction = 0.45F;
-
     /// What plugins contributed, under `plugins.<plugin id>.<key>`.
     ///
     /// Carried opaquely and written back verbatim, which is the property that

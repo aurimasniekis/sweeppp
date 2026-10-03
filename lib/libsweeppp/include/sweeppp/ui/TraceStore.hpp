@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -76,6 +77,31 @@ struct Envelope {
     [[nodiscard]] bool empty() const noexcept { return maximum.empty(); }
 };
 
+/// Envelopes already computed, one per trace kind, owned by whoever draws them.
+///
+/// Owned by the caller rather than by the store because more than one plot
+/// draws the same traces at different zooms, and a single slot inside the
+/// store was overwritten by each in turn -- recomputing a million-bin walk for
+/// every trace on every plot on every frame. One slot per kind is also what
+/// keeps Max, Min and Average from evicting each other within one plot.
+struct EnvelopeCache {
+    struct Slot {
+        Envelope envelope;
+        double fromHz = 0.0;
+        double toHz = 0.0;
+        std::size_t pixels = 0;
+        std::uint64_t generation = 0;
+        bool filled = false;
+    };
+    std::array<Slot, 4> slots;
+
+    void clear() noexcept {
+        for (Slot& slot : slots) {
+            slot.filled = false;
+        }
+    }
+};
+
 /// Holds the four traces and produces decimated envelopes for drawing.
 class TraceStore {
 public:
@@ -94,9 +120,10 @@ public:
     /// Per-pixel min/max envelope of one trace over a frequency window.
     ///
     /// `pixels` is the plot's width in pixels; the result has at most that
-    /// many columns however many bins are involved.
+    /// many columns however many bins are involved. Recomputed only when the
+    /// traces or the window changed since `cache` last held this kind.
     [[nodiscard]] const Envelope& envelope(TraceKind kind, double fromHz, double toHz,
-                                           std::size_t pixels) const;
+                                           std::size_t pixels, EnvelopeCache& cache) const;
 
     [[nodiscard]] double startHz() const noexcept { return m_startHz; }
     [[nodiscard]] double stopHz() const noexcept {
@@ -144,14 +171,26 @@ private:
     std::uint64_t m_lastFrameNs = 0;
     std::uint32_t m_averageWindow = 16;
 
-    // Cached so a redraw that changes nothing does not recompute the envelope.
-    mutable Envelope m_envelope;
-    mutable TraceKind m_envelopeKind = TraceKind::Live;
-    mutable double m_envelopeFrom = 0.0;
-    mutable double m_envelopeTo = 0.0;
-    mutable std::size_t m_envelopePixels = 0;
-    mutable std::uint64_t m_envelopeGeneration = 0;
+    /// Bumped whenever any trace changes, which is what a cached envelope is
+    /// checked against.
     std::uint64_t m_generation = 0;
+
+    /// Min and max over runs of 8, 64, 512... bins, per trace.
+    ///
+    /// Zoomed out over a megabin grid, every plot used to walk every bin on
+    /// every new frame, once per plot and once per trace. Built once per
+    /// change of the traces and shared, a zoomed-out plot reads a few
+    /// thousand entries instead -- and still sees a one-bin carrier, because
+    /// an entry is the min and max of what it covers, not a sample of it.
+    struct Pyramid {
+        std::vector<std::vector<float>> lows;  ///< Level 1 upward.
+        std::vector<std::vector<float>> highs; ///< Level 1 upward.
+        std::uint64_t generation = 0;
+        bool built = false;
+    };
+    mutable std::array<Pyramid, 4> m_pyramids;
+
+    [[nodiscard]] const Pyramid& pyramid(TraceKind kind) const;
 };
 
 } // namespace sweeppp::ui

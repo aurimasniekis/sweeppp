@@ -753,6 +753,98 @@ TEST_CASE("a frame is stitched by its own centre, not by the current step" *
     MESSAGE("best per-pass coverage: " << bestPassCoverage);
 }
 
+TEST_CASE("coverage counts the bins the plan covers, not the gap between segments") {
+    SweepPlan plan;
+    plan.segments = {SweepSegment{.startHz = 100e6, .stopHz = 110e6},
+                     SweepSegment{.startHz = 170e6, .stopHz = 180e6}};
+    plan.sampleRate = 8e6;
+    plan.rbwHz = 100e3;
+    plan.applyMode(SweepMode::Fast);
+
+    auto schedule = SweepPlanner::plan(plan, backend(), 100e-6);
+    REQUIRE(schedule.has_value());
+
+    // Steps overlap, so a plain sum of the ranges counts some bins twice.
+    std::vector<bool> covered(schedule->gridBinCount, false);
+    std::size_t summed = 0;
+    for (const auto& [first, count] : schedule->coveredRanges) {
+        summed += count;
+        for (std::size_t i = first; i < first + count && i < covered.size(); ++i) {
+            covered[i] = true;
+        }
+    }
+    const auto unionCount = static_cast<std::size_t>(std::ranges::count(covered, true));
+    CHECK(schedule->coveredBinCount() == unionCount);
+    CHECK(summed >= unionCount);
+
+    const double coveredHz =
+        static_cast<double>(schedule->coveredBinCount()) * schedule->gridBinWidthHz;
+    CHECK(coveredHz == doctest::Approx(20e6).epsilon(0.05));
+    CHECK(schedule->coveredBinCount() < schedule->gridBinCount / 3);
+}
+
+TEST_CASE("a two-segment sweep reports whole passes as fully covered" *
+          doctest::skip(!kRealTimeSourceUsable)) {
+    registerReferenceFftBackend();
+    registerBuiltinSdrDevices();
+
+    auto device = SdrDeviceManager::instance().open("synthetic", "");
+    REQUIRE(device.has_value());
+    REQUIRE((*device)->setParameter("sample_rate", SdrValue{8e6}).has_value());
+
+    // The gap is three times the swept width, so the old denominator -- the
+    // whole grid -- could never have read above a quarter.
+    SweepPlan plan;
+    plan.segments = {SweepSegment{.startHz = 100e6, .stopHz = 110e6},
+                     SweepSegment{.startHz = 170e6, .stopHz = 180e6}};
+    plan.sampleRate = 8e6;
+    plan.rbwHz = 100e3;
+    plan.applyMode(SweepMode::Fast);
+    plan.continuous = true;
+
+    FrameBus pipelineBus;
+    FrameBus sweptBus;
+    Telemetry telemetry;
+    EventBus events;
+
+    SweepEngine engine(sweptBus, telemetry, events);
+    REQUIRE(engine.configure(plan, backend(), **device).has_value());
+    pipelineBus.subscribe(&engine);
+
+    Pipeline pipeline(pipelineBus, telemetry, events);
+    REQUIRE(pipeline
+                .configure(backend(), PipelineConfig{.fftSize = engine.schedule().fftSize,
+                                                     .workerCount = 2,
+                                                     .targetFrameRate = 0.0})
+                .has_value());
+    pipeline.setTuning(100e6, 8e6, 8e6);
+    REQUIRE(pipeline
+                .start(**device, StreamConfig{.framesPerBlock = engine.schedule().fftSize,
+                                              .blockCount = 32,
+                                              .format = (*device)->nativeFormat()})
+                .has_value());
+    REQUIRE(engine.start(**device, pipeline).has_value());
+
+    // The best of several passes, for the reason the comb case gives: a busy
+    // host drops a different scattering of steps each pass.
+    double bestPassCoverage = 0.0;
+    {
+        const std::uint64_t deadline = monotonicNs() + secondsToNs(60.0);
+        while (engine.passCount() <= 6) {
+            REQUIRE(monotonicNs() < deadline);
+            bestPassCoverage = std::max(bestPassCoverage, engine.lastPassCoverage());
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        bestPassCoverage = std::max(bestPassCoverage, engine.lastPassCoverage());
+    }
+    engine.stop();
+    pipeline.stop();
+
+    CAPTURE(bestPassCoverage);
+    CHECK(bestPassCoverage > 0.5);
+    CHECK(bestPassCoverage <= 1.0);
+}
+
 TEST_CASE("the plan's sample rate reaches the radio before the grid is built from it") {
     // The grid is derived entirely from the sample rate: bin width, the usable
     // width of a step, the step advance, and every local and global bin

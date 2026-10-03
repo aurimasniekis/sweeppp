@@ -9,6 +9,43 @@
 #include <sweeppp/core/Clock.hpp>
 
 namespace sweeppp::ui {
+namespace {
+
+/// Bins per entry at each step up the pyramid.
+constexpr std::size_t kPyramidFactor = 8;
+
+/// How many entries a pixel column must hold before a level is used.
+///
+/// An entry lands in one column by its centre, so bins near a column's edge
+/// can be counted one column over. At four entries a column that is at most a
+/// quarter of a pixel, which no one can see -- and below it the bins are read
+/// directly, so a zoomed-in trace is exact.
+constexpr double kEntriesPerColumn = 4.0;
+
+/// One level from the one below: the max of the maxes, and the min of the
+/// mins that were measured.
+void reduceLevel(const float* lows, const float* highs, std::size_t count,
+                 std::vector<float>& outLows, std::vector<float>& outHighs) {
+    const std::size_t entries = (count + kPyramidFactor - 1) / kPyramidFactor;
+    outLows.resize(entries);
+    outHighs.resize(entries);
+
+    for (std::size_t e = 0; e < entries; ++e) {
+        const std::size_t from = e * kPyramidFactor;
+        const std::size_t to = std::min(from + kPyramidFactor, count);
+        float low = std::numeric_limits<float>::infinity();
+        float high = kUnmeasuredDbfs;
+        for (std::size_t i = from; i < to; ++i) {
+            high = std::max(high, highs[i]);
+            low = highs[i] > kUnmeasuredDbfs ? std::min(low, lows[i]) : low;
+        }
+        outLows[e] = std::isinf(low) ? kUnmeasuredDbfs : low;
+        outHighs[e] = high;
+    }
+}
+
+} // namespace
+
 std::string_view traceKindName(TraceKind kind) noexcept {
     switch (kind) {
     case TraceKind::Live:
@@ -165,66 +202,127 @@ void TraceStore::clear() {
     m_binCount = 0;
     m_startHz = 0.0;
     m_binWidthHz = 0.0;
-    m_envelope.clear();
+    ++m_generation;
 }
 
-const Envelope& TraceStore::envelope(TraceKind kind, double fromHz, double toHz,
-                                     std::size_t pixels) const {
+const TraceStore::Pyramid& TraceStore::pyramid(TraceKind kind) const {
+    Pyramid& pyramid = m_pyramids[static_cast<std::size_t>(kind)];
+    if (pyramid.built && pyramid.generation == m_generation) {
+        return pyramid;
+    }
+    pyramid.built = true;
+    pyramid.generation = m_generation;
+
+    // Up to where a level would be a handful of entries; nothing is zoomed out
+    // further than that.
+    constexpr std::size_t kSmallestLevel = 64;
+    const std::vector<float>& values = trace(kind).values;
+    std::size_t levels = 0;
+    for (std::size_t count = values.size(); count > kSmallestLevel; count /= kPyramidFactor) {
+        ++levels;
+    }
+    pyramid.lows.resize(levels);
+    pyramid.highs.resize(levels);
+
+    const float* lows = values.data();
+    const float* highs = values.data();
+    std::size_t count = values.size();
+    for (std::size_t level = 0; level < levels; ++level) {
+        reduceLevel(lows, highs, count, pyramid.lows[level], pyramid.highs[level]);
+        lows = pyramid.lows[level].data();
+        highs = pyramid.highs[level].data();
+        count = pyramid.highs[level].size();
+    }
+    return pyramid;
+}
+
+const Envelope& TraceStore::envelope(TraceKind kind, double fromHz, double toHz, std::size_t pixels,
+                                     EnvelopeCache& cache) const {
+    EnvelopeCache::Slot& slot = cache.slots[static_cast<std::size_t>(kind)];
+    Envelope& out = slot.envelope;
+
     // Recompute only when something that affects the result changed. Panning
     // the view at 60 fps otherwise recomputes a million-bin envelope every
     // frame for no reason.
-    const bool cacheValid = m_envelopeGeneration == m_generation && m_envelopeKind == kind &&
-                            m_envelopePixels == pixels &&
-                            std::abs(m_envelopeFrom - fromHz) < 1e-6 &&
-                            std::abs(m_envelopeTo - toHz) < 1e-6 && !m_envelope.empty();
+    const bool cacheValid = slot.filled && slot.generation == m_generation &&
+                            slot.pixels == pixels && std::abs(slot.fromHz - fromHz) < 1e-6 &&
+                            std::abs(slot.toHz - toHz) < 1e-6;
     if (cacheValid) {
-        return m_envelope;
+        return out;
     }
 
-    m_envelope.clear();
+    out.clear();
+    slot.filled = true;
+    slot.fromHz = fromHz;
+    slot.toHz = toHz;
+    slot.pixels = pixels;
+    slot.generation = m_generation;
 
     const Trace& source = trace(kind);
     if (source.values.empty() || pixels == 0 || toHz <= fromHz || m_binWidthHz <= 0.0) {
-        return m_envelope;
+        return out;
     }
 
-    m_envelope.minimum.assign(pixels, std::numeric_limits<float>::infinity());
-    m_envelope.maximum.assign(pixels, -std::numeric_limits<float>::infinity());
-    m_envelope.frequency.resize(pixels);
+    out.minimum.assign(pixels, std::numeric_limits<float>::infinity());
+    out.maximum.assign(pixels, -std::numeric_limits<float>::infinity());
+    out.frequency.resize(pixels);
 
     const double span = toHz - fromHz;
     const double perPixel = span / static_cast<double>(pixels);
 
     for (std::size_t i = 0; i < pixels; ++i) {
-        m_envelope.frequency[i] = fromHz + perPixel * (static_cast<double>(i) + 0.5);
+        out.frequency[i] = fromHz + perPixel * (static_cast<double>(i) + 0.5);
     }
 
-    // Walk the bins once and drop each into its pixel column. O(bins), and it
-    // visits every bin exactly once -- so a narrow signal cannot be skipped
-    // however far zoomed out the view is.
+    // The bins themselves when a column holds only a few, otherwise the
+    // coarsest pyramid level that still puts several entries in each column.
+    const float* lows = source.values.data();
+    const float* highs = source.values.data();
+    std::size_t entries = source.values.size();
+    std::size_t stride = 1;
+    if (const double binsPerColumn = perPixel / m_binWidthHz;
+        binsPerColumn >= static_cast<double>(kPyramidFactor) * kEntriesPerColumn) {
+        const Pyramid& levels = pyramid(kind);
+        for (std::size_t level = 0; level < levels.highs.size(); ++level) {
+            const std::size_t next = stride * kPyramidFactor;
+            if (static_cast<double>(next) * kEntriesPerColumn > binsPerColumn) {
+                break;
+            }
+            stride = next;
+            lows = levels.lows[level].data();
+            highs = levels.highs[level].data();
+            entries = levels.highs[level].size();
+        }
+    }
+
+    // Walk the entries once and drop each into its pixel column, so every bin
+    // is counted in exactly one -- a narrow signal cannot be skipped however
+    // far zoomed out the view is.
     const auto firstBin =
         static_cast<std::ptrdiff_t>(std::floor((fromHz - m_startHz) / m_binWidthHz));
     const auto lastBin = static_cast<std::ptrdiff_t>(std::ceil((toHz - m_startHz) / m_binWidthHz));
 
-    const std::ptrdiff_t begin = std::max<std::ptrdiff_t>(firstBin, 0);
-    const std::ptrdiff_t end =
-        std::min<std::ptrdiff_t>(lastBin, static_cast<std::ptrdiff_t>(source.values.size()));
+    const auto entryStride = static_cast<std::ptrdiff_t>(stride);
+    const std::ptrdiff_t begin = std::max<std::ptrdiff_t>(firstBin, 0) / entryStride;
+    const std::ptrdiff_t end = std::min<std::ptrdiff_t>((lastBin + entryStride - 1) / entryStride,
+                                                        static_cast<std::ptrdiff_t>(entries));
+    const double entryWidthHz = m_binWidthHz * static_cast<double>(stride);
 
-    for (std::ptrdiff_t bin = begin; bin < end; ++bin) {
-        const float value = source.values[static_cast<std::size_t>(bin)];
-        if (value <= kUnmeasuredDbfs) {
+    for (std::ptrdiff_t entry = begin; entry < end; ++entry) {
+        const float high = highs[static_cast<std::size_t>(entry)];
+        if (high <= kUnmeasuredDbfs) {
             continue;
         }
 
-        const double hz = m_startHz + m_binWidthHz * (static_cast<double>(bin) + 0.5);
+        const double hz = m_startHz + entryWidthHz * (static_cast<double>(entry) + 0.5);
         const auto column = static_cast<std::ptrdiff_t>((hz - fromHz) / perPixel);
         if (column < 0 || column >= static_cast<std::ptrdiff_t>(pixels)) {
             continue;
         }
 
         const auto index = static_cast<std::size_t>(column);
-        m_envelope.minimum[index] = std::min(m_envelope.minimum[index], value);
-        m_envelope.maximum[index] = std::max(m_envelope.maximum[index], value);
+        out.minimum[index] = std::min(out.minimum[index], lows[static_cast<std::size_t>(entry)]);
+        out.maximum[index] = std::max(out.maximum[index], high);
     }
 
     // Columns with no bin at all -- a view zoomed in past the bin spacing, or
@@ -240,7 +338,7 @@ const Envelope& TraceStore::envelope(TraceKind kind, double fromHz, double toHz,
     // before the first measured column.
     std::size_t lastMeasured = 0;
     for (std::size_t i = 0; i < pixels; ++i) {
-        if (!std::isinf(m_envelope.maximum[i])) {
+        if (!std::isinf(out.maximum[i])) {
             lastMeasured = i;
         }
     }
@@ -250,28 +348,22 @@ const Envelope& TraceStore::envelope(TraceKind kind, double fromHz, double toHz,
     bool haveLast = false;
 
     for (std::size_t i = 0; i < pixels; ++i) {
-        if (std::isinf(m_envelope.maximum[i])) {
+        if (std::isinf(out.maximum[i])) {
             if (haveLast && perPixel < m_binWidthHz && i < lastMeasured) {
-                m_envelope.minimum[i] = lastMin;
-                m_envelope.maximum[i] = lastMax;
+                out.minimum[i] = lastMin;
+                out.maximum[i] = lastMax;
             } else {
-                m_envelope.minimum[i] = kUnmeasuredDbfs;
-                m_envelope.maximum[i] = kUnmeasuredDbfs;
+                out.minimum[i] = kUnmeasuredDbfs;
+                out.maximum[i] = kUnmeasuredDbfs;
             }
         } else {
-            lastMin = m_envelope.minimum[i];
-            lastMax = m_envelope.maximum[i];
+            lastMin = out.minimum[i];
+            lastMax = out.maximum[i];
             haveLast = true;
         }
     }
 
-    m_envelopeKind = kind;
-    m_envelopeFrom = fromHz;
-    m_envelopeTo = toHz;
-    m_envelopePixels = pixels;
-    m_envelopeGeneration = m_generation;
-
-    return m_envelope;
+    return out;
 }
 
 float TraceStore::levelAt(double hz) const {

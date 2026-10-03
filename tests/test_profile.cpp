@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Aurimas Niekis <aurimas@niekis.lt>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <doctest/doctest.h>
 #include <filesystem>
 #include <format>
@@ -42,7 +43,6 @@ TEST_CASE("a profile round-trips every part of a configuration") {
     Profile saved;
     saved.name = "bench";
     saved.sweeping = true;
-    saved.waterfallFraction = 0.62F;
 
     saved.deviceDriver = "hackrf";
     saved.deviceId = "0123456789abcdef";
@@ -65,10 +65,11 @@ TEST_CASE("a profile round-trips every part of a configuration") {
     saved.corrections = {.dcRemoval = false, .flatten = true, .spurMask = false, .autoSpurs = true};
 
     saved.view.themeName = "High Contrast";
-    saved.view.yMinDb = -120.0F;
-    saved.view.yMaxDb = -20.0F;
-    saved.view.gradientMinDb = -80.0F;
-    saved.view.gradientMaxDb = -25.0F;
+    saved.view.layout.panels.front().yMinDb = -120.0F;
+    saved.view.layout.panels.front().yMaxDb = -20.0F;
+    saved.view.layout.panels.front().gradientMinDb = -80.0F;
+    saved.view.layout.panels.front().gradientMaxDb = -25.0F;
+    saved.view.layout.panels.front().waterfallFraction = 0.62F;
     saved.view.maxHoldDecayDbPerSec = 12.5F;
     saved.view.fillStyle = 0;
     saved.view.markerReadout = 3;
@@ -86,7 +87,6 @@ TEST_CASE("a profile round-trips every part of a configuration") {
     REQUIRE(loaded.has_value());
 
     CHECK(loaded->name == "bench");
-    CHECK(loaded->waterfallFraction == doctest::Approx(0.62F));
 
     CHECK(loaded->deviceDriver == "hackrf");
     CHECK(loaded->deviceId == "0123456789abcdef");
@@ -133,8 +133,10 @@ TEST_CASE("a profile round-trips every part of a configuration") {
     CHECK(loaded->corrections.autoSpurs);
 
     CHECK(loaded->view.themeName == "High Contrast");
-    CHECK(loaded->view.yMinDb == doctest::Approx(-120.0F));
-    CHECK(loaded->view.gradientMaxDb == doctest::Approx(-25.0F));
+    REQUIRE(loaded->view.layout.panels.size() == 1);
+    CHECK(loaded->view.layout.panels.front().yMinDb == doctest::Approx(-120.0F));
+    CHECK(loaded->view.layout.panels.front().gradientMaxDb == doctest::Approx(-25.0F));
+    CHECK(loaded->view.layout.panels.front().waterfallFraction == doctest::Approx(0.62F));
     CHECK(loaded->view.maxHoldDecayDbPerSec == doctest::Approx(12.5F));
     CHECK(loaded->view.fillStyle == 0);
     CHECK(loaded->view.markerReadout == 3);
@@ -206,23 +208,163 @@ TEST_CASE("a profile from elsewhere cannot put the display out of reach") {
     const ScopedProfileFile file;
 
     Profile saved;
-    saved.view.yMinDb = -9000.0F;
-    saved.view.yMaxDb = 9000.0F;
-    saved.view.gradientMinDb = -9000.0F;
-    saved.view.gradientMaxDb = 9000.0F;
-    saved.waterfallFraction = 40.0F;
+    ui::PanelView& panel = saved.view.layout.panels.front();
+    panel.yMinDb = -9000.0F;
+    panel.yMaxDb = 9000.0F;
+    panel.gradientMinDb = -9000.0F;
+    panel.gradientMaxDb = 9000.0F;
+    panel.waterfallFraction = 40.0F;
+    saved.view.layout.splits.x = 3.0F;
+    saved.view.layout.splits.y = -1.0F;
+    saved.view.layout.splits.thirdsX = {0.95F, 0.05F};
     REQUIRE(saved.save(file.path()).has_value());
 
     const auto loaded = Profile::load(file.path());
     REQUIRE(loaded.has_value());
 
-    CHECK(loaded->view.yMinDb >= ui::kScaleFloorDbfs);
-    CHECK(loaded->view.yMaxDb <= ui::kScaleCeilingDbfs);
-    CHECK(loaded->view.yMaxDb - loaded->view.yMinDb >= ui::kMinScaleSpanDb);
-    CHECK(loaded->view.gradientMinDb >= ui::kScaleFloorDbfs);
-    CHECK(loaded->view.gradientMaxDb <= ui::kScaleCeilingDbfs);
-    CHECK(loaded->waterfallFraction <= 0.95F);
-    CHECK(loaded->waterfallFraction >= 0.05F);
+    REQUIRE(loaded->view.layout.panels.size() == 1);
+    const ui::PanelView& back = loaded->view.layout.panels.front();
+    CHECK(back.yMinDb >= ui::kScaleFloorDbfs);
+    CHECK(back.yMaxDb <= ui::kScaleCeilingDbfs);
+    CHECK(back.yMaxDb - back.yMinDb >= ui::kMinScaleSpanDb);
+    CHECK(back.gradientMinDb >= ui::kScaleFloorDbfs);
+    CHECK(back.gradientMaxDb <= ui::kScaleCeilingDbfs);
+    CHECK(back.waterfallFraction <= 0.95F);
+    CHECK(back.waterfallFraction >= 0.05F);
+    CHECK(loaded->view.layout.splits.x == doctest::Approx(ui::kMaxSplit));
+    CHECK(loaded->view.layout.splits.y == doctest::Approx(ui::kMinSplit));
+    const std::array<float, 2>& thirds = loaded->view.layout.splits.thirdsX;
+    CHECK(thirds[1] - thirds[0] >= ui::kMinThird - 1e-6F);
+    CHECK(1.0F - thirds[1] >= ui::kMinThird - 1e-6F);
+}
+
+TEST_CASE("a panel layout round-trips, mode, arrangement and levels") {
+    const ScopedProfileFile file;
+
+    Profile saved;
+    ui::PanelLayout& layout = saved.view.layout;
+    layout.rowsForTwo = true;
+    layout.splits.x = 0.3F;
+    layout.splits.y = 0.7F;
+    layout.splits.thirdsX = {0.25F, 0.6F};
+    layout.splits.thirdsY = {0.4F, 0.8F};
+    layout.overview = false;
+    layout.panels.front().yMinDb = -100.0F;
+    layout.panels.front().viewStartHz = 90e6;
+    layout.panels.front().viewStopHz = 100e6;
+    layout.panels.front().waterfallPaused = true;
+    ui::PanelView* second = layout.add(layout.panels.front());
+    REQUIRE(second != nullptr);
+    second->gradientMaxDb = -30.0F;
+    second->viewStartHz = 433e6;
+    second->viewStopHz = 435e6;
+    layout.focusedId = second->id;
+    ui::PanelView* third = layout.add(layout.panels.front());
+    REQUIRE(third != nullptr);
+    third->detached = true;
+    REQUIRE(saved.save(file.path()).has_value());
+
+    const auto loaded = Profile::load(file.path());
+    REQUIRE(loaded.has_value());
+    const ui::PanelLayout& back = loaded->view.layout;
+
+    CHECK(back.mode == ui::PanelMode::Mirror);
+    CHECK(back.rowsForTwo);
+    CHECK(back.splits.x == doctest::Approx(0.3F));
+    CHECK(back.splits.y == doctest::Approx(0.7F));
+    CHECK(back.splits.thirdsX[0] == doctest::Approx(0.25F));
+    CHECK(back.splits.thirdsX[1] == doctest::Approx(0.6F));
+    CHECK(back.splits.thirdsY[1] == doctest::Approx(0.8F));
+    CHECK_FALSE(back.overview);
+    REQUIRE(back.panels.size() == 3);
+    CHECK(back.panels[0].yMinDb == doctest::Approx(-100.0F));
+    CHECK(back.panels[1].gradientMaxDb == doctest::Approx(-30.0F));
+    CHECK_FALSE(back.panels[1].detached);
+    CHECK(back.panels[2].detached);
+    CHECK(back.nextId == 4);
+
+    // Two Mirror panels at different zooms are the point of the layout, so
+    // their windows are kept. A pause is never restored.
+    CHECK(back.panels[0].viewStartHz == doctest::Approx(90e6));
+    CHECK(back.panels[1].viewStopHz == doctest::Approx(435e6));
+    CHECK_FALSE(back.panels[0].waterfallPaused);
+
+    // Focus is where the hand was, not a setting.
+    CHECK(back.focusedId == back.panels[0].id);
+}
+
+TEST_CASE("a lone panel's window is not saved, and Spans keeps segments") {
+    const ScopedProfileFile file;
+
+    Profile saved;
+    saved.view.layout.panels.front().viewStartHz = 90e6;
+    saved.view.layout.panels.front().viewStopHz = 100e6;
+    REQUIRE(saved.save(file.path()).has_value());
+    auto loaded = Profile::load(file.path());
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->view.layout.panels.front().viewStopHz == 0.0);
+
+    saved.view.layout.mode = ui::PanelMode::Spans;
+    saved.view.layout.panels.front().segment = {88e6, 108e6};
+    REQUIRE(saved.save(file.path()).has_value());
+    loaded = Profile::load(file.path());
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->view.layout.mode == ui::PanelMode::Spans);
+    CHECK(loaded->view.layout.panels.front().segment.startHz == doctest::Approx(88e6));
+    CHECK(loaded->view.layout.panels.front().segment.stopHz == doctest::Approx(108e6));
+}
+
+TEST_CASE("a hand-edited panel list is repaired rather than rejected") {
+    const ScopedProfileFile file;
+
+    {
+        std::ofstream out(file.path());
+        out << "[display]\n"
+               "panel_mode = \"sideways\"\n"
+               "panel_layout = \"hexagon\"\n"
+               "panel_split_x = 0.01\n"
+               "\n";
+        // Twelve panels, a duplicate id, an id of zero, and all torn off.
+        for (const int id : {1, 2, 2, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) {
+            out << std::format("[[display.panels]]\nid = {}\ndetached = true\n"
+                               "waterfall_fraction = 7.0\ny_min = 50.0\n\n",
+                               id);
+        }
+    }
+
+    const auto loaded = Profile::load(file.path());
+    REQUIRE(loaded.has_value());
+    const ui::PanelLayout& layout = loaded->view.layout;
+
+    CHECK(layout.mode == ui::PanelMode::Mirror);
+    CHECK_FALSE(layout.rowsForTwo);
+    CHECK(layout.splits.x == doctest::Approx(ui::kMinSplit));
+
+    // The repaired list, cut to the limit: ids 1 to 9 in order.
+    REQUIRE(layout.panels.size() == ui::kMaxPanels);
+    for (std::size_t i = 0; i < ui::kMaxPanels; ++i) {
+        CHECK(layout.panels[i].id == static_cast<int>(i) + 1);
+    }
+    CHECK(layout.nextId == static_cast<int>(ui::kMaxPanels) + 1);
+
+    // Every panel torn off would leave the main window empty.
+    CHECK(layout.attachedCount() >= 1);
+    for (const ui::PanelView& panel : layout.panels) {
+        CHECK(panel.waterfallFraction <= 0.95F);
+        CHECK(panel.yMaxDb - panel.yMinDb >= ui::kMinScaleSpanDb);
+    }
+}
+
+TEST_CASE("a profile with no panels gets the default one") {
+    const ScopedProfileFile file;
+    {
+        std::ofstream out(file.path());
+        out << "[display]\ntheme = \"Dark\"\n";
+    }
+    const auto loaded = Profile::load(file.path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->view.layout.panels.size() == 1);
+    CHECK(loaded->view.layout.focusedId == loaded->view.layout.panels.front().id);
 }
 
 TEST_CASE("a missing profile is reported, not invented") {

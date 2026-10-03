@@ -243,7 +243,6 @@ std::expected<void, std::string> WaterfallRenderer::create(std::uint32_t bins,
     glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     setColorMap(builtinColorMap("spectral"));
 
-    glGenVertexArrays(1, &m_vao);
     glGenBuffers(1, &m_vbo);
 
     m_scratch.resize(bins);
@@ -394,10 +393,6 @@ void WaterfallRenderer::destroy() noexcept {
     if (m_vbo != 0) {
         glDeleteBuffers(1, &m_vbo);
         m_vbo = 0;
-    }
-    if (m_vao != 0) {
-        glDeleteVertexArrays(1, &m_vao);
-        m_vao = 0;
     }
     if (m_program != 0) {
         glDeleteProgram(m_program);
@@ -624,7 +619,13 @@ void WaterfallRenderer::draw(float x, float y, float width, float height,
         x0, y0, 0.0F, 0.0F, x1, y1, 1.0F, 1.0F, x0, y1, 0.0F, 1.0F,
     };
 
-    glBindVertexArray(m_vao);
+    // A vertex array of its own for every draw, made and deleted here, the
+    // way ImGui's own backend does it. Textures, buffers and programs are
+    // shared between GL contexts; vertex arrays are not, and a waterfall in a
+    // torn-off panel is drawn on that window's context.
+    GLuint vao = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(sizeof(vertices)), vertices.data(),
                  GL_STREAM_DRAW);
@@ -709,6 +710,7 @@ void WaterfallRenderer::draw(float x, float y, float width, float height,
     glDisableVertexAttribArray(0);
     glDisableVertexAttribArray(1);
     glBindVertexArray(0);
+    glDeleteVertexArrays(1, &vao);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
     glActiveTexture(GL_TEXTURE0);

@@ -10,6 +10,7 @@ set(SWEEPPP_GUI_SOURCES
     src/MainWindow.cpp
     src/MainWindowPlots.cpp
     src/MainWindowPanels.cpp
+    src/MainWindowViews.cpp
     src/Snapshot.cpp
     src/UpdateCheck.cpp
     src/render/HistoryView.cpp

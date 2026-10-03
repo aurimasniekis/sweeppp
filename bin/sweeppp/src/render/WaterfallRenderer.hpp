@@ -179,7 +179,6 @@ private:
     std::uint32_t m_historyTexture = 0;
     std::uint32_t m_paletteTexture = 0;
     std::uint32_t m_program = 0;
-    std::uint32_t m_vao = 0;
     std::uint32_t m_vbo = 0;
 
     int m_uniformHistory = -1;

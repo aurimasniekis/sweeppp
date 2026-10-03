@@ -502,20 +502,30 @@ public:
     /// Newest frame's metadata, for the info row and overlays.
     [[nodiscard]] SpectrumFramePtr latestFrame() const;
 
-    /// Frequency window actually being displayed, resolving "fit whole span".
-    void visibleRange(double& fromHz, double& toHz) const;
-    void setVisibleRange(double fromHz, double toHz);
-    void resetZoom();
-
-    /// Overrides what bounds the view, for callers whose data outlives what is
-    /// currently in the trace store.
+    /// What a Mirror panel's view is bounded by: what the *radio* can reach,
+    /// not what is currently being swept.
     ///
-    /// The history viewer needs this: a session is made of segments that each
-    /// cover a different range, so bounding to the loaded segment snapped the
-    /// zoom back every time the playhead crossed a boundary. Zero disables.
-    void setViewBounds(double lowHz, double highHz) noexcept {
-        m_viewBoundsLowHz = lowHz;
-        m_viewBoundsHighHz = highHz;
+    /// Bounding it to the sweep looks tidier and is a trap: selecting a band
+    /// on the plot is how a sweep range gets set, so a view locked to the plan
+    /// makes it impossible to ever select a range outside it. Past the edge of
+    /// the sweep nothing is drawn, which reads correctly as "not measured".
+    /// With no radio open, the data on screen is the only bound there is.
+    [[nodiscard]] ViewLimits viewLimits() const;
+
+    /// The window a panel with none of its own shows: the data, or before
+    /// there is any, what the radio is tuned to, or failing that the FM band.
+    [[nodiscard]] FrequencySpan fitRange() const;
+
+    /// Bumped whenever the plan's outer bounds move, which is when the panels
+    /// go back to fit.
+    ///
+    /// The view is a zoom into the swept span, so once that span moves the
+    /// old window is at best a fraction of the new one and at worst nowhere
+    /// near it -- re-planning from the FM band to 2.4 GHz would otherwise
+    /// leave the display parked over frequencies no longer being measured.
+    /// A profile being applied does not bump it: it brings its own views.
+    [[nodiscard]] std::uint64_t viewResetGeneration() const noexcept {
+        return m_viewResetGeneration;
     }
 
     /// Every message the operator is shown, from here and from the window
@@ -541,9 +551,19 @@ public:
     }
     void markSessionHandled() { m_hasUnsavedSession = false; }
 
-    /// Lines pushed to the waterfall but not yet uploaded, so the renderer can
-    /// drain them on the GL thread.
-    [[nodiscard]] std::vector<std::vector<float>> takePendingWaterfallLines();
+    /// One waterfall row: a completed pass when sweeping, a frame otherwise,
+    /// with the grid it was measured on so each panel can cut its own slice.
+    struct WaterfallLine {
+        std::vector<float> dbfs;
+        double startHz = 0.0;
+        double binWidthHz = 0.0;
+        std::uint64_t ns = 0; ///< Monotonic time it was measured.
+    };
+
+    /// Lines not yet handed to the panels, so the renderers can take them on
+    /// the GL thread. Taken once per frame and fanned out; each panel decides
+    /// for itself whether it is paused.
+    [[nodiscard]] std::vector<WaterfallLine> takePendingWaterfallLines();
 
 private:
     void applyThemeToImGui();
@@ -596,15 +616,6 @@ private:
     /// raise it again.
     std::vector<std::pair<double, double>> m_reportedUnroutedHz;
 
-    /// Split between the panes, owned here rather than by the window so it can
-    /// travel in a profile.
-    float m_waterfallFraction = 0.45F;
-
-public:
-    [[nodiscard]] float waterfallFraction() const noexcept { return m_waterfallFraction; }
-    void setWaterfallFraction(float value) noexcept { m_waterfallFraction = value; }
-
-private:
     SweepRangeHistory m_rangeHistory;
 
     /// Set while replaying history, so stepping back does not itself get
@@ -641,8 +652,14 @@ private:
     Theme m_theme;
     std::vector<Theme> m_themes;
 
-    double m_viewBoundsLowHz = 0.0;
-    double m_viewBoundsHighHz = 0.0;
+    /// The outer bounds of the plan last applied, which a view reset is
+    /// judged against. Not `m_sweepPlan`'s own: adopting a radio writes its
+    /// full range there directly, moments before the saved plan is applied
+    /// again, and comparing with that would throw away the saved views.
+    double m_viewResetLowHz = 0.0;
+    double m_viewResetHighHz = 0.0;
+    std::uint64_t m_viewResetGeneration = 0;
+    bool m_applyingProfile = false;
 
     std::vector<SdrDeviceInfo> m_devices;
     ToastCenter m_toasts;
@@ -769,7 +786,7 @@ private:
     mutable std::mutex m_frameMutex;
     SpectrumFramePtr m_pendingFrame;
     SpectrumFramePtr m_latestFrame;
-    std::vector<std::vector<float>> m_pendingWaterfallLines;
+    std::vector<WaterfallLine> m_pendingWaterfallLines;
 
     std::uint64_t m_lastTelemetrySampleNs = 0;
 };

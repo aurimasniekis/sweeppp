@@ -75,13 +75,14 @@ struct ContributionOverflowList {
 };
 
 /// What the operator is doing with the flags, carried across frames.
+///
+/// Shared by every plot that draws flags: a selection is of a contribution,
+/// not of a panel, and there is one "…" list on screen at a time. Whether a
+/// flag took this frame's click is per plot, and is what `drawContributions`
+/// returns.
 struct ContributionInteraction {
     ContributionSelection picked;
     ContributionOverflowList overflow;
-
-    /// True when a flag took this frame's click. The caller owes this to its
-    /// own click handling: picking a channel must not also drop a marker on it.
-    bool claimedClick = false;
 };
 
 /// How the host paints what contributors hand it, and whether the flags are
@@ -141,9 +142,19 @@ struct ContributionStyle {
 /// `state` is read and written: clicking a flag selects it, clicking it again
 /// or clicking away clears it, and hovering a "…" fills the overflow list for
 /// `drawContributionOverflow` to draw once the plot is closed.
-void drawContributions(ImDrawList* draw, const SpectrumLayout& layout,
-                       std::span<const Contribution> ranked, const ContributionStyle& style,
-                       ContributionInteraction& state);
+///
+/// Returns whether a flag took this frame's click. The caller owes this to its
+/// own click handling: picking a channel must not also drop a marker on it.
+[[nodiscard]] bool drawContributions(ImDrawList* draw, const SpectrumLayout& layout,
+                                     std::span<const Contribution> ranked,
+                                     const ContributionStyle& style,
+                                     ContributionInteraction& state);
+
+/// Clears what only holds for one frame, before any plot draws its flags.
+///
+/// Here rather than inside `drawContributions`, which several plots call a
+/// frame: the second would otherwise wipe the hover the first had found.
+void beginContributionFrame(ContributionInteraction& state);
 
 /// The "…" panel, if one is open. Call outside every plot and popup, beside
 /// the application's own floating windows.

@@ -8,6 +8,7 @@
 #include <sweeppp/core/Clock.hpp>
 #include <sweeppp/ui/Marker.hpp>
 #include <sweeppp/ui/MarkerPreset.hpp>
+#include <sweeppp/ui/TraceStore.hpp>
 
 using namespace sweeppp::ui;
 
@@ -149,6 +150,34 @@ private:
 }
 
 } // namespace
+
+TEST_CASE("a marker's level is re-read, and a locked one walks onto the nearby peak") {
+    sweeppp::SpectrumFrame frame;
+    frame.startHz = 100e6;
+    frame.binWidthHz = 1e3;
+    frame.binsDbfs.assign(1000, -90.0F);
+    frame.binsDbfs[500] = -30.0F; // 100.5005 MHz
+    frame.binsDbfs[900] = -10.0F; // further away, and louder
+
+    TraceStore traces;
+    traces.update(frame);
+
+    Marker plain{.id = 1, .frequencyHz = 100.4905e6};
+    refreshMarkerLevel(plain, traces, 20e3);
+    CHECK(plain.frequencyHz == doctest::Approx(100.4905e6));
+    CHECK(plain.levelDb == doctest::Approx(-90.0F));
+
+    // Within reach of the near peak but not the louder far one: a locked
+    // marker searching the whole view would end up on that instead.
+    Marker locked{.id = 2, .frequencyHz = 100.4905e6, .peakLocked = true};
+    refreshMarkerLevel(locked, traces, 20e3);
+    CHECK(locked.frequencyHz == doctest::Approx(100.5005e6));
+    CHECK(locked.levelDb == doctest::Approx(-30.0F));
+
+    // Run again, it stays: the peak is where it already is.
+    refreshMarkerLevel(locked, traces, 20e3);
+    CHECK(locked.frequencyHz == doctest::Approx(100.5005e6));
+}
 
 TEST_CASE("a missing marker preset file is a first run, not a failure") {
     const ScopedPresetFile file;

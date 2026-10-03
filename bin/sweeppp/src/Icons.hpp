@@ -48,6 +48,16 @@ inline constexpr const char* kAdd = "\xF3\xB0\x90\x95";         // plus         
 inline constexpr const char* kEdit = "\xF3\xB0\x8F\xAB";        // pencil       F03EB
 inline constexpr const char* kStar = "\xF3\xB0\x93\x8E";        // star         F04CE
 inline constexpr const char* kStarOff = "\xF3\xB0\x93\x92";     // star-outline F04D2
+inline constexpr const char* kDetach = "\xF3\xB0\x8F\x8C";      // open-in-new  F03CC
+
+// One per panel arrangement.
+inline constexpr const char* kLayoutSingle = "\xF3\xB0\xB9\x9F";  // rectangle-outline     F0E5F
+inline constexpr const char* kLayoutColumns = "\xF3\xB0\xAF\x8C"; // view-split-vertical   F0BCC
+inline constexpr const char* kLayoutRows = "\xF3\xB0\xAF\x8B";    // view-split-horizontal F0BCB
+inline constexpr const char* kLayoutThree = "\xF3\xB1\x92\x8E";   // view-quilt-outline    F148E
+inline constexpr const char* kLayoutGrid = "\xF3\xB1\x87\x99";    // view-grid-outline     F11D9
+inline constexpr const char* kLayoutSix = "\xF3\xB1\x92\x8C";     // view-module-outline   F148C
+inline constexpr const char* kLayoutNine = "\xF3\xB0\x8B\x81";    // grid                  F02C1
 
 // One per toast severity.
 inline constexpr const char* kInfo = "\xF3\xB0\x8B\xBC";    // information  F02FC

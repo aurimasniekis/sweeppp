@@ -251,6 +251,11 @@ std::expected<void, std::string> AppWindow::create(const Options& options) {
 
     // 4.1 core is the ceiling on macOS and the floor everywhere else, so it is
     // the one profile that runs unmodified on all three platforms.
+    //
+    // These hints are also what every torn-off panel's window is created with:
+    // the backend makes those later, sharing this context, with whatever hints
+    // are current. glfwDefaultWindowHints() must never be called after this,
+    // or they come up as legacy 2.1 contexts the shaders cannot compile on.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -319,6 +324,11 @@ std::expected<void, std::string> AppWindow::create(const Options& options) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    // A panel can be torn off into a window of its own, onto another monitor.
+    // The windows that makes are tool windows, not applications, so they stay
+    // off the taskbar.
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    io.ConfigViewportsNoTaskBarIcon = true;
     io.IniFilename = nullptr; // layout persistence is owned by the profile system
 
     // Content scale, not framebuffer size: GLFW_SCALE_TO_MONITOR means the
@@ -422,6 +432,18 @@ void AppWindow::endFrame() {
     if (m_frameCapture) {
         const std::function<void()> capture = std::exchange(m_frameCapture, nullptr);
         capture();
+    }
+
+    // The torn-off panels' windows, each drawn with its own context. Those
+    // share textures with this one, but a texture uploaded here is only
+    // guaranteed visible to them once this context's commands have been
+    // flushed -- without it a floating waterfall can draw last frame's rows,
+    // or none, on macOS and Mesa.
+    if ((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0) {
+        glFlush();
+        ImGui::UpdatePlatformWindows();
+        ImGui::RenderPlatformWindowsDefault();
+        glfwMakeContextCurrent(m_window);
     }
 
     glfwSwapBuffers(m_window);

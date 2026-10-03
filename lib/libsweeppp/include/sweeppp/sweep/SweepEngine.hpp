@@ -118,7 +118,9 @@ public:
                 m_shortFrames.load(std::memory_order_relaxed)};
     }
 
-    /// Fraction of the grid the most recent pass actually measured, in [0, 1].
+    /// Fraction of the plan's covered bins the most recent pass actually
+    /// measured, in [0, 1]. The gaps between segments are not counted: nothing
+    /// is meant to write them.
     ///
     /// Distinct from what the display shows: bins keep their last measurement
     /// until something replaces it, so a grid can look complete while each
@@ -195,6 +197,8 @@ private:
     mutable std::mutex m_gridMutex;
     std::vector<float> m_grid;
     std::vector<std::uint8_t> m_gridWritten;
+    /// `m_schedule.coveredBinCount()`, taken once in configure.
+    std::size_t m_coveredBinCount = 0;
 
     /// How good the measurement currently held in each bin is -- how deep
     /// inside its step's usable band it was taken. Compared against, never

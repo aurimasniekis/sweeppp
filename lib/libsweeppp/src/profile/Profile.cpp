@@ -7,6 +7,7 @@
 #include "sweeppp/core/Toml.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace sweeppp {
@@ -48,6 +49,181 @@ std::optional<SdrValue> readValue(const ::toml::node& node) {
     return std::nullopt;
 }
 
+std::string_view panelModeName(ui::PanelMode mode) {
+    return mode == ui::PanelMode::Spans ? "spans" : "mirror";
+}
+
+std::string_view arrangementName(ui::PanelArrangement arrangement) {
+    switch (arrangement) {
+    case ui::PanelArrangement::Single:
+        return "single";
+    case ui::PanelArrangement::Columns:
+        return "columns";
+    case ui::PanelArrangement::Rows:
+        return "rows";
+    case ui::PanelArrangement::Three:
+        return "three";
+    case ui::PanelArrangement::Grid:
+        return "grid";
+    case ui::PanelArrangement::Six:
+        return "six";
+    case ui::PanelArrangement::Nine:
+        return "nine";
+    }
+    return "single";
+}
+
+void writeLayout(::toml::table& display, const ui::PanelLayout& layout) {
+    display.insert_or_assign("panel_mode", std::string(panelModeName(layout.mode)));
+    display.insert_or_assign("panel_layout", std::string(arrangementName(ui::arrangementFor(
+                                                 layout.attachedCount(), layout.rowsForTwo))));
+    display.insert_or_assign("panel_split_x", static_cast<double>(layout.splits.x));
+    display.insert_or_assign("panel_split_y", static_cast<double>(layout.splits.y));
+    // Four keys rather than two arrays. toml++ sizes an inline array by casting
+    // log10 of each float to an unsigned integer, which is undefined for any
+    // value under 0.1 -- and these are fractions.
+    display.insert_or_assign("panel_third_x1", static_cast<double>(layout.splits.thirdsX[0]));
+    display.insert_or_assign("panel_third_x2", static_cast<double>(layout.splits.thirdsX[1]));
+    display.insert_or_assign("panel_third_y1", static_cast<double>(layout.splits.thirdsY[0]));
+    display.insert_or_assign("panel_third_y2", static_cast<double>(layout.splits.thirdsY[1]));
+    display.insert_or_assign("overview", layout.overview);
+
+    // Mirror panels side by side at different zooms are the point of that
+    // layout, so their windows are kept. A single panel's is not, for the same
+    // reason it never was: it is where the operator happened to be looking.
+    const bool keepViews = layout.mode == ui::PanelMode::Mirror && layout.panels.size() > 1;
+    const bool keepSegments = layout.mode == ui::PanelMode::Spans;
+
+    ::toml::array panels;
+    for (const ui::PanelView& panel : layout.panels) {
+        ::toml::table entry;
+        entry.insert_or_assign("id", static_cast<std::int64_t>(panel.id));
+        entry.insert_or_assign("y_min", static_cast<double>(panel.yMinDb));
+        entry.insert_or_assign("y_max", static_cast<double>(panel.yMaxDb));
+        entry.insert_or_assign("gradient_min", static_cast<double>(panel.gradientMinDb));
+        entry.insert_or_assign("gradient_max", static_cast<double>(panel.gradientMaxDb));
+        entry.insert_or_assign("waterfall_fraction", static_cast<double>(panel.waterfallFraction));
+        entry.insert_or_assign("detached", panel.detached);
+        if (keepViews && panel.viewStopHz > panel.viewStartHz) {
+            entry.insert_or_assign("view_start", panel.viewStartHz);
+            entry.insert_or_assign("view_stop", panel.viewStopHz);
+        }
+        if (keepSegments && panel.segment.valid()) {
+            entry.insert_or_assign("segment_start", panel.segment.startHz);
+            entry.insert_or_assign("segment_stop", panel.segment.stopHz);
+        }
+        panels.push_back(std::move(entry));
+    }
+    display.insert_or_assign("panels", std::move(panels));
+}
+
+/// Levels are clamped on the way in. A file edited by hand, or written by a
+/// build with different bounds, must not be able to put a panel somewhere the
+/// controls cannot bring it back from.
+void clampLevels(ui::PanelView& panel) {
+    panel.yMaxDb =
+        std::clamp(panel.yMaxDb, ui::kScaleFloorDbfs + ui::kMinScaleSpanDb, ui::kScaleCeilingDbfs);
+    panel.yMinDb =
+        std::clamp(panel.yMinDb, ui::kScaleFloorDbfs, panel.yMaxDb - ui::kMinScaleSpanDb);
+    panel.gradientMaxDb =
+        std::clamp(panel.gradientMaxDb, ui::kScaleFloorDbfs + 1.0F, ui::kScaleCeilingDbfs);
+    panel.gradientMinDb =
+        std::clamp(panel.gradientMinDb, ui::kScaleFloorDbfs, panel.gradientMaxDb - 1.0F);
+    panel.waterfallFraction = std::clamp(panel.waterfallFraction, 0.05F, 0.95F);
+}
+
+ui::PanelLayout readLayout(const ::toml::table& table) {
+    ui::PanelLayout layout;
+    const ui::PanelView defaults;
+
+    layout.mode = toml_util::getString(table, "display.panel_mode", "mirror") == "spans"
+                      ? ui::PanelMode::Spans
+                      : ui::PanelMode::Mirror;
+    layout.rowsForTwo = toml_util::getString(table, "display.panel_layout", "") == "rows";
+    const ui::PanelSplits splitDefaults;
+    ui::PanelSplits splits;
+    splits.x = toml_util::getFloat(table, "display.panel_split_x", splitDefaults.x);
+    splits.y = toml_util::getFloat(table, "display.panel_split_y", splitDefaults.y);
+    splits.thirdsX = {
+        toml_util::getFloat(table, "display.panel_third_x1", splitDefaults.thirdsX[0]),
+        toml_util::getFloat(table, "display.panel_third_x2", splitDefaults.thirdsX[1])};
+    splits.thirdsY = {
+        toml_util::getFloat(table, "display.panel_third_y1", splitDefaults.thirdsY[0]),
+        toml_util::getFloat(table, "display.panel_third_y2", splitDefaults.thirdsY[1])};
+    layout.splits = ui::clampSplits(splits);
+    layout.overview = toml_util::getBool(table, "display.overview", true);
+
+    std::vector<ui::PanelView> panels;
+    if (const ::toml::array* entries = toml_util::at(table, "display.panels").as_array()) {
+        for (const ::toml::node& node : *entries) {
+            const ::toml::table* entry = node.as_table();
+            if (entry == nullptr) {
+                continue;
+            }
+            ui::PanelView panel;
+            panel.id = static_cast<int>((*entry)["id"].value_or(std::int64_t{0}));
+            panel.yMinDb = static_cast<float>(
+                (*entry)["y_min"].value_or(static_cast<double>(defaults.yMinDb)));
+            panel.yMaxDb = static_cast<float>(
+                (*entry)["y_max"].value_or(static_cast<double>(defaults.yMaxDb)));
+            panel.gradientMinDb = static_cast<float>(
+                (*entry)["gradient_min"].value_or(static_cast<double>(defaults.gradientMinDb)));
+            panel.gradientMaxDb = static_cast<float>(
+                (*entry)["gradient_max"].value_or(static_cast<double>(defaults.gradientMaxDb)));
+            panel.waterfallFraction = static_cast<float>((*entry)["waterfall_fraction"].value_or(
+                static_cast<double>(defaults.waterfallFraction)));
+            panel.detached = (*entry)["detached"].value_or(false);
+            panel.viewStartHz = (*entry)["view_start"].value_or(0.0);
+            panel.viewStopHz = (*entry)["view_stop"].value_or(0.0);
+            panel.segment.startHz = (*entry)["segment_start"].value_or(0.0);
+            panel.segment.stopHz = (*entry)["segment_stop"].value_or(0.0);
+            panels.push_back(panel);
+        }
+    }
+
+    // Repaired the way markers are: an id that is zero or already used would
+    // be a panel the window cannot tell apart from its twin.
+    std::vector<int> seen;
+    std::erase_if(panels, [&seen](const ui::PanelView& panel) {
+        if (panel.id <= 0 || std::ranges::find(seen, panel.id) != seen.end()) {
+            return true;
+        }
+        seen.push_back(panel.id);
+        return false;
+    });
+    if (panels.size() > ui::kMaxPanels) {
+        panels.resize(ui::kMaxPanels);
+    }
+
+    const bool keepViews = layout.mode == ui::PanelMode::Mirror && panels.size() > 1;
+    for (ui::PanelView& panel : panels) {
+        clampLevels(panel);
+        const bool usable = std::isfinite(panel.viewStartHz) && std::isfinite(panel.viewStopHz) &&
+                            panel.viewStartHz >= 0.0 && panel.viewStopHz > panel.viewStartHz;
+        if (!keepViews || !usable) {
+            panel.viewStartHz = 0.0;
+            panel.viewStopHz = 0.0;
+        }
+        if (layout.mode != ui::PanelMode::Spans || !std::isfinite(panel.segment.startHz) ||
+            !std::isfinite(panel.segment.stopHz) || !panel.segment.valid()) {
+            panel.segment = {};
+        }
+    }
+
+    if (panels.empty()) {
+        return layout;
+    }
+    // Every panel torn off would leave the main window with nothing in it.
+    if (std::ranges::none_of(panels, [](const ui::PanelView& panel) { return !panel.detached; })) {
+        panels.front().detached = false;
+    }
+
+    layout.panels = std::move(panels);
+    layout.focusedId = layout.panels.front().id;
+    layout.resetNextId();
+    return layout;
+}
+
 /// The profile as one table.
 ///
 /// Shared by `save()` and `entries()` so the two cannot disagree about a key's
@@ -59,7 +235,6 @@ std::optional<SdrValue> readValue(const ::toml::node& node) {
     ::toml::table& profile = toml_util::ensureTable(root, "profile");
     profile.insert_or_assign("name", self.name);
     profile.insert_or_assign("sweeping", self.sweeping);
-    profile.insert_or_assign("waterfall_fraction", static_cast<double>(self.waterfallFraction));
 
     ::toml::table& device = toml_util::ensureTable(root, "device");
     device.insert_or_assign("driver", self.deviceDriver);
@@ -92,10 +267,6 @@ std::optional<SdrValue> readValue(const ::toml::node& node) {
 
     ::toml::table& display = toml_util::ensureTable(root, "display");
     display.insert_or_assign("theme", self.view.themeName);
-    display.insert_or_assign("y_min", static_cast<double>(self.view.yMinDb));
-    display.insert_or_assign("y_max", static_cast<double>(self.view.yMaxDb));
-    display.insert_or_assign("gradient_min", static_cast<double>(self.view.gradientMinDb));
-    display.insert_or_assign("gradient_max", static_cast<double>(self.view.gradientMaxDb));
     display.insert_or_assign("auto_points", self.view.autoPoints);
     display.insert_or_assign("display_points", static_cast<std::int64_t>(self.view.displayPoints));
     display.insert_or_assign("smoothing", static_cast<double>(self.view.smoothing));
@@ -134,11 +305,13 @@ std::optional<SdrValue> readValue(const ::toml::node& node) {
         display.insert_or_assign("markers", std::move(markers));
     }
 
+    writeLayout(display, self.view.layout);
+
     // The measured level is deliberately absent: it is re-read from the live
     // trace every frame, so a saved one would be a reading from a session that
     // has ended.
 
-    // Deliberately not saved: the visible frequency window, whether the
+    // Deliberately not saved: a lone panel's visible window, whether a
     // waterfall was paused, and which marker was selected. All three are where
     // the operator happened to be looking when they quit, not how they want the
     // instrument set up -- and restoring a paused waterfall would look like the
@@ -207,7 +380,6 @@ Result<Profile> Profile::load(const std::filesystem::path& path) {
     Profile profile;
     profile.name = toml_util::getString(*table, "profile.name", path.stem().string());
     profile.sweeping = toml_util::getBool(*table, "profile.sweeping", true);
-    profile.waterfallFraction = toml_util::getFloat(*table, "profile.waterfall_fraction", 0.45F);
 
     profile.deviceDriver = toml_util::getString(*table, "device.driver", "");
     profile.deviceId = toml_util::getString(*table, "device.id", "");
@@ -262,12 +434,6 @@ Result<Profile> Profile::load(const std::filesystem::path& path) {
 
     const ui::ViewSettings viewDefaults;
     profile.view.themeName = toml_util::getString(*table, "display.theme", viewDefaults.themeName);
-    profile.view.yMinDb = toml_util::getFloat(*table, "display.y_min", viewDefaults.yMinDb);
-    profile.view.yMaxDb = toml_util::getFloat(*table, "display.y_max", viewDefaults.yMaxDb);
-    profile.view.gradientMinDb =
-        toml_util::getFloat(*table, "display.gradient_min", viewDefaults.gradientMinDb);
-    profile.view.gradientMaxDb =
-        toml_util::getFloat(*table, "display.gradient_max", viewDefaults.gradientMaxDb);
     profile.view.autoPoints =
         toml_util::getBool(*table, "display.auto_points", viewDefaults.autoPoints);
     profile.view.displayPoints = static_cast<int>(
@@ -320,18 +486,7 @@ Result<Profile> Profile::load(const std::filesystem::path& path) {
         }
     }
 
-    // Levels are clamped on the way in. A file edited by hand, or written by a
-    // build with different bounds, must not be able to put the display
-    // somewhere the controls cannot bring it back from.
-    profile.view.yMaxDb = std::clamp(profile.view.yMaxDb, ui::kScaleFloorDbfs + ui::kMinScaleSpanDb,
-                                     ui::kScaleCeilingDbfs);
-    profile.view.yMinDb = std::clamp(profile.view.yMinDb, ui::kScaleFloorDbfs,
-                                     profile.view.yMaxDb - ui::kMinScaleSpanDb);
-    profile.view.gradientMaxDb =
-        std::clamp(profile.view.gradientMaxDb, ui::kScaleFloorDbfs + 1.0F, ui::kScaleCeilingDbfs);
-    profile.view.gradientMinDb = std::clamp(profile.view.gradientMinDb, ui::kScaleFloorDbfs,
-                                            profile.view.gradientMaxDb - 1.0F);
-    profile.waterfallFraction = std::clamp(profile.waterfallFraction, 0.05F, 0.95F);
+    profile.view.layout = readLayout(*table);
     profile.view.markerReadout = std::clamp(profile.view.markerReadout, 0, 8);
 
     // Markers are repaired rather than rejected, for the same reason the levels

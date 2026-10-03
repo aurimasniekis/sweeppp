@@ -376,7 +376,6 @@ Profile AppState::currentProfile(const std::string& name, PluginState plugins) c
     profile.pipeline = m_pipelineConfig;
     profile.corrections = m_correctionSettings;
     profile.view = m_view;
-    profile.waterfallFraction = m_waterfallFraction;
 
     if (m_device) {
         profile.deviceDriver = m_device->info().driver;
@@ -414,7 +413,7 @@ Status AppState::applyProfile(const Profile& profile, DeviceHandling devices) {
     // Display first, and unconditionally: it depends on nothing else, so an
     // absent radio must not cost the operator their colours and levels too.
     m_view = profile.view;
-    m_waterfallFraction = profile.waterfallFraction;
+    m_applyingProfile = true;
     setTheme(m_view.themeName);
 
     m_pipelineConfig = profile.pipeline;
@@ -456,6 +455,7 @@ Status AppState::applyProfile(const Profile& profile, DeviceHandling devices) {
     if (auto applied = applySweepPlan(profile.sweepPlan); !applied && trouble.empty()) {
         trouble = applied.error().message();
     }
+    m_applyingProfile = false;
 
     // Plugins last, once everything they might read is in place, and
     // unconditionally: a plugin's part of a profile is no less restored
@@ -801,23 +801,18 @@ Status AppState::applySweepPlan(const SweepPlan& plan) {
     // here. Acting on those would stop a running sweep on the way to a
     // perfectly good range, which is a much worse outcome than a moment of
     // the display not matching the fields.
-    const double previousLowHz = m_sweepPlan.lowestHz();
-    const double previousHighHz = m_sweepPlan.highestHz();
     const std::vector<SweepSegment> previousSegments = m_sweepPlan.segments;
 
     m_sweepPlan = plan;
 
-    // Moving the sweep resets the view onto it.
-    //
-    // The view is a zoom into the swept span, so once that span moves the old
-    // window is at best a fraction of the new one and at worst nowhere near
-    // it -- re-planning from the FM band to 2.4 GHz would otherwise leave the
-    // display parked over frequencies that are no longer being measured, which
-    // reads as the radio having stopped working. Zero means "fit whatever is
-    // there", so this follows the data rather than guessing a window.
-    if (std::abs(plan.lowestHz() - previousLowHz) > 1.0 ||
-        std::abs(plan.highestHz() - previousHighHz) > 1.0) {
-        resetZoom();
+    // Moving the sweep resets the views onto it; see viewResetGeneration.
+    if (std::abs(plan.lowestHz() - m_viewResetLowHz) > 1.0 ||
+        std::abs(plan.highestHz() - m_viewResetHighHz) > 1.0) {
+        m_viewResetLowHz = plan.lowestHz();
+        m_viewResetHighHz = plan.highestHz();
+        if (!m_applyingProfile) {
+            ++m_viewResetGeneration;
+        }
     }
 
     // Only ranges that are actually usable become places to come back to. A
@@ -1402,12 +1397,16 @@ void AppState::pumpFrames() {
         // the truth about how often that spectrum was actually measured.
         const bool advanceWaterfall = !m_sweeping || frame->passComplete;
 
-        if (!m_view.waterfallPaused && advanceWaterfall) {
+        if (advanceWaterfall) {
             const std::lock_guard lock(m_frameMutex);
             // Bounded: if the UI stalls, old lines are dropped rather than
             // queued without limit.
             if (m_pendingWaterfallLines.size() < 64) {
-                m_pendingWaterfallLines.push_back(frame->binsDbfs);
+                m_pendingWaterfallLines.push_back(WaterfallLine{
+                    .dbfs = frame->binsDbfs,
+                    .startHz = frame->startHz,
+                    .binWidthHz = frame->binWidthHz,
+                    .ns = frame->hostTimeNs != 0 ? frame->hostTimeNs : monotonicNs()});
             }
         }
     }
@@ -1921,7 +1920,7 @@ void AppState::clearCorrections() {
     beginAutoSpurs();
 }
 
-std::vector<std::vector<float>> AppState::takePendingWaterfallLines() {
+std::vector<AppState::WaterfallLine> AppState::takePendingWaterfallLines() {
     const std::lock_guard lock(m_frameMutex);
     return std::exchange(m_pendingWaterfallLines, {});
 }
@@ -1931,17 +1930,9 @@ SpectrumFramePtr AppState::latestFrame() const {
     return m_latestFrame;
 }
 
-void AppState::visibleRange(double& fromHz, double& toHz) const {
-    if (m_view.viewStopHz > m_view.viewStartHz) {
-        fromHz = m_view.viewStartHz;
-        toHz = m_view.viewStopHz;
-        return;
-    }
-
+FrequencySpan AppState::fitRange() const {
     if (m_traces.binCount() > 0) {
-        fromHz = m_traces.startHz();
-        toHz = m_traces.stopHz();
-        return;
+        return {m_traces.startHz(), m_traces.stopHz()};
     }
 
     // No data yet. Prefer what the open device is tuned to, so the axis is
@@ -1952,81 +1943,24 @@ void AppState::visibleRange(double& fromHz, double& toHz) const {
         const double sampleRate =
             asDouble(m_device->getParameter("sample_rate").value_or(SdrValue{20e6}));
         if (sampleRate > 0.0) {
-            fromHz = centerHz - sampleRate * 0.5;
-            toHz = centerHz + sampleRate * 0.5;
-            return;
+            return {centerHz - sampleRate * 0.5, centerHz + sampleRate * 0.5};
         }
     }
 
     // Nothing open at all. FM broadcast: present everywhere, and a range whose
     // axis labels read sensibly -- unlike a 0..1 Hz placeholder, which renders
     // as "0 .. 1e-06 MHz" and looks like a fault.
-    fromHz = 88e6;
-    toHz = 108e6;
+    return {88e6, 108e6};
 }
 
-void AppState::setVisibleRange(double fromHz, double toHz) {
-    if (toHz <= fromHz) {
-        return;
+ViewLimits AppState::viewLimits() const {
+    if (m_device) {
+        return {std::max(0.0, m_device->info().minFrequencyHz), m_device->info().maxFrequencyHz};
     }
-
-    // The view is bounded by what the *radio* can reach, not by what is
-    // currently being swept.
-    //
-    // Bounding it to the sweep looks tidier and is a trap: selecting a band on
-    // the plot is how a sweep range gets set, so a view locked to the current
-    // plan makes it impossible to ever select a range outside it. An operator
-    // sweeping 2.4 GHz could never drag their way to 433 MHz -- they would have
-    // to find the range editor and type it, which is exactly what the gesture
-    // exists to avoid.
-    //
-    // Past the edge of the sweep there is simply nothing drawn, which reads
-    // correctly as "not measured" because unmeasured bins are already
-    // distinguishable from quiet ones.
-    //
-    // The width is preserved while sliding back inside, so hitting the end
-    // while panning stops the view rather than shrinking it.
-    double limitLowHz = 0.0;
-    double limitHighHz = 0.0;
-
-    if (m_viewBoundsHighHz > m_viewBoundsLowHz) {
-        limitLowHz = m_viewBoundsLowHz;
-        limitHighHz = m_viewBoundsHighHz;
-    } else if (m_device) {
-        limitLowHz = std::max(0.0, m_device->info().minFrequencyHz);
-        limitHighHz = m_device->info().maxFrequencyHz;
-    } else if (m_traces.binCount() > 0) {
-        // No radio open: the only thing that bounds the view is the data that
-        // happens to be on screen.
-        limitLowHz = std::max(0.0, m_traces.startHz());
-        limitHighHz = m_traces.stopHz();
+    if (m_traces.binCount() > 0) {
+        return {std::max(0.0, m_traces.startHz()), m_traces.stopHz()};
     }
-
-    if (limitHighHz > limitLowHz) {
-        const double width = std::min(toHz - fromHz, limitHighHz - limitLowHz);
-        if (fromHz < limitLowHz) {
-            fromHz = limitLowHz;
-            toHz = fromHz + width;
-        }
-        if (toHz > limitHighHz) {
-            toHz = limitHighHz;
-            fromHz = toHz - width;
-        }
-    } else {
-        // No data yet: the only rule that always holds.
-        fromHz = std::max(fromHz, 0.0);
-        if (toHz <= fromHz) {
-            return;
-        }
-    }
-
-    m_view.viewStartHz = fromHz;
-    m_view.viewStopHz = toHz;
-}
-
-void AppState::resetZoom() {
-    m_view.viewStartHz = 0.0;
-    m_view.viewStopHz = 0.0;
+    return {};
 }
 
 void AppState::setTheme(const std::string& name) {
