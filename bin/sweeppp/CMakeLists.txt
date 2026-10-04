@@ -159,8 +159,10 @@ endif()
 # carries text only. Each platform's toolkit is already linked for the file
 # dialog, so this adds a source and a framework rather than a dependency.
 if(APPLE)
-    target_sources(sweeppp-gui PRIVATE src/SnapshotPasteboard.m src/MacOpenDocument.m)
-    target_link_libraries(sweeppp-gui PRIVATE "-framework AppKit")
+    target_sources(sweeppp-gui PRIVATE src/SnapshotPasteboard.m src/MacOpenDocument.m
+        src/FileDialogSheet.m)
+    target_link_libraries(sweeppp-gui PRIVATE "-framework AppKit"
+        "-framework UniformTypeIdentifiers")
 elseif(UNIX)
     # The same GTK nativefiledialog-extended's default backend already needs;
     # named here rather than inherited through it, because a build that

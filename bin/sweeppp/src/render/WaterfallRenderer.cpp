@@ -446,14 +446,118 @@ void WaterfallRenderer::setSpan(double startHz, double stopHz) {
         return;
     }
 
-    // A real move. Rows already stored were written against the previous
-    // mapping, and there is no honest way to reinterpret them under a new one.
-    if (m_spanStopHz > m_spanStartHz) {
-        clear();
+    // A real move. Where the old and new spans overlap, the stored rows are
+    // still the same measurement at the same frequencies, so they are laid
+    // onto the new mapping -- a panel narrowed onto one segment keeps that
+    // segment's past. Outside the overlap there is nothing, and with no
+    // overlap at all the history is cleared.
+    WaterfallHistory before;
+    if (m_spanStopHz > m_spanStartHz && m_linesPushed > 0) {
+        before = history();
     }
-
     m_spanStartHz = startHz;
     m_spanStopHz = stopHz;
+    seed(before);
+}
+
+WaterfallHistory WaterfallRenderer::history() const {
+    WaterfallHistory out{.bins = m_bins,
+                         .rows = {},
+                         .times = {},
+                         .startHz = m_spanStartHz,
+                         .stopHz = m_spanStopHz,
+                         .minDb = m_minDb,
+                         .maxDb = m_maxDb};
+    if (m_historyTexture == 0 || m_bins == 0 || m_lines == 0 || m_linesPushed == 0) {
+        return out;
+    }
+
+    std::vector<std::uint8_t> ring(static_cast<std::size_t>(m_bins) * m_lines);
+    glBindTexture(GL_TEXTURE_2D, m_historyTexture);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, ring.data());
+
+    const auto keep = static_cast<std::uint32_t>(std::min<std::uint64_t>(m_linesPushed, m_lines));
+    const bool haveTimes = m_lineTimes.size() == m_lines;
+    out.rows.resize(static_cast<std::size_t>(m_bins) * keep);
+    out.times.assign(keep, 0);
+    for (std::uint32_t i = 0; i < keep; ++i) {
+        const std::uint32_t source = (m_writeRow + m_lines - keep + i) % m_lines;
+        std::copy_n(ring.data() + static_cast<std::size_t>(source) * m_bins, m_bins,
+                    out.rows.data() + static_cast<std::size_t>(i) * m_bins);
+        if (haveTimes) {
+            out.times[i] = m_lineTimes[source];
+        }
+    }
+    return out;
+}
+
+void WaterfallRenderer::seed(const WaterfallHistory& from) {
+    if (m_historyTexture == 0 || m_bins == 0 || m_lines == 0) {
+        return;
+    }
+    const double width = m_spanStopHz - m_spanStartHz;
+    const double sourceWidth = from.stopHz - from.startHz;
+    if (from.empty() || width <= 0.0 || sourceWidth <= 0.0 || from.startHz >= m_spanStopHz ||
+        from.stopHz <= m_spanStartHz) {
+        clear();
+        return;
+    }
+
+    // The source columns under each of these, by frequency.
+    const double sourceBin = sourceWidth / static_cast<double>(from.bins);
+    const double bin = width / static_cast<double>(m_bins);
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> columns(m_bins, {0, 0});
+    for (std::uint32_t j = 0; j < m_bins; ++j) {
+        const double lo = (m_spanStartHz + (bin * j) - from.startHz) / sourceBin;
+        const double hi = lo + (bin / sourceBin);
+        if (hi <= 0.0 || lo >= static_cast<double>(from.bins)) {
+            continue;
+        }
+        const auto first = static_cast<std::uint32_t>(std::max(lo, 0.0));
+        auto last =
+            static_cast<std::uint32_t>(std::ceil(std::min(hi, static_cast<double>(from.bins))));
+        last = std::clamp(last, first + 1, from.bins);
+        columns[j] = {first, last};
+    }
+
+    // Each source byte as a level, then as a byte under this gradient. Byte 0,
+    // the unmeasured sentinel, stays 0.
+    std::array<std::uint8_t, 256> requantise{};
+    const float step = (from.maxDb - from.minDb) / 254.0F;
+    for (int b = 1; b < 256; ++b) {
+        requantise[static_cast<std::size_t>(b)] =
+            quantiseLevel(from.minDb + (static_cast<float>(b - 1) * step));
+    }
+
+    const std::uint32_t keep = std::min(from.count(), m_lines);
+    const std::uint32_t skip = from.count() - keep;
+    std::vector<std::uint8_t> rows(static_cast<std::size_t>(m_bins) * m_lines, 0);
+    std::vector<std::uint64_t> times(m_lines, 0);
+    for (std::uint32_t i = 0; i < keep; ++i) {
+        const std::uint8_t* in = from.rows.data() + static_cast<std::size_t>(skip + i) * from.bins;
+        std::uint8_t* out = rows.data() + static_cast<std::size_t>(i) * m_bins;
+        for (std::uint32_t j = 0; j < m_bins; ++j) {
+            const auto [first, last] = columns[j];
+            std::uint8_t peak = 0;
+            for (std::uint32_t k = first; k < last; ++k) {
+                peak = std::max(peak, in[k]);
+            }
+            out[j] = requantise[peak];
+        }
+        if (skip + i < from.times.size()) {
+            times[i] = from.times[skip + i];
+        }
+    }
+
+    glBindTexture(GL_TEXTURE_2D, m_historyTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(m_bins),
+                    static_cast<GLsizei>(m_lines), GL_RED, GL_UNSIGNED_BYTE, rows.data());
+    m_lineTimes = std::move(times);
+    m_linesPushed = keep;
+    m_writeRow = keep % m_lines;
+    m_scrollLines = std::min(m_scrollLines, keep);
 }
 
 void WaterfallRenderer::setGradientRange(float minDb, float maxDb) noexcept {
