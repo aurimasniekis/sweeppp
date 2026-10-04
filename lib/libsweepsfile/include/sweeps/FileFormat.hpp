@@ -127,7 +127,9 @@ enum class RecordType : std::uint16_t {
     Tile = 5,
     Index = 6, ///< Written at close; a truncated file is recovered by scan.
     EndOfStream = 7,
-    Telemetry = 8, ///< Remote only: the far end's drop/throttle counters.
+    /// Live streams only (Appendix C): the far end's counters, as a metadata
+    /// hash. Never written to a file.
+    Telemetry = 8,
     /// A producer's own record, opaque to the container. One type serves every
     /// producer: `pluginId` already names an arbitrary one, so a second
     /// "custom data" type would be a second mechanism for one job.
@@ -509,6 +511,8 @@ public:
     [[nodiscard]] Status readBytes(void* destination, std::size_t bytes);
 
     [[nodiscard]] std::size_t offset() const noexcept { return m_offset; }
+    /// The byte the next read starts at.
+    [[nodiscard]] const std::byte* position() const noexcept { return m_data + m_offset; }
     [[nodiscard]] std::size_t remaining() const noexcept { return m_size - m_offset; }
     [[nodiscard]] bool exhausted() const noexcept { return m_offset >= m_size; }
     void seek(std::size_t offset) noexcept { m_offset = std::min(offset, m_size); }

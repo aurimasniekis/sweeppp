@@ -478,6 +478,23 @@ typedef struct sweeppp_contribution_t {
     float color[4]; /**< RGBA, 0..1. */
 } sweeppp_contribution_t;
 
+/** One row of what a contributor lets the operator tick on and off -- a plan,
+ *  a service, a channel -- for a host that draws the tree itself, such as the
+ *  browser. Rows come in drawing order: a row's children follow it, one level
+ *  deeper. */
+typedef struct sweeppp_tree_row_t {
+    uint32_t struct_size;
+    uint32_t depth;    /**< 0 for a top-level row. */
+    sweeppp_str_t key; /**< Opaque to the host; handed back to `tree_toggle`. */
+    sweeppp_str_t name;
+    sweeppp_str_t detail;      /**< Drawn dim beside the name: "12 · 2.4 - 2.5 GHz". */
+    sweeppp_str_t description; /**< Shown on hover, or empty. */
+    float color[4];            /**< A swatch beside the name; alpha 0 for none. */
+    uint8_t any_on;            /**< Something at or under this row is shown. */
+    uint8_t all_on;            /**< Everything at or under it is. */
+    uint8_t reserved[2];
+} sweeppp_tree_row_t;
+
 typedef struct sweeppp_contributor_vtable_t {
     uint32_t struct_size;
     sweeppp_contribution_render_t render;
@@ -510,6 +527,16 @@ typedef struct sweeppp_contributor_vtable_t {
      *  dismissed on the plot must come back unticked in the tree that lists
      *  it, not reappear the next time the plugin is asked. */
     sweeppp_plugin_status_t (*hide)(void* instance, const sweeppp_contribution_t* which);
+
+    /** The selection tree as rows. Optional; null for a contributor with
+     *  nothing to tick. Returns how many there are, as `contributions_in`
+     *  does. The strings stay valid until the next `tree_rows` or
+     *  `tree_toggle` on that instance. */
+    uint32_t (*tree_rows)(void* instance, sweeppp_tree_row_t* out, uint32_t capacity);
+
+    /** The operator clicked one row's tick: the same as clicking it in the
+     *  plugin's own tree, whatever that means for the row's state. */
+    sweeppp_plugin_status_t (*tree_toggle)(void* instance, sweeppp_str_t key);
 } sweeppp_contributor_vtable_t;
 
 /* --------------------------------------------------------------------------

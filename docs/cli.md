@@ -1,12 +1,11 @@
 # Command line
 
-Sweep++ comes with three command-line programs besides the GUI:
+Sweep++ comes with two command-line programs besides the GUI:
 
-- [`sweeppp-cli`](#sweeppp-cli) sweeps, records and inspects without a window;
+- [`sweeppp-cli`](#sweeppp-cli) sweeps, records, inspects and serves a radio to
+  desktops and browsers without a window;
 - [`sweeps`](#sweeps) reads `.sweeps` recordings, with nothing else from
-  Sweep++ needed;
-- [`sweeppp-server`](#sweeppp-server) is a placeholder that doesn't do anything
-  yet.
+  Sweep++ needed.
 
 When built from source they're in `build/<preset>/dist/`. The `.deb` package
 installs them to `/usr/bin`.
@@ -42,7 +41,7 @@ sweeppp-cli <command> [options]
 | [`replay`](#replay)   | Play a `.sweeps` file back as CSV.                                       |
 | [`info`](#info)       | Describe this build (FFT engines, radios, plugins), or a `.sweeps` file. |
 | [`extract`](#extract) | Cut a time and frequency range out of a `.sweeps` file.                  |
-| `serve`               | **Not available yet.** Exits with an error.                              |
+| [`serve`](#serve)     | Serve a radio to the desktop app on another computer.                    |
 | `help`                | Print the usage.                                                         |
 | `version`             | Print the version and build details.                                     |
 
@@ -122,8 +121,24 @@ Options can be written as `--option value` or `--option=value`. A word with no
 |----------------------|--------------------------------------------------------------|----------------------------------------------------------------------|
 | `--config-dir <dir>` | [the config folder](user-guide.md#where-settings-are-stored) | Use this folder for settings, antennas, plugins and the log instead. |
 
-`--listen`, `--port` and `--token` are accepted but unused until `serve`
-exists.
+**Serve**
+
+| Option                | Default     | Meaning                                                                |
+|-----------------------|-------------|------------------------------------------------------------------------|
+| `--listen <address>`  | `127.0.0.1` | Address to listen on. `0.0.0.0` for every interface.                   |
+| `--port <n>`          | `7332`      | Port. `0` picks a free one and prints it.                              |
+| `--token <secret>`    |             | Required on any address but loopback.                                  |
+| `--token-file <path>` |             | The token from a file. The `SWEEPPP_REMOTE_TOKEN` variable also works. |
+| `--new-token`         |             | Print a new random token and exit.                                     |
+| `--linger <time>`     | `30s`       | How long the radio keeps sweeping for a desktop that dropped.          |
+| `--backlog <time>`    | `120s`      | Passes kept for it meanwhile, sent first when it is back (at most 64 MiB; `0` keeps none). |
+| `--record`            |             | Record from the start, into the config folder's `sessions/`.           |
+| `--no-advertise`      |             | Do not answer desktops looking for servers on the network.             |
+| `--shared`            |             | Let several desktops and browsers connect; one controls, the rest watch. |
+| `--max-clients <n>`   | `8`         | With `--shared`, how many at once.                                     |
+| `--web <port>`        |             | Serve the browser UI on this port too.                                 |
+| `--web-listen <address>` | `--listen` | Address the browser UI listens on.                                  |
+| `--web-root <dir>`    |             | Serve the UI's files from here rather than the binary.                 |
 
 ### Radio settings
 
@@ -223,10 +238,17 @@ Records to a `.sweeps` file, like the GUI does.
 sweeppp-cli record --device rtlsdr --center 433.92M --sample-rate 2.4M --duration 10min -o ism.sweeps
 ```
 
-- `-o` is required.
-- It records at a single centre frequency only. `--start`, `--stop`, `--rbw`
-  and `--throttle` are ignored.
-- A `--param` with an unknown key or a bad value is skipped without an error.
+- `-o` is required. `-o -` writes the live `.sweeps` stream (Appendix C of the
+  format) to stdout instead, for anything that reads the
+  [stream C API](sweeps-files.md#streams); messages then go to stderr.
+- `--start` and `--stop` sweep, recording a line a pass; otherwise it records
+  at `--center`.
+- A `--param` with an unknown key or a bad value is an error, as for `sweep`.
+
+```sh
+sweeppp-cli record --device hackrf --start 2.4G --stop 2.5G --duration 1h -o wifi.sweeps
+sweeppp-cli record --device synthetic --duration 10 -o - | ./my-reader
+```
 
 ### `replay`
 
@@ -279,6 +301,57 @@ sweeppp-cli extract ism.sweeps --from 1min --to 2min --start 433M --stop 435M -o
 `--stop` are frequencies. Leave any of them out to keep everything in that
 direction.
 
+### `serve`
+
+Runs a radio for the desktop app on another computer to use. The FFT,
+sweeping, corrections and antenna routing run here; the desktop receives the
+spectrum.
+
+```sh
+sweeppp-cli serve --new-token > ~/.sweeppp-token
+sweeppp-cli serve --device hackrf --listen 0.0.0.0 --token-file ~/.sweeppp-token
+```
+
+- The connection is encrypted, and the token is its key: both ends must have
+  it. Use `--new-token` rather than a word.
+- One client at a time; a second is refused until the first disconnects.
+  With `--shared`, desktops and browsers connect together: the first controls
+  and the rest watch, and any of them can take control.
+- When the desktop disconnects, the radio stops. When its connection drops
+  instead, the radio keeps sweeping for `--linger`, so a desktop that
+  reconnects carries on; the passes it missed, up to `--backlog`, are sent
+  first, so its waterfall and recording have no gap.
+- Antennas, assignments, corrections and recordings are kept in this
+  computer's config folder (`--config-dir` to change it).
+- `--fft-backend`, `--rx-port` and `--param` set how the radio starts.
+- Plugins that process the spectrum run on the desktop, not here.
+- Listening beyond loopback, the server answers desktops looking for servers
+  on the network (mDNS, `_sweeppp._tcp`), including over a direct cable.
+- Ctrl-C disconnects the desktop and exits.
+- A 70 MHz–6 GHz sweep at 61.44 MS/s and 5.6 kHz resolution sends about
+  1.7 MB per pass, or about 0.2 MB/s with the desktop's Network resolution at
+  16 384 bins.
+
+From a source checkout, `make serve` serves the synthetic radio on loopback.
+
+#### In a browser
+
+```sh
+sweeppp-cli serve --device hackrf --listen 0.0.0.0 --token-file ~/.sweeppp-token --shared --web 8080
+```
+
+Open `http://<server>:8080` and log in with the token. On loopback without a
+token there is no login. The page is plain HTTP; for HTTPS, put a reverse
+proxy in front, for example Caddy:
+
+```
+sweeppp.example.org {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+with `--web-listen 127.0.0.1` so the UI is reachable only through the proxy.
+
 ## `sweeps`
 
 `sweeps` reads `.sweeps` files. It is part of the MIT-licensed `.sweeps` library
@@ -313,10 +386,6 @@ sweeps manifest capture.sweeps | jq -r .name
 sweeps events capture.sweeps | jq -s 'group_by(.kind) | map({kind: .[0].kind, n: length})'
 sweeps dump capture.sweeps --start 88000000 --stop 108000000 --max-lines 100 > fm.csv
 ```
-
-## `sweeppp-server`
-
-A placeholder for a future web interface. It prints its version and exits.
 
 ## Environment variables
 

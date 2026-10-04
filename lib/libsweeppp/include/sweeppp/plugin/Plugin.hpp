@@ -36,6 +36,7 @@
 
 #include "sweeppp/plugin/PluginAbi.h"
 
+#include <array>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -1082,7 +1083,35 @@ makeUiVtable(std::uint32_t spots, sweeppp_ui_layer_t layer = SWEEPPP_UI_LAYER_UN
     return vtable;
 }
 
+#endif
+
 // ------------------------------------------------------------- tick trees
+
+/// One row of a contributor's tick tree, as `sweeppp_tree_row_t` carries it.
+struct TreeRow {
+    std::uint32_t depth = 0;
+    std::string key;
+    std::string name;
+    std::string detail;
+    std::string description;
+    std::array<float, 4> color{}; ///< Alpha 0 for no swatch.
+    bool anyOn = false;
+    bool allOn = false;
+    bool ownOn = true; ///< The row's own flag; what tells "off" from "on but empty".
+
+    [[nodiscard]] sweeppp_tree_row_t abi() const noexcept {
+        return sweeppp_tree_row_t{.struct_size = sizeof(sweeppp_tree_row_t),
+                                  .depth = depth,
+                                  .key = str(key),
+                                  .name = str(name),
+                                  .detail = str(detail),
+                                  .description = str(description),
+                                  .color = {color[0], color[1], color[2], color[3]},
+                                  .any_on = static_cast<std::uint8_t>(anyOn ? 1 : 0),
+                                  .all_on = static_cast<std::uint8_t>(allOn ? 1 : 0),
+                                  .reserved = {0, 0}};
+    }
+};
 
 /// What the operator asked for by clicking a row's tick.
 ///
@@ -1101,6 +1130,16 @@ makeUiVtable(std::uint32_t spots, sweeppp_ui_layer_t layer = SWEEPPP_UI_LAYER_UN
 ///                                   thing the click can mean is "show me all
 ///                                   of it".
 enum class TickAction : std::uint8_t { Hide, Unhide, ShowAll };
+
+/// What a click on `row`'s tick means, by the rule above.
+[[nodiscard]] inline TickAction tickAction(const TreeRow& row) noexcept {
+    if (row.anyOn) {
+        return TickAction::Hide;
+    }
+    return row.ownOn ? TickAction::ShowAll : TickAction::Unhide;
+}
+
+#if defined(SWEEPPP_PLUGIN_HAS_UI)
 
 /// The tri-state tick every row of a plugin's settings tree carries.
 ///
@@ -1130,6 +1169,69 @@ enum class TickAction : std::uint8_t { Hide, Unhide, ShowAll };
         return TickAction::Hide;
     }
     return ownOn ? TickAction::ShowAll : TickAction::Unhide;
+}
+
+/// A plugin's tick tree, drawn from the same rows it hands a host: a tick, a
+/// swatch when the row has a colour, the name as a tree node and the detail dim
+/// beside it. Returns the key whose tick was clicked.
+[[nodiscard]] inline std::optional<std::string> drawTreeRows(std::span<const TreeRow> rows) {
+    std::optional<std::string> clicked;
+
+    // Rows deeper than `shown` are inside a closed node; `pushed` is how many
+    // open nodes have yet to be popped.
+    std::uint32_t shown = 0;
+    std::uint32_t pushed = 0;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const TreeRow& row = rows[i];
+        if (row.depth > shown) {
+            continue;
+        }
+        for (; pushed > row.depth; --pushed) {
+            ImGui::TreePop();
+        }
+        shown = row.depth;
+
+        ImGui::PushID(row.key.c_str());
+        if (drawTick(row.anyOn, row.allOn, row.ownOn)) {
+            clicked = row.key;
+        }
+        ImGui::PopID();
+        ImGui::SameLine();
+
+        if (row.color[3] > 0.0F) {
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float size = ImGui::GetTextLineHeight();
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(at.x, at.y + (size * 0.2F)),
+                ImVec2(at.x + (size * 0.5F), at.y + (size * 0.8F)),
+                ImGui::GetColorU32(ImVec4(row.color[0], row.color[1], row.color[2], 1.0F)), 2.0F);
+            ImGui::Dummy(ImVec2((size * 0.5F) + 4.0F, size));
+            ImGui::SameLine();
+        }
+
+        const bool parent = i + 1 < rows.size() && rows[i + 1].depth > row.depth;
+        ImGuiTreeNodeFlags flags =
+            ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (!parent) {
+            flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        }
+        const bool open = ImGui::TreeNodeEx(row.key.c_str(), flags, "%s", row.name.c_str());
+        if (!row.description.empty() && ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", row.description.c_str());
+        }
+        if (!row.detail.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", row.detail.c_str());
+        }
+        if (open && parent) {
+            ++pushed;
+            shown = row.depth + 1;
+        }
+    }
+    for (; pushed > 0; --pushed) {
+        ImGui::TreePop();
+    }
+    return clicked;
 }
 
 #endif
@@ -1242,6 +1344,36 @@ makeContributorVtable(sweeppp_contribution_render_t render = SWEEPPP_CONTRIBUTIO
                 }
             });
             return hidden ? SWEEPPP_PLUGIN_OK : SWEEPPP_PLUGIN_ERR_INVALID_ARGUMENT;
+        };
+    }
+
+    // Optional as well, and wired only when `T` has both:
+    //
+    //     const std::vector<TreeRow>& treeRows()
+    //     bool toggleTreeRow(std::string_view key)
+    //
+    // `treeRows` rebuilds the rows it returns, which is what keeps the strings
+    // alive until the next call as the ABI promises.
+    if constexpr (requires(T& t, std::string_view key) {
+                      { t.treeRows() } -> std::convertible_to<const std::vector<TreeRow>&>;
+                      { t.toggleTreeRow(key) } -> std::convertible_to<bool>;
+                  }) {
+        vtable.tree_rows = [](void* instance, sweeppp_tree_row_t* out,
+                              std::uint32_t capacity) -> std::uint32_t {
+            std::uint32_t count = 0;
+            detail::guard([&] {
+                const std::vector<TreeRow>& rows = static_cast<T*>(instance)->treeRows();
+                count = static_cast<std::uint32_t>(rows.size());
+                for (std::uint32_t i = 0; out != nullptr && i < count && i < capacity; ++i) {
+                    out[i] = rows[i].abi();
+                }
+            });
+            return count;
+        };
+        vtable.tree_toggle = [](void* instance, sweeppp_str_t key) -> sweeppp_plugin_status_t {
+            bool toggled = false;
+            detail::guard([&] { toggled = static_cast<T*>(instance)->toggleTreeRow(view(key)); });
+            return toggled ? SWEEPPP_PLUGIN_OK : SWEEPPP_PLUGIN_ERR_INVALID_ARGUMENT;
         };
     }
 

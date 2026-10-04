@@ -155,6 +155,48 @@ std::uint32_t contributionsAt(void*, double hz, sweeppp_contribution_t* out,
     return found;
 }
 
+/// A two-row tick tree: everything, and the narrow range under it, which the
+/// one tick switches.
+bool g_narrowOn = true;
+
+std::uint32_t treeRows(void*, sweeppp_tree_row_t* out, std::uint32_t capacity) {
+    const auto flag = [](bool on) { return static_cast<std::uint8_t>(on ? 1 : 0); };
+    const sweeppp_tree_row_t rows[2]{
+        {.struct_size = sizeof(sweeppp_tree_row_t),
+         .depth = 0,
+         .key = lit("all"),
+         .name = lit("Everything"),
+         .detail = lit("2"),
+         .description = lit("every range the fixture knows"),
+         .color = {0.0F, 0.0F, 0.0F, 0.0F},
+         .any_on = 1,
+         .all_on = flag(g_narrowOn),
+         .reserved = {0, 0}},
+        {.struct_size = sizeof(sweeppp_tree_row_t),
+         .depth = 1,
+         .key = lit("narrow"),
+         .name = lit("narrow"),
+         .detail = lit("99.9 - 100.1 MHz"),
+         .description = lit(""),
+         .color = {0.2F, 0.6F, 0.9F, 1.0F},
+         .any_on = flag(g_narrowOn),
+         .all_on = flag(g_narrowOn),
+         .reserved = {0, 0}},
+    };
+    for (std::uint32_t i = 0; out != nullptr && i < 2 && i < capacity; ++i) {
+        out[i] = rows[i];
+    }
+    return 2;
+}
+
+sweeppp_plugin_status_t treeToggle(void*, sweeppp_str_t key) {
+    if (key.len != 6 || std::memcmp(key.data, "narrow", 6) != 0) {
+        return SWEEPPP_PLUGIN_ERR_INVALID_ARGUMENT;
+    }
+    g_narrowOn = !g_narrowOn;
+    return SWEEPPP_PLUGIN_OK;
+}
+
 const sweeppp_contributor_vtable_t kContributorVtable{
     .struct_size = sizeof(sweeppp_contributor_vtable_t),
     .render = SWEEPPP_CONTRIBUTION_RENDER_HOST,
@@ -165,6 +207,9 @@ const sweeppp_contributor_vtable_t kContributorVtable{
     .select_dataset = selectDataset,
     .contributions_in = contributionsIn,
     .contributions_at = contributionsAt,
+    .hide = nullptr,
+    .tree_rows = treeRows,
+    .tree_toggle = treeToggle,
 };
 
 // ---------------------------------------------------------- frame processor

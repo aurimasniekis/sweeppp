@@ -13,21 +13,23 @@
 #include <string>
 #include <sweeppp/core/EventBus.hpp>
 #include <sweeppp/core/Telemetry.hpp>
-#include <sweeppp/correction/CorrectionLearner.hpp>
 #include <sweeppp/correction/Corrections.hpp>
 #include <sweeppp/fft/FftBackendManager.hpp>
 #include <sweeppp/history/IFrameSource.hpp>
 #include <sweeppp/history/SessionRecorder.hpp>
+#include <sweeppp/instrument/LocalInstrument.hpp>
 #include <sweeppp/pipeline/FrameBus.hpp>
 #include <sweeppp/pipeline/Pipeline.hpp>
 #include <sweeppp/profile/Profile.hpp>
+#include <sweeppp/remote/Mdns.hpp>
+#include <sweeppp/remote/Reconnector.hpp>
+#include <sweeppp/remote/RemoteInstrument.hpp>
+#include <sweeppp/remote/ServerList.hpp>
 #include <sweeppp/rf/Antenna.hpp>
 #include <sweeppp/rf/AntennaAssignments.hpp>
 #include <sweeppp/rf/IRfPath.hpp>
-#include <sweeppp/rf/RfRouting.hpp>
 #include <sweeppp/sdr/ISdrDevice.hpp>
 #include <sweeppp/sweep/RangeHistory.hpp>
-#include <sweeppp/sweep/SweepEngine.hpp>
 #include <sweeppp/sweep/SweepPreset.hpp>
 #include <sweeppp/ui/MarkerPreset.hpp>
 #include <sweeppp/ui/Theme.hpp>
@@ -83,8 +85,37 @@ public:
     /// enumeration walks every driver and every device each one claims.
     void beginRefreshDevices();
 
+    /// Closes the radio, or disconnects from the server serving it.
     void closeDevice();
-    [[nodiscard]] ISdrDevice* device() const noexcept { return m_device.get(); }
+
+    /// The radio, the pipeline and the sweep engine, wherever they run.
+    [[nodiscard]] Instrument& instrument() noexcept {
+        return m_remote ? static_cast<Instrument&>(*m_remote) : *m_local;
+    }
+    [[nodiscard]] const Instrument& instrument() const noexcept {
+        return m_remote ? static_cast<const Instrument&>(*m_remote) : *m_local;
+    }
+
+    /// The server the instrument is on, or null when it is in this process.
+    [[nodiscard]] const remote::RemoteInstrument* remoteInstrument() const noexcept {
+        return m_remote.get();
+    }
+    [[nodiscard]] remote::RemoteInstrument* remoteInstrument() noexcept { return m_remote.get(); }
+
+    /// Sets how many bins the server reduces frames to, and keeps the choice
+    /// with the saved server so the next connection uses it too.
+    void setLinkResolution(std::uint32_t maxBins);
+
+    /// Servers answering on the LAN. Asking starts looking, and looking stops
+    /// a while after nobody has asked: the chooser asks while it is open.
+    [[nodiscard]] std::vector<remote::mdns::DiscoveredServer> discoveredServers();
+
+    /// Saved servers. Mutated in place by the UI; `saveServers()` keeps it.
+    [[nodiscard]] remote::ServerList& servers() noexcept { return m_servers; }
+    void saveServers();
+
+    /// The open radio as values, or null.
+    [[nodiscard]] const DeviceDescriptor* device() const noexcept { return instrument().device(); }
 
     // ---- startup ---------------------------------------------------------
     //
@@ -106,10 +137,28 @@ public:
     void beginOpenDevice(const std::string& driver, const std::string& id,
                          const std::string& label);
 
+    /// Connects to a server, on the same worker. `label` is what the operator
+    /// calls it. `reconnect` marks an attempt made on the operator's behalf
+    /// after a link dropped; any other connect is the operator changing their
+    /// mind, and stops those attempts.
+    void beginConnectServer(const remote::RemoteEndpoint& endpoint, const std::string& label,
+                            bool reconnect = false);
+
+    /// Trying a dropped server again, and what to say about it.
+    [[nodiscard]] bool reconnecting() const noexcept { return m_reconnect.active(); }
+    [[nodiscard]] std::string reconnectStatus() const;
+    void stopReconnecting();
+
     /// Adopts a finished open. Called once per frame on the UI thread.
     void pollDeviceStartup();
 
     [[nodiscard]] bool deviceStartupRunning() const noexcept { return m_startup.has_value(); }
+
+    /// Whether the startup is one the window waits on. A reconnect attempt
+    /// runs in the background: the operator was not the one who asked.
+    [[nodiscard]] bool deviceStartupShown() const noexcept {
+        return m_startup.has_value() && !m_startup->reconnect;
+    }
 
     /// What is happening, and what it involves -- the two lines of the panel
     /// that says so.
@@ -121,60 +170,21 @@ public:
     [[nodiscard]] std::uint64_t deviceStartupStartedNs() const noexcept;
 
     // ---- run control -----------------------------------------------------
+    //
+    // What adds something to the instrument's own: a start also opens the
+    // session, and a plan change is also a place in the range history.
 
     [[nodiscard]] Status start();
     void stop();
-    [[nodiscard]] bool running() const noexcept;
-
-    /// Stops and starts, adopting whatever the radio agreed to.
-    ///
-    /// The one way to apply a change that cannot be made underneath a running
-    /// sweep. Several settings are in that class -- the plan, the FFT backend,
-    /// anything that resizes a block -- and each used to spell this out.
-    [[nodiscard]] Status restart();
-
-    [[nodiscard]] Status applyPipelineConfig(const PipelineConfig& config);
-    [[nodiscard]] const PipelineConfig& pipelineConfig() const noexcept { return m_pipelineConfig; }
+    [[nodiscard]] bool running() const noexcept { return instrument().running(); }
+    [[nodiscard]] bool sweeping() const noexcept { return instrument().sweeping(); }
+    [[nodiscard]] const SweepPlan& sweepPlan() const noexcept { return instrument().sweepPlan(); }
 
     [[nodiscard]] Status applySweepPlan(const SweepPlan& plan);
 
-    /// The backend the transform is actually running on.
-    ///
-    /// Not `FftBackendManager::suggestedDefault()`, which is only what a fresh
-    /// install would preselect and never changes: with more than one backend
-    /// installed the two disagree the moment the operator picks the other one.
-    [[nodiscard]] std::string_view fftBackendName() const noexcept;
-
-    /// Switches the transform to another registered backend.
-    ///
-    /// A grid-affecting change, not a preference: backends differ in the sizes
-    /// they accept, so the FFT size and with it the whole frequency grid can
-    /// move underneath a switch. Applied by cycling acquisition, the same way
-    /// a sweep plan change is, rather than by making the operator stop and
-    /// start.
-    [[nodiscard]] Status setFftBackend(std::string_view name);
-
-    /// Applies a device parameter from the UI.
-    ///
-    /// Most go straight to the driver. The sample rate does not: while
-    /// sweeping it *is* the step width, so it belongs to the plan, and setting
-    /// it on the device alone would last until the engine next configured and
-    /// wrote the plan's own rate over it.
-    [[nodiscard]] Status setDeviceParameter(const std::string& key, const SdrValue& value);
-
-    /// Whether the UI must hold this parameter until acquisition stops.
-    ///
-    /// Weaker than the driver's own `requiresStop`: what the plan owns is
-    /// applied by cycling acquisition around it, which is a stop, so it stays
-    /// editable mid-sweep.
-    [[nodiscard]] bool parameterNeedsStop(const SdrParameter& parameter) const noexcept;
-
-    /// Replaces the stored plan with the one the engine is actually running,
-    /// after the device has clamped anything it could not honour.
-    void adoptEffectivePlan();
-
-    /// Warns once when a re-plan leaves spectrum no assigned antenna covers.
-    void reportUnroutedRanges();
+    /// Sweeps `plan`, whether or not the radio was sweeping before. One
+    /// restart, where setting the two separately would cost two.
+    Status sweepRange(const SweepPlan& plan);
 
     // ---- range history ---------------------------------------------------
     //
@@ -192,7 +202,6 @@ public:
     /// Steps the sweep range back or forward. No-ops at either end.
     [[nodiscard]] Status goBack();
     [[nodiscard]] Status goForward();
-    [[nodiscard]] const SweepPlan& sweepPlan() const noexcept { return m_sweepPlan; }
 
     // ---- profiles --------------------------------------------------------
 
@@ -243,121 +252,6 @@ public:
     /// down against whatever is already on screen.
     [[nodiscard]] MarkerPresetStore& markerPresets() noexcept { return m_markerPresets; }
     void saveMarkerPresets();
-
-    /// What the operator has told the application is screwed onto a connector.
-    ///
-    /// Mutated in place by the editor; `saveAntennas()` writes the user file
-    /// and reloads from disk, so the list and the file cannot disagree about
-    /// which entries are shipped and which are the operator's own.
-    [[nodiscard]] AntennaLibrary& antennas() noexcept { return m_antennas; }
-    [[nodiscard]] const AntennaLibrary& antennas() const noexcept { return m_antennas; }
-    void saveAntennas();
-    void reloadAntennas();
-
-    /// Which antenna is on which connector, for every radio this installation
-    /// has seen. Not part of a profile: loading a saved job must not unscrew
-    /// the horn from RX2.
-    [[nodiscard]] AntennaAssignments& antennaAssignments() noexcept { return m_assignments; }
-    [[nodiscard]] const AntennaAssignments& antennaAssignments() const noexcept {
-        return m_assignments;
-    }
-    void saveAntennaAssignments();
-
-    /// Re-resolves the RF path and, when a routed sweep is configured or
-    /// running, re-plans it.
-    ///
-    /// Called after anything that changes what is in front of the tuner: an
-    /// assignment, a fallback port, an edit to the library. The sweep is
-    /// planned against the antennas, so leaving it on the old plan would have
-    /// the panel describing one bench and the radio measuring another until
-    /// something else happened to re-plan.
-    void applyAntennaChange();
-
-    /// The key the open radio's assignments are filed under, or empty when
-    /// there is no radio.
-    [[nodiscard]] std::string deviceAntennaKey() const;
-
-    /// The antenna on `portId`, or null. An empty `portId` is the single
-    /// implicit input a one-connector radio has.
-    [[nodiscard]] const Antenna* antennaOnPort(std::string_view portId) const;
-
-    /// Every antenna the open radio can hear through, with the band each
-    /// reaches. Empty when there is no radio or nothing is assigned.
-    [[nodiscard]] std::vector<RfLeg> rfPath() const;
-
-    /// The frequencies the assigned antennas cover, merged and ascending.
-    [[nodiscard]] std::vector<std::pair<double, double>> antennaCoverage() const;
-
-    /// The antenna switchers this installation has open.
-    [[nodiscard]] std::span<const OpenRfPath> switchers() const noexcept { return m_openPaths; }
-
-    /// The switcher filed under `key`, or null.
-    [[nodiscard]] IRfPath* switcher(std::string_view key) const;
-
-    /// Opens every switcher an assignment names and closes the rest.
-    ///
-    /// Called after the assignments change and after a radio is adopted. A box
-    /// nobody has assigned is left alone: opening it would claim a serial port
-    /// or a USB handle to answer a question nothing is asking.
-    void refreshSwitchers();
-
-    // ---- receiver corrections --------------------------------------------
-    //
-    // DC removal, floor flattening and a spur mask, applied by the pipeline to
-    // every frame, and the learn that produces the floor and the spurs. The
-    // switches travel in a profile; what they apply is a file per radio,
-    // loaded when the radio is adopted.
-
-    [[nodiscard]] const CorrectionSettings& correctionSettings() const noexcept {
-        return m_correctionSettings;
-    }
-
-    /// Takes effect on the next block, with no restart.
-    void setCorrectionSettings(const CorrectionSettings& settings);
-
-    /// What was learned for the open radio, or null when nothing has been.
-    [[nodiscard]] const CorrectionSet* corrections() const noexcept;
-
-    /// Why the learned floor is not being applied: the first setting that
-    /// differs from when it was learned, or empty while it applies.
-    [[nodiscard]] const std::string& floorStaleReason() const noexcept {
-        return m_floorStaleReason;
-    }
-
-    [[nodiscard]] std::size_t spurCount() const noexcept;
-    [[nodiscard]] std::size_t automaticSpurCount() const noexcept;
-
-    /// Learns the floor and the spurs from what the receiver shows with no
-    /// signal in. Needs acquisition running, and the antenna off.
-    [[nodiscard]] Status startLearning();
-    [[nodiscard]] bool learning() const noexcept { return m_learn.has_value(); }
-    [[nodiscard]] std::string learningLabel() const;
-    void cancelLearning();
-
-    /// Drops the spurs found automatically this session.
-    void clearAutoSpurs();
-
-    /// Forgets everything learned for the open radio, file included.
-    void clearCorrections();
-
-    /// The learn's own numbers, for the prompt that starts one.
-    [[nodiscard]] static std::size_t learnPasses() noexcept;
-    static constexpr std::size_t kLearnFrames = 200;
-
-    [[nodiscard]] bool sweeping() const noexcept { return m_sweeping; }
-
-    /// Switches between sweeping the planned range and sitting on one centre
-    /// frequency, restarting acquisition when it is running.
-    ///
-    /// Not a bare field write: the flag decides how the buses are wired and
-    /// whether the waterfall advances per frame or per pass, and neither can
-    /// be changed underneath a running pipeline.
-    Status setSweeping(bool enabled);
-
-    /// Sweeps `plan`, whether or not the radio was sweeping before. One
-    /// restart, where setting the two separately would cost two.
-    Status sweepRange(const SweepPlan& plan);
-    [[nodiscard]] const SweepEngine& sweepEngine() const noexcept { return *m_sweepEngine; }
 
     // ---- recording -------------------------------------------------------
 
@@ -432,20 +326,37 @@ public:
     /// figures for a quarter of a second, which reads as the button not having
     /// worked. The snapshot is taken rather than resampled -- sampling
     /// immediately after a reset would compute rates over a zero interval.
-    void resetTelemetry() noexcept {
+    void resetTelemetry() {
+        instrument().resetTelemetry();
         m_telemetry.reset();
         m_stats = m_telemetry.snapshot();
+        m_linkHistory = {};
     }
     [[nodiscard]] const TelemetrySnapshot& stats() const noexcept { return m_stats; }
 
     /// A device reading with the history needed to plot it.
     struct HealthTrace {
-        ISdrDevice::HealthReading reading;
+        SdrHealthReading reading;
         RollingHistory<240> history;
     };
 
     /// Device readings, sampled with the rest of the telemetry.
     [[nodiscard]] const std::vector<HealthTrace>& health() const noexcept { return m_health; }
+
+    /// The server link's rates, sampled with the rest of the telemetry.
+    struct LinkHistory {
+        RollingHistory<Telemetry::kHistoryLength> roundTripMs;
+        RollingHistory<Telemetry::kHistoryLength> bytesPerSec;
+        RollingHistory<Telemetry::kHistoryLength> framesSentPerSec;
+        /// The server machine's own load, as a share of all of it.
+        RollingHistory<Telemetry::kHistoryLength> serverCpuPercent;
+        RollingHistory<Telemetry::kHistoryLength> serverMemoryPercent;
+        RollingHistory<Telemetry::kHistoryLength> serverTemperatureC;
+        std::uint64_t lastFramesSent = 0;
+        std::uint64_t lastSampleNs = 0;
+        float lastFramesSentPerSec = 0.0F;
+    };
+    [[nodiscard]] const LinkHistory& linkHistory() const noexcept { return m_linkHistory; }
     [[nodiscard]] FrameBus& displayBus() noexcept { return m_displayBus; }
     [[nodiscard]] EventBus& events() noexcept { return m_events; }
 
@@ -568,60 +479,42 @@ public:
 private:
     void applyThemeToImGui();
 
-    /// Republishes pipeline frames onto the display bus when not sweeping.
-    ///
-    /// In sweep mode the SweepEngine occupies this position, stitching steps
-    /// into a whole-span frame. Fixed tune needs no stitching, but everything
-    /// downstream still binds to the display bus -- so the two modes differ
-    /// only in what sits between the buses, not in what consumers see.
-    class DisplayForwarder final : public IFrameConsumer {
-    public:
-        explicit DisplayForwarder(FrameBus& target) : m_target(target) {}
-
-        void onFrame(const SpectrumFramePtr& frame) noexcept override { m_target.publish(frame); }
-        [[nodiscard]] std::string_view consumerName() const noexcept override {
-            return "display-forwarder";
-        }
-
-    private:
-        FrameBus& m_target;
-    };
-
-    FrameBus m_pipelineBus; ///< raw per-step frames from the pipeline
-    FrameBus m_displayBus;  ///< stitched frames the UI and recorder consume
-    DisplayForwarder m_displayForwarder{m_displayBus};
-    FrameBus::SubscriptionId m_pipelineSubscription = 0;
+    FrameBus m_displayBus; ///< what the instrument publishes: the UI and recorder consume it
     Telemetry m_telemetry;
     EventBus m_events;
 
-    std::unique_ptr<Pipeline> m_pipeline;
-    std::unique_ptr<SweepEngine> m_sweepEngine;
-    std::unique_ptr<ISdrDevice> m_device;
-    std::unique_ptr<session::SessionRecorder> m_writer;
-    IFftBackend* m_backend = nullptr;
+    /// After the buses it publishes onto, so it is destroyed before them.
+    std::unique_ptr<LocalInstrument> m_local;
 
-    PipelineConfig m_pipelineConfig;
-    SweepPlan m_sweepPlan;
+    /// While connected to a server, the instrument in use; the local one
+    /// waits with no radio, and takes the configuration back when this goes.
+    std::unique_ptr<remote::RemoteInstrument> m_remote;
+    remote::ServerList m_servers;
+
+    /// After a link drops: when to try again, and what to put back -- the
+    /// setup at the moment it went, as a profile, and whether it was running.
+    remote::Reconnector m_reconnect;
+
+    std::unique_ptr<remote::mdns::Browser> m_browser;
+    std::uint64_t m_browserWantedNs = 0;
+    std::optional<Profile> m_reconnectProfile;
+    bool m_reconnectWasRunning = false;
+    /// The last frame's time when the link went, for what the server kept.
+    std::uint64_t m_resumeAfterNs = 0;
+
+    /// The instrument's start generation as last seen; a new one is a new run.
+    std::uint64_t m_startGenerationSeen = 0;
+
+    std::unique_ptr<session::SessionRecorder> m_writer;
+
     SweepPresetStore m_presets;
     MarkerPresetStore m_markerPresets;
-    AntennaLibrary m_antennas;
-    AntennaAssignments m_assignments;
-
-    /// Owned; `m_openPaths` borrows from these, so the two are only ever
-    /// rebuilt together.
-    std::vector<std::unique_ptr<IRfPath>> m_switchers;
-    std::vector<OpenRfPath> m_openPaths;
-
-    /// What the last warning said, so a re-plan that changes nothing does not
-    /// raise it again.
-    std::vector<std::pair<double, double>> m_reportedUnroutedHz;
 
     SweepRangeHistory m_rangeHistory;
 
     /// Set while replaying history, so stepping back does not itself get
     /// recorded as a new place to come back to.
     bool m_navigatingHistory = false;
-    bool m_sweeping = false;
 
     AppSettings m_appSettings;
     float m_displayUiScale = 1.0F;
@@ -649,6 +542,7 @@ private:
     ViewSettings m_view;
     TelemetrySnapshot m_stats;
     std::vector<HealthTrace> m_health;
+    LinkHistory m_linkHistory;
     Theme m_theme;
     std::vector<Theme> m_themes;
 
@@ -680,21 +574,18 @@ private:
         /// open with no probe behind it must not blank the device list.
         bool enumerated = false;
         std::unique_ptr<ISdrDevice> device;
+        std::unique_ptr<remote::RemoteInstrument> remote;
         std::string error;
     };
-
-    /// Installs an opened radio: stops what was running, publishes the event,
-    /// and takes the device's own full range as the plan.
-    ///
-    /// The one way a device is ever installed. Opening it is the worker's job
-    /// and this is what it hands back to, so a radio restored from a profile
-    /// and one picked from the list end up in the same state.
-    void adoptDevice(std::unique_ptr<ISdrDevice> device);
 
     struct DeviceStartup {
         /// The radio being opened, empty when this is only a bus probe.
         std::string driver;
         std::string id;
+        /// Or the server being connected to, instead of a radio.
+        std::optional<remote::RemoteEndpoint> server;
+        /// An attempt to get back a server whose link dropped.
+        bool reconnect = false;
         /// What to call it on screen.
         std::string label;
         /// Whether the bus is probed first. Only startup needs that; an
@@ -717,74 +608,41 @@ private:
     /// and the sweep plan it carries are applied to the device that arrives.
     std::optional<Profile> m_startupProfile;
 
-    // ---- corrections ------------------------------------------------------
+    /// What a plan change means here, before the instrument sees it: a place
+    /// in the range history, and a view reset when its bounds moved.
+    void recordPlanChange(const SweepPlan& plan);
 
-    [[nodiscard]] CalibrationContext currentContext() const;
+    /// A new run, noticed: the traces start over and the session opens.
+    void followStart();
 
-    /// The switches as the pipeline should see them: a learn in progress
-    /// overrides the flatten and mask switches for its own phases.
-    [[nodiscard]] CorrectionSettings effectiveCorrectionSettings() const noexcept;
-    void pushCorrectionSettings();
+    /// Leaves the server, handing what it was doing to the local instrument.
+    void dropRemote();
 
-    /// Reads the open radio's calibration file, or clears it.
-    void loadCalibration();
+    /// The link went on its own: keep what it was doing, and start trying.
+    void loseRemote();
 
-    /// Hands the pipeline the set, minus the floor when the context has
-    /// moved since it was learned.
-    void installCorrections();
-    void refreshFloorStaleness();
+    /// A server's address as an endpoint, with its token if it is saved.
+    [[nodiscard]] remote::RemoteEndpoint endpointFor(const std::string& address) const;
 
-    /// A learn, from the button to the saved file.
-    struct LearnRun {
-        /// Sweep: one pass for the floor and the LO-offset spurs, then
-        /// several through them for whatever stands at a fixed frequency.
-        /// Fixed tune: one phase, everything absolute.
-        enum class Phase : std::uint8_t { LoOffsets, Absolute, Fixed };
-        Phase phase = Phase::LoOffsets;
-        CorrectionSettings savedSettings;
-        CalibrationContext context;
-        CorrectionLearner learner;
-        FloorShape floor;
-        std::vector<SpurEntry> loSpurs;
-        std::uint64_t passesHandled = 0;
-        /// The pass in progress when the LO-offset set went in; only a pass
-        /// completed after it was measured through the set throughout.
-        std::uint64_t installedAtPass = 0;
-        /// The stitched grid's own learner, one frame per completed pass.
-        CorrectionLearner gridLearner;
-    };
+    /// This machine as a server is told of it; makes and keeps its id the
+    /// first time.
+    [[nodiscard]] remote::ClientIdentity clientIdentity();
 
-    /// Called per frame on the UI thread, where the heavy end of a learn runs.
-    void advanceLearning();
-    void finishLearning(const std::vector<SpurEntry>& absoluteSpurs);
-    void abortLearning();
+    /// Hands what the instrument raised to the toasts and the latched error.
+    void deliverNotices();
 
-    /// Each accepted step frame, on the bus thread.
-    void observeStep(const SpectrumFrame& frame) noexcept;
-
-    void beginAutoSpurs();
-    void endAutoSpurs();
-    void updateAutoSpurs();
-
-    CorrectionSettings m_correctionSettings;
-    std::optional<CorrectionSet> m_corrections;
-    std::string m_floorStaleReason;
-
-    /// Guards the two learners and `m_learn` itself, which the bus thread
-    /// reads and the UI thread replaces.
-    mutable std::mutex m_learnMutex;
-    std::optional<LearnRun> m_learn;
-    std::optional<CorrectionLearner> m_autoLearner;
-    std::uint64_t m_autoPassesHandled = 0;
-
-    /// Sweep passes completed, counted on the sweep thread and polled by the
-    /// UI thread, so a phase change never runs on the thread that raised it.
-    std::atomic<std::uint64_t> m_passesSeen{0};
+    /// Device readings into their histories, at the telemetry cadence.
+    void sampleHealth();
+    void sampleLink();
 
     /// The consumer callback parks the newest frame here and returns; the UI
     /// thread picks it up. Nothing expensive happens on the publishing thread.
     mutable std::mutex m_frameMutex;
     SpectrumFramePtr m_pendingFrame;
+    /// Completed passes since the last pickup. Kept apart from the newest
+    /// frame: a sweep's next partial lands milliseconds after a pass, and
+    /// would otherwise replace it before the waterfall saw it.
+    std::vector<SpectrumFramePtr> m_pendingPasses;
     SpectrumFramePtr m_latestFrame;
     std::vector<WaterfallLine> m_pendingWaterfallLines;
 

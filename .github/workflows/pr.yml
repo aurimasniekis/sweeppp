@@ -423,6 +423,15 @@ jobs:
 
       # --- Common from here on ---
 
+      # The browser UI `serve --web` carries is built with pnpm from web/'s
+      # lockfile, and compiled into sweeppp-cli.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
       # FetchContent's downloads, cached per platform. Cached in place rather
       # than through FETCHCONTENT_BASE_DIR: the default is one tree per build
       # directory, and two builds sharing one deps tree is the known failure.

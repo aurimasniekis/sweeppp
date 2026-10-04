@@ -15,10 +15,13 @@
 #include "sweeps/Result.hpp"
 #include "sweeps/SessionReader.hpp"
 #include "sweeps/SessionWriter.hpp"
+#include "sweeps/Stream.hpp"
 #include "sweeps/WindowType.hpp"
 #include "sweeps/sweeps.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -43,9 +46,11 @@
 // ---------------------------------------------------------------------------
 
 namespace {
-constexpr std::uint32_t kReaderMagic = 0x53575052; // 'SWPR'
-constexpr std::uint32_t kWriterMagic = 0x53575057; // 'SWPW'
-constexpr std::uint32_t kTilesMagic = 0x53575054;  // 'SWPT'
+constexpr std::uint32_t kReaderMagic = 0x53575052;       // 'SWPR'
+constexpr std::uint32_t kWriterMagic = 0x53575057;       // 'SWPW'
+constexpr std::uint32_t kTilesMagic = 0x53575054;        // 'SWPT'
+constexpr std::uint32_t kStreamReaderMagic = 0x53575053; // 'SWPS'
+constexpr std::uint32_t kStreamMirrorMagic = 0x5357504D; // 'SWPM'
 } // namespace
 
 struct sweeps_reader_t {
@@ -70,6 +75,27 @@ struct sweeps_writer_t {
 struct sweeps_tiles_t {
     std::uint32_t magic = kTilesMagic;
     std::vector<sweeps::HistoryTile> tiles;
+};
+
+struct sweeps_stream_reader_t {
+    std::uint32_t magic = kStreamReaderMagic;
+    /// The stream header is consumed here, so the framer sees records only.
+    std::array<std::byte, sweeps::StreamHeader::kBytes> header{};
+    std::size_t headerBytes = 0;
+    sweeps::RecordFramer framer;
+    /// The framer is broken for good after a bad record; a bad header has to
+    /// be made to stick the same way.
+    bool broken = false;
+    sweeps::Error error;
+    /// What the last returned record's payload view points into.
+    sweeps::StreamRecord current;
+};
+
+struct sweeps_stream_mirror_t {
+    explicit sweeps_stream_mirror_t(std::uint32_t maxBins) noexcept : mirror(maxBins) {}
+
+    std::uint32_t magic = kStreamMirrorMagic;
+    sweeps::LineMirror mirror;
 };
 
 namespace {
@@ -259,6 +285,23 @@ sweeps::SessionWriter* writerOf(const sweeps_writer_t* handle) noexcept {
 
 const std::vector<sweeps::HistoryTile>* tilesOf(const sweeps_tiles_t* handle) noexcept {
     return handle != nullptr && handle->magic == kTilesMagic ? &handle->tiles : nullptr;
+}
+
+bool validStreamReader(const sweeps_stream_reader_t* handle) noexcept {
+    return handle != nullptr && handle->magic == kStreamReaderMagic;
+}
+
+const sweeps::LineMirror* mirrorOf(const sweeps_stream_mirror_t* handle) noexcept {
+    return handle != nullptr && handle->magic == kStreamMirrorMagic ? &handle->mirror : nullptr;
+}
+
+sweeps::LineMirror* mutableMirrorOf(sweeps_stream_mirror_t* handle) noexcept {
+    return handle != nullptr && handle->magic == kStreamMirrorMagic ? &handle->mirror : nullptr;
+}
+
+const sweeps::SegmentInfo* mirrorSegment(const sweeps_stream_mirror_t* handle) noexcept {
+    const sweeps::LineMirror* mirror = mirrorOf(handle);
+    return mirror != nullptr ? mirror->segment() : nullptr;
 }
 
 // The borrowed view types are the library's own objects under another name.
@@ -493,6 +536,47 @@ const sweeps::SegmentInfo* segmentAt(const sweeps_reader_t* handle, std::size_t 
         return nullptr;
     }
     return &reader->segments()[index];
+}
+
+/// One segment as the C struct, for the file reader and the stream mirror both.
+sweeps_segment_t toSegmentStruct(const sweeps::SegmentInfo& segment) noexcept {
+    const sweeps::AcquisitionConfig& config = segment.config;
+    sweeps_segment_t staged{};
+    staged.struct_size = sizeof(staged);
+    staged.id = segment.id;
+    staged.bin_count = segment.grid.binCount;
+    staged.fft_size = config.fftSize;
+    staged.window = static_cast<std::uint32_t>(config.window);
+    staged.gain_count = static_cast<std::uint32_t>(config.gains.size());
+    staged.start_wall_ns = segment.startWallNs;
+    staged.start_monotonic_ns = segment.startMonotonicNs;
+    staged.end_monotonic_ns = segment.endMonotonicNs;
+    staged.line_count = segment.lineCount;
+    staged.start_hz = segment.grid.startHz;
+    staged.bin_width_hz = segment.grid.binWidthHz;
+    staged.center_hz = config.centerHz;
+    staged.span_hz = config.spanHz;
+    staged.sample_rate = config.sampleRate;
+    staged.window_beta = config.windowBeta;
+    staged.window_enbw = config.windowEnbw;
+    staged.overlap = config.overlap;
+    staged.rbw_hz = config.rbwHz;
+    staged.reference_level_dbm = config.referenceLevelDbm;
+    staged.dbfs_to_dbm_offset = config.dbfsToDbmOffset;
+    return staged;
+}
+
+sweeps_status_t emitGain(const sweeps::SegmentInfo& segment, std::size_t index,
+                         sweeps_str_t* outName, double* outValue) noexcept {
+    if (index >= segment.config.gains.size()) {
+        return fail(SWEEPS_ERR_OUT_OF_RANGE, "no gain stage at that index");
+    }
+    const std::pair<std::string, double>& gain = segment.config.gains[index];
+    assign(outName, gain.first);
+    if (outValue != nullptr) {
+        *outValue = gain.second;
+    }
+    return SWEEPS_OK;
 }
 
 /// Reports a typed accessor's body mismatch, which is the same three lines in
@@ -779,31 +863,7 @@ extern "C" sweeps_status_t sweeps_reader_segment_at(const sweeps_reader_t* reade
         if (segment == nullptr) {
             return fail(SWEEPS_ERR_OUT_OF_RANGE, "no segment at that index");
         }
-
-        const sweeps::AcquisitionConfig& config = segment->config;
-        sweeps_segment_t staged{};
-        staged.struct_size = sizeof(staged);
-        staged.id = segment->id;
-        staged.bin_count = segment->grid.binCount;
-        staged.fft_size = config.fftSize;
-        staged.window = static_cast<std::uint32_t>(config.window);
-        staged.gain_count = static_cast<std::uint32_t>(config.gains.size());
-        staged.start_wall_ns = segment->startWallNs;
-        staged.start_monotonic_ns = segment->startMonotonicNs;
-        staged.end_monotonic_ns = segment->endMonotonicNs;
-        staged.line_count = segment->lineCount;
-        staged.start_hz = segment->grid.startHz;
-        staged.bin_width_hz = segment->grid.binWidthHz;
-        staged.center_hz = config.centerHz;
-        staged.span_hz = config.spanHz;
-        staged.sample_rate = config.sampleRate;
-        staged.window_beta = config.windowBeta;
-        staged.window_enbw = config.windowEnbw;
-        staged.overlap = config.overlap;
-        staged.rbw_hz = config.rbwHz;
-        staged.reference_level_dbm = config.referenceLevelDbm;
-        staged.dbfs_to_dbm_offset = config.dbfsToDbmOffset;
-        return emitStruct(staged, out);
+        return emitStruct(toSegmentStruct(*segment), out);
     });
 }
 
@@ -870,16 +930,7 @@ extern "C" sweeps_status_t sweeps_reader_segment_gain(const sweeps_reader_t* rea
         if (segment == nullptr) {
             return fail(SWEEPS_ERR_OUT_OF_RANGE, "no segment at that index");
         }
-        if (gain_index >= segment->config.gains.size()) {
-            return fail(SWEEPS_ERR_OUT_OF_RANGE, "no gain stage at that index");
-        }
-
-        const std::pair<std::string, double>& gain = segment->config.gains[gain_index];
-        assign(out_name, gain.first);
-        if (out_value != nullptr) {
-            *out_value = gain.second;
-        }
-        return SWEEPS_OK;
+        return emitGain(*segment, gain_index, out_name, out_value);
     });
 }
 
@@ -2021,5 +2072,279 @@ extern "C" sweeps_str_t
 sweeps_writer_last_segment_reason(const sweeps_writer_t* writer) SWEEPS_NOEXCEPT {
     return guardValue(kEmptyStr, [&]() {
         return writerOf(writer) != nullptr ? view(writer->lastSegmentReason) : kEmptyStr;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Live streams
+// ---------------------------------------------------------------------------
+
+extern "C" sweeps_status_t
+sweeps_stream_reader_create(uint32_t max_payload_bytes,
+                            sweeps_stream_reader_t** out) SWEEPS_NOEXCEPT {
+    return guard([&]() -> sweeps_status_t {
+        if (out == nullptr) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT, "out is null");
+        }
+        *out = nullptr;
+
+        auto handle = std::make_unique<sweeps_stream_reader_t>();
+        if (max_payload_bytes != 0) {
+            handle->framer.setMaxPayloadBytes(max_payload_bytes);
+        }
+        *out = handle.release();
+        return SWEEPS_OK;
+    });
+}
+
+extern "C" void sweeps_stream_reader_destroy(sweeps_stream_reader_t* reader) SWEEPS_NOEXCEPT {
+    guardVoid([&]() {
+        if (!validStreamReader(reader)) {
+            return;
+        }
+        reader->magic = 0;
+        delete reader;
+    });
+}
+
+extern "C" sweeps_status_t sweeps_stream_reader_feed(sweeps_stream_reader_t* reader,
+                                                     const void* data,
+                                                     size_t bytes) SWEEPS_NOEXCEPT {
+    return guard([&]() -> sweeps_status_t {
+        if (!validStreamReader(reader)) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT,
+                        "stream reader handle is null or already destroyed");
+        }
+        if (data == nullptr && bytes != 0) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT, "data is null but a length was given");
+        }
+        if (reader->broken) {
+            return fail(reader->error);
+        }
+        if (bytes == 0) {
+            return SWEEPS_OK;
+        }
+
+        const auto* in = static_cast<const std::byte*>(data);
+        if (reader->headerBytes < reader->header.size()) {
+            const std::size_t take = std::min(bytes, reader->header.size() - reader->headerBytes);
+            std::memcpy(reader->header.data() + reader->headerBytes, in, take);
+            reader->headerBytes += take;
+            in += take;
+            bytes -= take;
+            if (reader->headerBytes < reader->header.size()) {
+                return SWEEPS_OK;
+            }
+
+            auto header = sweeps::decodeStreamHeader(reader->header.data(), reader->header.size());
+            if (!header) {
+                reader->broken = true;
+                reader->error = header.error();
+                return fail(reader->error);
+            }
+        }
+
+        reader->framer.feed(in, bytes);
+        return SWEEPS_OK;
+    });
+}
+
+extern "C" sweeps_status_t sweeps_stream_reader_next_record(sweeps_stream_reader_t* reader,
+                                                            sweeps_stream_record_t* out,
+                                                            int* out_has_record) SWEEPS_NOEXCEPT {
+    return guard([&]() -> sweeps_status_t {
+        if (out_has_record == nullptr) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT, "out_has_record is null");
+        }
+        *out_has_record = 0;
+        if (!validStreamReader(reader)) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT,
+                        "stream reader handle is null or already destroyed");
+        }
+        // Checked before a record is taken off the framer: failing afterwards
+        // would drop that record on the floor.
+        if (out == nullptr || out->struct_size < kMinStructSize) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT,
+                        "the record is null or its struct_size is not set");
+        }
+        if (reader->broken) {
+            return fail(reader->error);
+        }
+        if (reader->headerBytes < reader->header.size()) {
+            return SWEEPS_OK;
+        }
+
+        auto got = reader->framer.next(reader->current);
+        if (!got) {
+            reader->broken = true;
+            reader->error = got.error();
+            return fail(reader->error);
+        }
+        if (!*got) {
+            return SWEEPS_OK;
+        }
+
+        sweeps_stream_record_t staged{};
+        staged.struct_size = sizeof(staged);
+        staged.type = reader->current.header.type;
+        staged.payload = viewBytes(reader->current.payload.data(), reader->current.payload.size());
+        *out_has_record = 1;
+        return emitStruct(staged, out);
+    });
+}
+
+extern "C" size_t
+sweeps_stream_reader_buffered(const sweeps_stream_reader_t* reader) SWEEPS_NOEXCEPT {
+    if (!validStreamReader(reader)) {
+        return 0;
+    }
+    const std::size_t header =
+        reader->headerBytes < reader->header.size() ? reader->headerBytes : 0;
+    return header + reader->framer.buffered();
+}
+
+extern "C" sweeps_status_t
+sweeps_stream_mirror_create(uint32_t max_bins, sweeps_stream_mirror_t** out) SWEEPS_NOEXCEPT {
+    return guard([&]() -> sweeps_status_t {
+        if (out == nullptr) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT, "out is null");
+        }
+        *out = nullptr;
+
+        *out = std::make_unique<sweeps_stream_mirror_t>(
+                   max_bins != 0 ? max_bins : sweeps::LineMirror::kDefaultMaxBins)
+                   .release();
+        return SWEEPS_OK;
+    });
+}
+
+extern "C" void sweeps_stream_mirror_destroy(sweeps_stream_mirror_t* mirror) SWEEPS_NOEXCEPT {
+    guardVoid([&]() {
+        if (mirrorOf(mirror) == nullptr) {
+            return;
+        }
+        mirror->magic = 0;
+        delete mirror;
+    });
+}
+
+namespace {
+
+void initStreamRecord(sweeps_stream_record_t* record) noexcept {
+    std::memset(record, 0, sizeof(*record));
+    record->struct_size = sizeof(*record);
+}
+
+} // namespace
+
+extern "C" sweeps_status_t
+sweeps_stream_mirror_apply(sweeps_stream_mirror_t* mirror,
+                           const sweeps_stream_record_t* record) SWEEPS_NOEXCEPT {
+    return guard([&]() -> sweeps_status_t {
+        sweeps::LineMirror* line = mutableMirrorOf(mirror);
+        if (line == nullptr) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT,
+                        "stream mirror handle is null or already destroyed");
+        }
+
+        sweeps_stream_record_t staged;
+        if (const sweeps_status_t status = readStruct(record, initStreamRecord, staged);
+            status != SWEEPS_OK) {
+            return status;
+        }
+        if (staged.payload.data == nullptr && staged.payload.len != 0) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT, "payload is null but a length was given");
+        }
+        // The wire field is a u16; anything wider names no record there is, and
+        // narrowing it could alias one that is.
+        if (staged.type > 0xFFFFU) {
+            return SWEEPS_OK;
+        }
+
+        const sweeps::Status result = line->apply(
+            static_cast<std::uint16_t>(staged.type),
+            reinterpret_cast<const std::byte*>(staged.payload.data), staged.payload.len);
+        return result ? SWEEPS_OK : fail(result.error());
+    });
+}
+
+extern "C" sweeps_status_t sweeps_stream_mirror_line(const sweeps_stream_mirror_t* mirror,
+                                                     sweeps_stream_line_t* out) SWEEPS_NOEXCEPT {
+    return guard([&]() -> sweeps_status_t {
+        const sweeps::LineMirror* line = mirrorOf(mirror);
+        if (line == nullptr) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT,
+                        "stream mirror handle is null or already destroyed");
+        }
+        const sweeps::SegmentInfo* segment = line->segment();
+        if (segment == nullptr) {
+            return fail(SWEEPS_ERR_NOT_FOUND, "no segment has been opened on this stream yet");
+        }
+
+        sweeps_stream_line_t staged{};
+        staged.struct_size = sizeof(staged);
+        staged.segment_id = segment->id;
+        staged.bin_count = segment->grid.binCount;
+        staged.line = line->line();
+        staged.tiles_applied = line->tilesApplied();
+        staged.start_hz = segment->grid.startHz;
+        staged.bin_width_hz = segment->grid.binWidthHz;
+        staged.levels = line->levels().data();
+        return emitStruct(staged, out);
+    });
+}
+
+extern "C" sweeps_status_t sweeps_stream_mirror_segment(const sweeps_stream_mirror_t* mirror,
+                                                        sweeps_segment_t* out) SWEEPS_NOEXCEPT {
+    return guard([&]() -> sweeps_status_t {
+        if (mirrorOf(mirror) == nullptr) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT,
+                        "stream mirror handle is null or already destroyed");
+        }
+        const sweeps::SegmentInfo* segment = mirrorSegment(mirror);
+        if (segment == nullptr) {
+            return fail(SWEEPS_ERR_NOT_FOUND, "no segment has been opened on this stream yet");
+        }
+        return emitStruct(toSegmentStruct(*segment), out);
+    });
+}
+
+extern "C" sweeps_str_t
+sweeps_stream_mirror_segment_reason(const sweeps_stream_mirror_t* mirror) SWEEPS_NOEXCEPT {
+    return guardValue(kEmptyStr, [&]() {
+        const sweeps::SegmentInfo* segment = mirrorSegment(mirror);
+        return segment != nullptr ? view(segment->reason) : kEmptyStr;
+    });
+}
+
+extern "C" sweeps_str_t
+sweeps_stream_mirror_segment_device_id(const sweeps_stream_mirror_t* mirror) SWEEPS_NOEXCEPT {
+    return guardValue(kEmptyStr, [&]() {
+        const sweeps::SegmentInfo* segment = mirrorSegment(mirror);
+        return segment != nullptr ? view(segment->config.deviceId) : kEmptyStr;
+    });
+}
+
+extern "C" sweeps_str_t
+sweeps_stream_mirror_segment_device_label(const sweeps_stream_mirror_t* mirror) SWEEPS_NOEXCEPT {
+    return guardValue(kEmptyStr, [&]() {
+        const sweeps::SegmentInfo* segment = mirrorSegment(mirror);
+        return segment != nullptr ? view(segment->config.deviceLabel) : kEmptyStr;
+    });
+}
+
+extern "C" sweeps_status_t sweeps_stream_mirror_segment_gain(const sweeps_stream_mirror_t* mirror,
+                                                             size_t index, sweeps_str_t* out_name,
+                                                             double* out_value) SWEEPS_NOEXCEPT {
+    return guard([&]() -> sweeps_status_t {
+        if (mirrorOf(mirror) == nullptr) {
+            return fail(SWEEPS_ERR_INVALID_ARGUMENT,
+                        "stream mirror handle is null or already destroyed");
+        }
+        const sweeps::SegmentInfo* segment = mirrorSegment(mirror);
+        if (segment == nullptr) {
+            return fail(SWEEPS_ERR_NOT_FOUND, "no segment has been opened on this stream yet");
+        }
+        return emitGain(*segment, index, out_name, out_value);
     });
 }

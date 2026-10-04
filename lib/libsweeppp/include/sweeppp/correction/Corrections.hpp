@@ -126,6 +126,10 @@ struct CorrectionSet {
 
     /// `Paths::calibrationDir() / <device key>.toml`, one file per radio.
     [[nodiscard]] static std::filesystem::path pathFor(const SdrDeviceInfo& info);
+
+    /// The same file name, under `directory`.
+    [[nodiscard]] static std::filesystem::path pathFor(const SdrDeviceInfo& info,
+                                                       const std::filesystem::path& directory);
 };
 
 /// Per-grid work `applyCorrections` keeps between frames, so a frame costs one

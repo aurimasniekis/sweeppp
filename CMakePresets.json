@@ -49,7 +49,7 @@
         "SWEEPPP_SANITIZER": "address+undefined",
         "SWEEPPP_BUILD_TESTS": "ON",
         "SWEEPPP_BUILD_GUI": "OFF",
-        "SWEEPPP_BUILD_SERVER": "OFF",
+        "SWEEPPP_WITH_WEB_UI": "OFF",
         "SWEEPPP_BUILD_PLUGINS": "ON"
       }
     },
@@ -62,7 +62,7 @@
         "SWEEPPP_SANITIZER": "thread",
         "SWEEPPP_BUILD_TESTS": "ON",
         "SWEEPPP_BUILD_GUI": "OFF",
-        "SWEEPPP_BUILD_SERVER": "OFF",
+        "SWEEPPP_WITH_WEB_UI": "OFF",
         "SWEEPPP_BUILD_PLUGINS": "ON"
       }
     },
@@ -73,7 +73,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "SWEEPPP_BUILD_GUI": "OFF",
-        "SWEEPPP_BUILD_SERVER": "OFF",
         "SWEEPPP_BUILD_TESTS": "OFF"
       }
     }

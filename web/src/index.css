@@ -1,0 +1,78 @@
+/* SPDX-FileCopyrightText: 2026 Aurimas Niekis <aurimas@niekis.lt> */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+@import "tailwindcss";
+
+/* The desktop's theme, as variables: /api/themes overrides them at start. */
+@theme {
+  --color-window: #101216;
+  --color-panel: #171a20;
+  --color-header: #1c2027;
+  --color-text: #e6e8eb;
+  --color-dim: #8b919a;
+  --color-accent: #3d8bfd;
+  --color-accent-hover: #6aa5ff;
+  --color-border: #2a2f38;
+  --color-separator: #2a2f38;
+  --color-button: #262b33;
+  --color-button-hover: #313844;
+  --color-button-active: #3b4452;
+  --color-input: #0f1115;
+  --color-input-hover: #161a20;
+  --color-start: #2e9e5b;
+  --color-stop: #d6453d;
+  --color-record: #e0453d;
+  --color-ok: #3fb950;
+  --color-warning: #e0a030;
+  --color-danger: #ff5a5a;
+  --color-plot: #000000;
+  --color-grid: #2a2f38;
+  --color-axis: #8b919a;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--color-window);
+  color: var(--color-text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+canvas {
+  touch-action: none;
+  display: block;
+}
+
+/* Shared shapes, as utilities so one can build on another. */
+@utility btn {
+  @apply inline-flex h-8 items-center justify-center gap-1.5 rounded border border-border bg-button px-2.5 text-text whitespace-nowrap select-none hover:bg-button-hover active:bg-button-active disabled:pointer-events-none disabled:opacity-40;
+}
+
+@utility btn-icon {
+  @apply btn w-8 px-0;
+}
+
+@utility field {
+  @apply h-8 w-full rounded border border-border bg-input px-2 text-text outline-none focus:border-accent disabled:opacity-50;
+}
+
+@utility popover {
+  @apply z-50 max-h-[80vh] overflow-y-auto rounded-lg border border-border bg-panel p-3 text-text shadow-xl;
+}
+
+@utility section-title {
+  @apply mb-1.5 mt-3 border-b border-separator pb-1 text-xs font-semibold uppercase tracking-wide text-dim first:mt-0;
+}
+
+@utility row {
+  @apply flex items-center justify-between gap-3 py-1;
+}
+
+@utility caption {
+  @apply text-xs text-dim;
+}

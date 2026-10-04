@@ -130,6 +130,29 @@ release: functions may be added and struct fields appended, but no signature,
 enumerator value or field meaning changes without a new ABI version. The library
 version moves independently and answers a different question.
 
+### Live streams
+
+A `sweeps_stream_reader_t` splits a byte stream (Appendix C) into records,
+checking the 16-byte stream header itself; a bad header, checksum or oversized
+record breaks it for good. A `sweeps_stream_mirror_t` applies SegmentOpen, Tile
+and SegmentClose records to the current line and ignores the rest. Encrypted
+links are out of scope: feed the plaintext. In C++ the same is
+`sweeps::RecordFramer` and `sweeps::LineMirror`; in Python, `StreamReader` and
+`StreamMirror`.
+
+```c
+sweeps_stream_reader_feed(reader, buffer, got);
+while (sweeps_stream_reader_next_record(reader, &record, &has) == SWEEPS_OK && has) {
+    sweeps_stream_mirror_apply(mirror, &record);
+    if (record.type == SWEEPS_RECORD_PLUGIN_DATA) {    /* the producer's commit */
+        sweeps_stream_mirror_line(mirror, &line);    /* line.levels[0 .. bin_count) */
+    }
+}
+```
+
+`tests/consumer-c/stream.c` is a complete one:
+`sweeppp-cli record --device synthetic --duration 2 -o - | sweeps-stream-c`.
+
 ### Linking from a project with no C++ compiler
 
 `find_package(sweepsfile)` works from `project(app LANGUAGES C)`. It has to do
@@ -247,7 +270,8 @@ byte. That, rather than a version number, is what says the format has not moved
 thought to bump a version for.
 
 It is regenerated only when the format was *meant* to change, with
-`SWEEPSFILE_UPDATE_GOLDEN=1`.
+`SWEEPSFILE_UPDATE_GOLDEN=1`. `tests/data/v1-golden.sweepstream` is the same
+for a live stream, and what the C and Python stream tests read.
 
 `tests/consumer/` builds against the *installed* package rather than the source
 tree, because "it installs" is a claim that is only true if something checks it.

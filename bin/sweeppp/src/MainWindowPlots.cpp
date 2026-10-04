@@ -583,7 +583,7 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout, PanelView& pa
         const float top = layout.origin.y;
         const float bottom = layout.origin.y + layout.size.y;
 
-        for (const RfLeg& leg : m_state.rfPath()) {
+        for (const RfLegView& leg : m_state.instrument().rfPath()) {
             const double fromHz = std::max(leg.route.startHz, layout.fromHz);
             const double toHz = std::min(leg.route.stopHz, layout.toHz);
             if (toHz <= fromHz) {
@@ -607,7 +607,7 @@ void MainWindow::drawSpectrumOverlay(const SpectrumLayout& layout, PanelView& pa
             // chips are not. Only when the band is wide enough to hold it --
             // a clipped name is worse than none, because it reads as a
             // different antenna.
-            const std::string label = std::format("{} · {}", leg.antenna->name, leg.portLabel);
+            const std::string label = std::format("{} · {}", leg.antenna.name, leg.portLabel);
             const ImVec2 size = ImGui::CalcTextSize(label.c_str());
             if (x1 - x0 > size.x + 10.0F) {
                 draw->AddText(ImVec2(x0 + 5.0F, bottom - size.y - 4.0F),
@@ -1295,24 +1295,57 @@ void MainWindow::drawWaterfall(PanelView& view, ViewPanel& panel) {
     const auto lines = static_cast<std::uint32_t>(
         std::clamp((wanted + kDepthStep - 1) / kDepthStep * kDepthStep, 256, ceiling));
 
-    if (!renderer.valid() || renderer.bins() != bins || renderer.lines() != lines) {
+    const auto sized = [&]() {
         if (auto resized = renderer.resize(bins, lines); !resized) {
             ImGui::TextDisabled("waterfall unavailable: %s", resized.error().c_str());
-            return;
+            return false;
         }
         renderer.setColorMap(m_state.theme().waterfallColorMap());
+        return true;
+    };
+    if (!renderer.valid() && !sized()) {
+        return;
     }
 
     renderer.setGradientRange(view.gradientMinDb, view.gradientMaxDb);
     renderer.setPeakDetect(settings.waterfallPeakDetect);
 
-    // Declares what the texture's width means. A retune or a span change
-    // clears the history inside setSpan, for the same reason a session opens a
-    // new segment: old rows cannot be reinterpreted under a new grid. In Spans
-    // these are the slice's bin edges, which stay put while another panel's
-    // segment is edited, so this panel keeps its history through that.
+    // Declares what the texture's width means. A span change keeps only the
+    // rows where the old and new spans overlap, laid onto the new grid. In
+    // Spans these are the slice's bin edges, which stay put while another
+    // panel's segment is edited, so this panel keeps its history through that.
     if (sourceBins > 0) {
         renderer.setSpan(grid.startHz, grid.stopHz);
+
+        // A panel drawing for the first time starts from the history another
+        // one already holds, laid onto its own span, rather than empty: what
+        // it would show has been measured, it just was not drawn here.
+        if (!panel.seeded) {
+            panel.seeded = true;
+            if (renderer.linesPushed() == 0) {
+                if (!m_waterfallSeed.empty()) {
+                    renderer.seed(m_waterfallSeed);
+                } else {
+                    for (const ViewPanel& other : m_panels) {
+                        if (&other != &panel && other.waterfall &&
+                            other.waterfall->linesPushed() > 0 &&
+                            other.waterfall->spanStartHz() < grid.stopHz &&
+                            other.waterfall->spanStopHz() > grid.startHz) {
+                            renderer.seed(other.waterfall->history());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Resized after the span is declared: a panel narrowed onto one segment
+    // lays its rows onto the segment at the width they were stored at, and
+    // only then resamples, rather than squeezing the whole span into the
+    // segment's width first.
+    if ((renderer.bins() != bins || renderer.lines() != lines) && !sized()) {
+        return;
     }
 
     // This frame's lines, taken once for every panel. Uploaded here rather

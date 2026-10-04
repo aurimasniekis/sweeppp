@@ -17,6 +17,8 @@
 - **Ninja**
 - **pkg-config** (or pkgconf)
 - **A C++23 compiler:** GCC 14+, Clang 18+, or Apple clang from Xcode 26+
+- **Node.js 20+ and pnpm**, for the browser UI (`corepack enable pnpm`), unless
+  built with `SWEEPPP_WITH_WEB_UI=OFF`
 
 CMake doesn't check the compiler version, so an older compiler fails partway
 through the build rather than at configure time:
@@ -58,6 +60,7 @@ CI installs the same list, plus the tools its packaging step needs; see
 | GLFW ≥ 3.3            | the GUI                                         | `SWEEPPP_BUILD_GUI=OFF`         |
 | OpenGL, GTK 3 (Linux) | the GUI (GTK for the file dialog and clipboard) | `SWEEPPP_BUILD_GUI=OFF`         |
 | libcurl               | the update check                                | `SWEEPPP_WITH_UPDATE_CHECK=OFF` |
+| Node.js, pnpm         | the browser UI for `serve --web`                | `SWEEPPP_WITH_WEB_UI=OFF`       |
 | FFTW (`fftw3f`)       | the FFTW plugin                                 | `SWEEPPP_WITH_FFTW=OFF`         |
 | libhackrf             | the HackRF plugin                               | `SWEEPPP_WITH_HACKRF=OFF`       |
 | libbladeRF            | the bladeRF plugin                              | `SWEEPPP_WITH_BLADERF=OFF`      |
@@ -95,7 +98,7 @@ make test     # build and run the tests
 Everything lands in `build/<preset>/dist/`:
 
 - `sweeppp` (on macOS, `Sweep++ Nightly.app`, or `Sweep++.app` from the
-  `release` preset), `sweeppp-cli`, `sweeppp-server` and `sweeps`;
+  `release` preset), `sweeppp-cli` and `sweeps`;
 - the plugins, in `dist/plugins/` as `sweeppp-plugin-<name>.so`, `.dylib` or
   `.dll`;
 - the test executables.
@@ -109,14 +112,14 @@ straight from the build tree.
 All presets use Ninja and build into `build/<preset>/`. Compiler warnings are on
 in every preset; none of them turns warnings into errors.
 
-| Preset     | Build type     | What's built                        | Notes                                                 |
-|------------|----------------|-------------------------------------|-------------------------------------------------------|
-| `dev`      | RelWithDebInfo | everything, with tests              | The default.                                          |
-| `debug`    | Debug          | everything, with tests              |                                                       |
-| `release`  | Release        | everything except tests             |                                                       |
-| `asan`     | Debug          | no GUI or server; plugins and tests | AddressSanitizer and UndefinedBehaviorSanitizer.      |
-| `tsan`     | Debug          | no GUI or server; plugins and tests | ThreadSanitizer, mainly for the acquisition pipeline. |
-| `headless` | Release        | no GUI, server or tests             | For machines without a display.                       |
+| Preset     | Build type     | What's built                        | Notes                                                                    |
+|------------|----------------|-------------------------------------|--------------------------------------------------------------------------|
+| `dev`      | RelWithDebInfo | everything, with tests              | The default.                                                             |
+| `debug`    | Debug          | everything, with tests              |                                                                          |
+| `release`  | Release        | everything except tests             |                                                                          |
+| `asan`     | Debug          | no GUI or server; plugins and tests | AddressSanitizer and UndefinedBehaviorSanitizer.                         |
+| `tsan`     | Debug          | no GUI or server; plugins and tests | ThreadSanitizer, mainly for the acquisition pipeline.                    |
+| `headless` | Release        | no GUI, server or tests             | For machines without a display, such as one running `sweeppp-cli serve`. |
 
 - The sanitizer presets still build the plugins, so they still need FFTW and
   the radio libraries.
@@ -130,7 +133,7 @@ Pass these to CMake with `-D<option>=ON|OFF`.
 | Option                      | Default | Effect                                                                                                     |
 |-----------------------------|---------|------------------------------------------------------------------------------------------------------------|
 | `SWEEPPP_BUILD_GUI`         | `ON`    | The desktop GUI, `sweeppp`.                                                                                |
-| `SWEEPPP_BUILD_SERVER`      | `ON`    | `sweeppp-server`, currently a placeholder.                                                                 |
+| `SWEEPPP_WITH_WEB_UI`       | `ON`    | The browser UI for `serve --web`, built with pnpm and compiled into `sweeppp-cli`. Needs Node 20 and pnpm. |
 | `SWEEPPP_BUILD_PLUGINS`     | `ON`    | All bundled plugins. Off skips every plugin's system library.                                              |
 | `SWEEPPP_BUILD_TESTS`       | `ON`    | The test suites, including libsweepsfile's.                                                                |
 | `SWEEPPP_WITH_FFTW`         | `ON`    | The FFTW plugin. Needs `fftw3f`.                                                                           |
@@ -165,26 +168,27 @@ PocketFFT (and Accelerate on macOS) still provide the FFT, so the app works.
 Run `make` on its own for the full list. Variables: `PRESET` (default `dev`),
 `JOBS`, `ARGS`, `WITHOUT` and `BUILD_TYPE`.
 
-| Target                                                                             | Does                                                                 |
-|------------------------------------------------------------------------------------|----------------------------------------------------------------------|
-| `make build`                                                                       | Configure and build `PRESET`.                                        |
-| `make debug`, `make release`, `make headless`                                      | Build that preset.                                                   |
-| `make all`                                                                         | Build dev, debug and release.                                        |
-| `make run`                                                                         | Build and start the GUI.                                             |
-| `make cli ARGS="…"`                                                                | Build and run `sweeppp-cli` with those arguments.                    |
-| `make info`                                                                        | List the FFT engines, radios and plugins this build can see.         |
-| `make sweep ARGS="…"`                                                              | A 5-second sweep of the synthetic radio, with statistics.            |
-| `make throughput`                                                                  | A 30-second, 100 MS/s synthetic run that checks no samples are lost. |
-| `make test`                                                                        | Build and run the tests.                                             |
-| `make asan`, `make tsan`                                                           | Run the tests under the sanitizers.                                  |
-| `make sweepsfile`                                                                  | Build, test and install-check libsweepsfile on its own.              |
-| `make check`                                                                       | Everything CI runs: `test`, `sweepsfile`, `asan` and `tsan`.         |
-| `make modules`                                                                     | List the names `make without` accepts.                               |
-| `make without WITHOUT="…"`                                                         | Build with some parts turned off.                                    |
-| `make format`, `make format-check`, `make tidy`, `make check-headers`, `make lint` | See [Code quality](#code-quality).                                   |
-| `make compile-commands`                                                            | Point `compile_commands.json` at `PRESET`'s build, for clangd.       |
-| `make clean`                                                                       | Delete `build/`, downloaded dependencies included.                   |
-| `make rebuild`                                                                     | `clean`, then `build`.                                               |
+| Target                                                                             | Does                                                                  |
+|------------------------------------------------------------------------------------|-----------------------------------------------------------------------|
+| `make build`                                                                       | Configure and build `PRESET`.                                         |
+| `make debug`, `make release`, `make headless`                                      | Build that preset.                                                    |
+| `make all`                                                                         | Build dev, debug and release.                                         |
+| `make run`                                                                         | Build and start the GUI.                                              |
+| `make cli ARGS="…"`                                                                | Build and run `sweeppp-cli` with those arguments.                     |
+| `make info`                                                                        | List the FFT engines, radios and plugins this build can see.          |
+| `make sweep ARGS="…"`                                                              | A 5-second sweep of the synthetic radio, with statistics.             |
+| `make throughput`                                                                  | A 30-second, 100 MS/s synthetic run that checks no samples are lost.  |
+| `make serve ARGS="…"`                                                              | Serve the synthetic radio on loopback, for the desktop to connect to. |
+| `make test`                                                                        | Build and run the tests.                                              |
+| `make asan`, `make tsan`                                                           | Run the tests under the sanitizers.                                   |
+| `make sweepsfile`                                                                  | Build, test and install-check libsweepsfile on its own.               |
+| `make check`                                                                       | Everything CI runs: `test`, `sweepsfile`, `asan` and `tsan`.          |
+| `make modules`                                                                     | List the names `make without` accepts.                                |
+| `make without WITHOUT="…"`                                                         | Build with some parts turned off.                                     |
+| `make format`, `make format-check`, `make tidy`, `make check-headers`, `make lint` | See [Code quality](#code-quality).                                    |
+| `make compile-commands`                                                            | Point `compile_commands.json` at `PRESET`'s build, for clangd.        |
+| `make clean`                                                                       | Delete `build/`, downloaded dependencies included.                    |
+| `make rebuild`                                                                     | `clean`, then `build`.                                                |
 
 ### Building with parts turned off
 
@@ -214,6 +218,9 @@ The tests are split into several executables in `build/<preset>/dist/`:
 
 Each is a doctest binary, so it can also be run directly, with doctest's own
 filters such as `-tc="name*"`.
+
+The remote link's throughput report is skipped by default; run it with
+`sweeppp-tests -tc="throughput*" --no-skip`.
 
 `make check` runs everything CI runs, including both sanitizer builds and the
 standalone libsweepsfile checks.
@@ -282,7 +289,7 @@ Every build is Sweep++ Nightly except the `release` preset, which sets
 | Identifier   | `sweeppp`                                                       | `sweeppp-nightly`                                                                                       |
 | macOS bundle | `Sweep++.app`, `org.sweeppp.app`                                | `Sweep++ Nightly.app`, `org.sweeppp.app.nightly`                                                        |
 | Settings     | `~/.config/sweeppp`                                             | `~/.config/sweeppp-nightly`                                                                             |
-| `.deb`       | `sweeppp`: `sweeppp`, `sweeppp-cli`, `sweeppp-server`, `sweeps` | `sweeppp-nightly`: `sweeppp-nightly`, `sweeppp-nightly-cli`, `sweeppp-nightly-server`, `sweeps-nightly` |
+| `.deb`       | `sweeppp`: `sweeppp`, `sweeppp-cli`, `sweeps`                   | `sweeppp-nightly`: `sweeppp-nightly`, `sweeppp-nightly-cli`, `sweeps-nightly`                           |
 
 *Share settings with the Sweep++ release* in the nightly's settings switches
 it to the release's directory from the next start; the choice is the empty

@@ -6,6 +6,7 @@
 #include "sweeppp/core/Clock.hpp"
 #include "sweeppp/core/Log.hpp"
 #include "sweeppp/core/Version.hpp"
+#include "sweeppp/history/EventMapping.hpp"
 #include "sweeppp/history/SweepsLog.hpp"
 
 #include <utility>
@@ -73,7 +74,7 @@ void SessionRecorder::processFrame(const SpectrumFramePtr& frame) {
     // before the first frame taken under it.
     drainEvents();
 
-    if (!frame) {
+    if (!frame || (m_completePassesOnly.load() && !frame->passComplete)) {
         return;
     }
 
@@ -87,6 +88,7 @@ void SessionRecorder::processFrame(const SpectrumFramePtr& frame) {
     view.config = &frame->config;
 
     auto outcome = m_writer->writeFrame(view);
+    publishCounts();
     if (!outcome) {
         logError("session", "{}", outcome.error().describe());
         return;
@@ -118,12 +120,13 @@ Status SessionRecorder::close() {
     drainEvents();
 
     const Status written = adopt(m_writer->close());
+    publishCounts();
     m_closed = true;
 
     // Dropping is the right behaviour for a live display consumer, but for a
     // recording it is a real loss -- so it is stated plainly rather than left
     // for the operator to infer from a short file.
-    if (const std::uint64_t dropped = m_eventsDropped.load(std::memory_order_relaxed);
+    if (const std::uint64_t dropped = m_pending->dropped.load(std::memory_order_relaxed);
         dropped > 0) {
         logWarn("session", "{}: {} events were dropped; replay will be missing them",
                 m_writer->path().filename().string(), dropped);
@@ -139,17 +142,26 @@ Status SessionRecorder::close() {
     return written;
 }
 
+void SessionRecorder::Pending::push(const SessionEvent& event) {
+    constexpr std::size_t kMaxPending = 8192;
+
+    const std::lock_guard lock(mutex);
+    if (events.size() >= kMaxPending) {
+        dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    events.push_back(event);
+}
+
+void SessionRecorder::publishCounts() noexcept {
+    m_bytesWritten.store(m_writer->bytesWritten());
+    m_linesWritten.store(m_writer->linesWritten());
+}
+
 void SessionRecorder::recordEvent(const SessionEvent& event) {
     // Deliberately no writer access: it belongs to the recorder thread, and
     // this runs on whichever thread published the event.
-    constexpr std::size_t kMaxPending = 8192;
-
-    const std::lock_guard lock(m_eventMutex);
-    if (m_pendingEvents.size() >= kMaxPending) {
-        m_eventsDropped.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    m_pendingEvents.push_back(event);
+    m_pending->push(event);
 }
 
 void SessionRecorder::recordPluginData(std::string pluginId, std::string recordName,
@@ -159,25 +171,25 @@ void SessionRecorder::recordPluginData(std::string pluginId, std::string recordN
     // have stopped must not accumulate a plugin's output without limit.
     constexpr std::size_t kMaxPending = 4096;
 
-    const std::lock_guard lock(m_eventMutex);
-    if (m_pendingPluginData.size() >= kMaxPending) {
-        m_eventsDropped.fetch_add(1, std::memory_order_relaxed);
+    const std::lock_guard lock(m_pending->mutex);
+    if (m_pending->pluginData.size() >= kMaxPending) {
+        m_pending->dropped.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    m_pendingPluginData.push_back(PendingPluginData{.pluginId = std::move(pluginId),
-                                                    .recordName = std::move(recordName),
-                                                    .schemaVersion = schemaVersion,
-                                                    .monotonicNs = monotonicNs,
-                                                    .body = std::move(body)});
+    m_pending->pluginData.push_back(PendingPluginData{.pluginId = std::move(pluginId),
+                                                      .recordName = std::move(recordName),
+                                                      .schemaVersion = schemaVersion,
+                                                      .monotonicNs = monotonicNs,
+                                                      .body = std::move(body)});
 }
 
 void SessionRecorder::drainEvents() {
     std::vector<SessionEvent> events;
     std::vector<PendingPluginData> records;
     {
-        const std::lock_guard lock(m_eventMutex);
-        events.swap(m_pendingEvents);
-        records.swap(m_pendingPluginData);
+        const std::lock_guard lock(m_pending->mutex);
+        events.swap(m_pending->events);
+        records.swap(m_pending->pluginData);
     }
 
     for (const SessionEvent& event : events) {
@@ -202,57 +214,18 @@ void SessionRecorder::drainEvents() {
 void SessionRecorder::attachEvents(EventBus& bus) {
     m_eventBus = &bus;
 
-    // Each mapping is field for field with the bus event it comes from. Nothing
-    // is summarised or dropped on the way into the file: replay reconstructs
-    // these events from the recording alone, and a field left behind here is one
-    // no later reader can recover.
-    m_subscriptions.push_back(bus.subscribe<RetuneEvent>([this](const RetuneEvent& event) {
-        recordEvent(
-            SessionEvent::of(SessionEvent::Kind::Retune, event.monotonicNs, wallClockNs(),
-                             RetuneData{.centerHz = event.centerHz, .stepIndex = event.stepIndex}));
-    }));
-
-    m_subscriptions.push_back(
-        bus.subscribe<ParameterChangedEvent>([this](const ParameterChangedEvent& event) {
-            // Calibration-affecting changes matter especially: the noise floor
-            // shifts, and later analysis of these tiles must know it happened.
-            recordEvent(SessionEvent::of(
-                SessionEvent::Kind::ParameterChanged, event.monotonicNs, wallClockNs(),
-                ParameterChangedData{.key = event.key,
-                                     .value = event.value,
-                                     .gridAffecting = event.gridAffecting,
-                                     .calibrationAffecting = event.calibrationAffecting}));
-        }));
-
-    m_subscriptions.push_back(bus.subscribe<SweepPassEvent>([this](const SweepPassEvent& event) {
-        recordEvent(SessionEvent::of(SessionEvent::Kind::SweepPass, event.monotonicNs,
-                                     wallClockNs(),
-                                     SweepPassData{.passId = event.passId,
-                                                   .startHz = event.startHz,
-                                                   .stopHz = event.stopHz,
-                                                   .durationSeconds = event.durationSeconds}));
-    }));
-
-    m_subscriptions.push_back(
-        bus.subscribe<ThrottleChangedEvent>([this](const ThrottleChangedEvent& event) {
-            recordEvent(SessionEvent::of(
-                SessionEvent::Kind::ThrottleChanged, event.monotonicNs, wallClockNs(),
-                ThrottleChangedData{.reason = event.reason,
-                                    .processedFraction = event.processedFraction}));
-        }));
-
-    m_subscriptions.push_back(bus.subscribe<AnnotationEvent>([this](const AnnotationEvent& event) {
-        recordEvent(SessionEvent::of(
-            SessionEvent::Kind::Annotation, event.monotonicNs, wallClockNs(),
-            AnnotationData{.text = event.text, .startHz = event.startHz, .stopHz = event.stopHz}));
-    }));
-
-    m_subscriptions.push_back(bus.subscribe<MarkerEvent>([this](const MarkerEvent& event) {
-        recordEvent(SessionEvent::of(SessionEvent::Kind::Marker, event.monotonicNs, wallClockNs(),
-                                     MarkerData{.label = event.label,
-                                                .frequencyHz = event.frequencyHz,
-                                                .levelDbm = event.levelDbm}));
-    }));
+    // Field for field: replay reconstructs these events from the recording
+    // alone. Calibration-affecting parameter changes matter especially -- the
+    // noise floor shifts, and later analysis of these tiles must know it did.
+    const auto record = [pending = m_pending]<typename Event>(const Event& event) {
+        pending->push(toSessionEvent(event, wallClockNs()));
+    };
+    m_subscriptions.push_back(bus.subscribe<RetuneEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<ParameterChangedEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<SweepPassEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<ThrottleChangedEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<AnnotationEvent>(record));
+    m_subscriptions.push_back(bus.subscribe<MarkerEvent>(record));
 }
 
 } // namespace sweeppp::session

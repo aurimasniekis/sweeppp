@@ -189,6 +189,7 @@ Status SweepEngine::configure(const SweepPlan& plan, IFftBackend& backend, ISdrD
     m_gridWritten.assign(m_schedule.gridBinCount, 0);
     m_coveredBinCount = m_schedule.coveredBinCount();
     m_gridQuality.assign(m_schedule.gridBinCount, 0.0F);
+    m_dirtyAll = true;
     // Zero means "this step has not been tuned to yet", so nothing is
     // stitched for it until a retune records a time.
     m_stepValidFromNs.assign(m_schedule.steps.size(), 0);
@@ -248,6 +249,7 @@ Status SweepEngine::start(ISdrDevice& device, Pipeline& pipeline) {
         std::ranges::fill(m_grid, kUnmeasuredDbfs);
         std::ranges::fill(m_gridWritten, std::uint8_t{0});
         std::ranges::fill(m_gridQuality, 0.0F);
+        m_dirtyAll = true;
     }
 
     m_running.store(true, std::memory_order_release);
@@ -625,6 +627,17 @@ void SweepEngine::stitch(const SpectrumFrame& frame, const SweepStep& step) {
     for (std::size_t r = 0; r < step.rangeCount; ++r) {
         const SweepStep::BinRange& range = step.ranges[r];
 
+        const std::size_t rangeEnd = std::min(range.firstGlobalBin + range.binCount, m_grid.size());
+        if (range.firstGlobalBin < rangeEnd) {
+            if (m_dirtyFirst >= m_dirtyEnd) {
+                m_dirtyFirst = range.firstGlobalBin;
+                m_dirtyEnd = rangeEnd;
+            } else {
+                m_dirtyFirst = std::min(m_dirtyFirst, range.firstGlobalBin);
+                m_dirtyEnd = std::max(m_dirtyEnd, rangeEnd);
+            }
+        }
+
         for (std::size_t i = 0; i < range.binCount; ++i) {
             const std::size_t globalBin = range.firstGlobalBin + i;
             if (globalBin >= m_grid.size()) {
@@ -674,6 +687,15 @@ void SweepEngine::stitch(const SpectrumFrame& frame, const SweepStep& step) {
     }
 }
 
+void SweepEngine::takeDirtyRange(SpectrumFrame& frame) {
+    frame.dirtyKnown = !m_dirtyAll;
+    frame.dirtyFirstBin = m_dirtyFirst < m_dirtyEnd ? m_dirtyFirst : 0;
+    frame.dirtyEndBin = m_dirtyFirst < m_dirtyEnd ? m_dirtyEnd : 0;
+    m_dirtyAll = false;
+    m_dirtyFirst = 0;
+    m_dirtyEnd = 0;
+}
+
 void SweepEngine::emitPartial() {
     const std::uint64_t now = monotonicNs();
 
@@ -703,6 +725,7 @@ void SweepEngine::emitPartial() {
         const std::lock_guard lock(m_gridMutex);
         frame->binsDbfs = m_grid;
         frame->config = m_gridConfig;
+        takeDirtyRange(*frame);
     }
 
     frame->sequence = m_frameSequence.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -732,7 +755,7 @@ void SweepEngine::completePass() {
     if (passSeconds > 0.0) {
         const double rate = m_plan.totalSpanHz() / passSeconds;
         m_measuredRate.store(rate, std::memory_order_relaxed);
-        m_telemetry.render().sweepSpeedHzPerSec.store(rate, std::memory_order_relaxed);
+        m_telemetry.process().sweepSpeedHzPerSec.store(rate, std::memory_order_relaxed);
     }
 
     m_events.publish(SweepPassEvent{.monotonicNs = now,
@@ -749,6 +772,7 @@ void SweepEngine::completePass() {
         const std::lock_guard lock(m_gridMutex);
         frame->binsDbfs = m_grid;
         frame->config = m_gridConfig;
+        takeDirtyRange(*frame);
 
         // How much of the span this pass actually replaced, taken before the
         // flags are cleared. Because values persist, this is the only place

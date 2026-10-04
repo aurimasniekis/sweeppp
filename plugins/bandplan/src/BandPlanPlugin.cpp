@@ -33,9 +33,11 @@
 #include <algorithm>
 #include <array>
 #include <format>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -109,6 +111,11 @@ public:
     /// untick the tree offers, reached from the other end.
     [[nodiscard]] bool hide(const sweeppp_contribution_t& which);
 
+    /// Plans, then their services, then their allocations: the tree the
+    /// popover draws and a host without one draws for itself.
+    [[nodiscard]] const std::vector<plugin::TreeRow>& treeRows();
+    [[nodiscard]] bool toggleTreeRow(std::string_view key);
+
 #if defined(SWEEPPP_PLUGIN_HAS_UI)
     /// One button on the host's bar: the allocations on and off, and the
     /// service tree behind the right button.
@@ -147,6 +154,14 @@ private:
 
     static constexpr std::size_t kAll = static_cast<std::size_t>(-1);
 
+    /// What one tree row stands for: a plan, a service in it (band `kAll`), or
+    /// one allocation.
+    struct RowTarget {
+        std::size_t plan = 0;
+        std::size_t group = kAll;
+        std::size_t band = kAll;
+    };
+
     plugin::Host m_host;
     sweeppp::PluginSettings m_settings;
     std::vector<LoadedPlan> m_plans;
@@ -157,6 +172,10 @@ private:
     /// `plugins.disabled`: a category that appears in a later version of a
     /// plan file is on rather than hidden until someone finds the file.
     std::set<std::string, std::less<>> m_disabled;
+
+    /// The rows `treeRows` last built, and what each stands for.
+    std::vector<plugin::TreeRow> m_rows;
+    std::vector<RowTarget> m_rowTargets;
 
 #if defined(SWEEPPP_PLUGIN_HAS_UI)
     /// A keystroke asking for the popover, waiting for the frame that can act
@@ -549,25 +568,123 @@ bool BandPlanPlugin::hide(const sweeppp_contribution_t& which) {
     return false;
 }
 
+const std::vector<plugin::TreeRow>& BandPlanPlugin::treeRows() {
+    m_rows.clear();
+    m_rowTargets.clear();
+
+    for (std::size_t p = 0; p < m_plans.size(); ++p) {
+        const LoadedPlan& loaded = m_plans[p];
+        const BandPlan& plan = loaded.plan;
+        const std::string_view planName = plan.name();
+
+        // Tri-state over the allocations, not over a category's own flag: a
+        // service whose allocations have been unticked one at a time has to
+        // read as "some", or the tick describes a flag rather than what is on
+        // screen.
+        const std::size_t count = plan.groups().size();
+        std::vector<std::uint8_t> anyOn(count, 0);
+        std::vector<std::uint8_t> allOn(count, 1);
+        std::vector<std::size_t> counts(count, 0);
+        std::vector<Color> colors(count);
+        for (std::size_t i = 0; i < plan.bands().size(); ++i) {
+            const std::size_t group = plan.bands()[i].groupIndex;
+            if (counts[group]++ == 0) {
+                colors[group] = plan.bands()[i].color;
+            }
+            if (loaded.bandOn[i] != 0) {
+                anyOn[group] = 1;
+            } else {
+                allOn[group] = 0;
+            }
+        }
+
+        bool planAny = false;
+        bool planAll = count > 0;
+        for (std::size_t g = 0; g < count; ++g) {
+            planAny = planAny || anyOn[g] != 0;
+            planAll = planAll && allOn[g] != 0;
+        }
+
+        // The plan itself is a row with a tick of its own, so switching a whole
+        // table off is one click -- and, because it only sets the plan's own
+        // flag, switching it back on restores the selection inside rather than
+        // everything.
+        m_rows.push_back(plugin::TreeRow{.depth = 0,
+                                         .key = std::string(planName),
+                                         .name = plan.name(),
+                                         .detail = std::format("{}", plan.bands().size()),
+                                         .description = plan.description(),
+                                         .anyOn = planAny,
+                                         .allOn = planAll,
+                                         .ownOn = !m_disabled.contains(planName)});
+        m_rowTargets.push_back(RowTarget{.plan = p});
+
+        for (std::size_t g = 0; g < count; ++g) {
+            const std::string key = qualify(planName, plan.groups()[g]);
+            m_rows.push_back(plugin::TreeRow{.depth = 1,
+                                             .key = key,
+                                             .name = plan.groups()[g],
+                                             .detail = std::format("{}", counts[g]),
+                                             .color = {colors[g].r, colors[g].g, colors[g].b, 1.0F},
+                                             .anyOn = anyOn[g] != 0,
+                                             .allOn = allOn[g] != 0,
+                                             .ownOn = !m_disabled.contains(key)});
+            m_rowTargets.push_back(RowTarget{.plan = p, .group = g});
+
+            for (std::size_t i = 0; i < plan.bands().size(); ++i) {
+                const Band& band = plan.bands()[i];
+                if (band.groupIndex != g) {
+                    continue;
+                }
+                // No third state on a leaf: there is nothing under it to
+                // disagree.
+                const std::string bandKey =
+                    qualify(planName, BandPlan::bandKey(band.group, band.name));
+                m_rows.push_back(plugin::TreeRow{
+                    .depth = 2,
+                    .key = bandKey,
+                    .name = band.name,
+                    .detail = std::format("{} – {}", toml_util::formatFrequencyShort(band.startHz),
+                                          toml_util::formatFrequencyShort(band.stopHz)),
+                    .description = band.description,
+                    .anyOn = loaded.bandOn[i] != 0,
+                    .allOn = loaded.bandOn[i] != 0,
+                    .ownOn = !m_disabled.contains(bandKey)});
+                m_rowTargets.push_back(RowTarget{.plan = p, .group = g, .band = i});
+            }
+        }
+    }
+    return m_rows;
+}
+
+bool BandPlanPlugin::toggleTreeRow(std::string_view key) {
+    (void)treeRows();
+    const auto found = std::ranges::find(m_rows, key, &plugin::TreeRow::key);
+    if (found == m_rows.end()) {
+        return false;
+    }
+    const auto index = static_cast<std::size_t>(found - m_rows.begin());
+    const RowTarget target = m_rowTargets[index];
+
+    switch (plugin::tickAction(*found)) {
+    case plugin::TickAction::Hide:
+        setKey(std::string(key), false);
+        break;
+    case plugin::TickAction::Unhide:
+        setKey(std::string(key), true);
+        break;
+    case plugin::TickAction::ShowAll:
+        // Its own tick was already on and it still is not showing, so what is
+        // hiding it is above it -- and that is what this clears.
+        enablePath(m_plans[target.plan], target.group, target.band);
+        break;
+    }
+    return true;
+}
+
 // -------------------------------------------------------------------- ui
 
 #if defined(SWEEPPP_PLUGIN_HAS_UI)
-
-namespace {
-
-/// A small filled square in the service's own colour, so a row in the tree and
-/// a span on the plot read as the same thing without either naming the other.
-void drawSwatch(const Color& color) {
-    const ImVec2 at = ImGui::GetCursorScreenPos();
-    const float size = ImGui::GetTextLineHeight();
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        ImVec2(at.x, at.y + (size * 0.2F)), ImVec2(at.x + (size * 0.5F), at.y + (size * 0.8F)),
-        ImGui::GetColorU32(ImVec4(color.r, color.g, color.b, 1.0F)), 2.0F);
-    ImGui::Dummy(ImVec2((size * 0.5F) + 4.0F, size));
-    ImGui::SameLine();
-}
-
-} // namespace
 
 void BandPlanPlugin::drawToolbar() {
     namespace chrome = plugin::chrome;
@@ -632,151 +749,8 @@ void BandPlanPlugin::drawTree() {
     // than the screen and put its bottom out of reach.
     const float height = ImGui::GetTextLineHeightWithSpacing() * 14.0F;
     if (ImGui::BeginChild("##services", ImVec2(0.0F, height), ImGuiChildFlags_Borders)) {
-        for (const LoadedPlan& loaded : m_plans) {
-            const BandPlan& plan = loaded.plan;
-            const std::string_view planName = plan.name();
-
-            // Per plan, so two plans that both call a service "Mobile" cannot
-            // share an ImGui id and fight over which was clicked.
-            ImGui::PushID(plan.name().c_str());
-
-            // Tri-state over the allocations, not over a category's own flag:
-            // a service whose allocations have been unticked one at a time has
-            // to read as "some", or the tick describes a flag rather than what
-            // is on screen.
-            const std::size_t count = plan.groups().size();
-            std::vector<std::uint8_t> anyOn(count, 0);
-            std::vector<std::uint8_t> allOn(count, 1);
-            std::vector<std::size_t> counts(count, 0);
-            std::vector<Color> colors(count);
-
-            for (std::size_t i = 0; i < plan.bands().size(); ++i) {
-                const std::size_t group = plan.bands()[i].groupIndex;
-                if (counts[group]++ == 0) {
-                    colors[group] = plan.bands()[i].color;
-                }
-                if (loaded.bandOn[i] != 0) {
-                    anyOn[group] = 1;
-                } else {
-                    allOn[group] = 0;
-                }
-            }
-
-            bool planAny = false;
-            bool planAll = count > 0;
-            for (std::size_t g = 0; g < count; ++g) {
-                planAny = planAny || anyOn[g] != 0;
-                planAll = planAll && allOn[g] != 0;
-            }
-
-            // The plan itself is a row with a tick of its own, so switching a
-            // whole table off is one click -- and, because it only sets the
-            // plan's own flag, switching it back on restores the selection
-            // inside rather than everything.
-            if (const auto action =
-                    plugin::drawTick(planAny, planAll, !m_disabled.contains(planName))) {
-                switch (*action) {
-                case plugin::TickAction::Hide:
-                    setKey(std::string(planName), false);
-                    break;
-                case plugin::TickAction::Unhide:
-                    setKey(std::string(planName), true);
-                    break;
-                case plugin::TickAction::ShowAll:
-                    enablePath(loaded, kAll, kAll);
-                    break;
-                }
-            }
-            ImGui::SameLine();
-
-            const bool planOpen = ImGui::TreeNodeEx(
-                "##plan", ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth, "%s",
-                plan.name().c_str());
-            if (!plan.description().empty() && ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", plan.description().c_str());
-            }
-
-            if (planOpen) {
-                for (std::size_t g = 0; g < count; ++g) {
-                    const std::string& group = plan.groups()[g];
-                    ImGui::PushID(static_cast<int>(g));
-
-                    if (const auto action =
-                            plugin::drawTick(anyOn[g] != 0, allOn[g] != 0,
-                                             !m_disabled.contains(qualify(planName, group)))) {
-                        switch (*action) {
-                        case plugin::TickAction::Hide:
-                            setKey(qualify(planName, group), false);
-                            break;
-                        case plugin::TickAction::Unhide:
-                            setKey(qualify(planName, group), true);
-                            break;
-                        case plugin::TickAction::ShowAll:
-                            enablePath(loaded, g, kAll);
-                            break;
-                        }
-                    }
-                    ImGui::SameLine();
-                    drawSwatch(colors[g]);
-
-                    const bool open = ImGui::TreeNodeEx("##service",
-                                                        ImGuiTreeNodeFlags_OpenOnArrow |
-                                                            ImGuiTreeNodeFlags_SpanAvailWidth,
-                                                        "%s", group.c_str());
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("%zu", counts[g]);
-
-                    if (open) {
-                        for (std::size_t i = 0; i < plan.bands().size(); ++i) {
-                            const Band& band = plan.bands()[i];
-                            if (band.groupIndex != g) {
-                                continue;
-                            }
-                            ImGui::PushID(static_cast<int>(i) + 100000);
-
-                            const std::string key =
-                                qualify(planName, BandPlan::bandKey(band.group, band.name));
-                            // No third state on a leaf: there is nothing under
-                            // it to disagree.
-                            if (const auto action =
-                                    plugin::drawTick(loaded.bandOn[i] != 0, loaded.bandOn[i] != 0,
-                                                     !m_disabled.contains(key))) {
-                                switch (*action) {
-                                case plugin::TickAction::Hide:
-                                    setKey(key, false);
-                                    break;
-                                case plugin::TickAction::Unhide:
-                                    setKey(key, true);
-                                    break;
-                                case plugin::TickAction::ShowAll:
-                                    // Its own tick was already on and it still
-                                    // is not showing, so what is hiding it is
-                                    // above it -- and that is what this clears.
-                                    enablePath(loaded, g, i);
-                                    break;
-                                }
-                            }
-                            ImGui::SameLine();
-                            ImGui::TextUnformatted(band.name.c_str());
-                            ImGui::SameLine();
-                            ImGui::TextDisabled(
-                                "%s – %s", toml_util::formatFrequencyShort(band.startHz).c_str(),
-                                toml_util::formatFrequencyShort(band.stopHz).c_str());
-                            if (!band.description.empty() && ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("%s", band.description.c_str());
-                            }
-
-                            ImGui::PopID();
-                        }
-                        ImGui::TreePop();
-                    }
-
-                    ImGui::PopID();
-                }
-                ImGui::TreePop();
-            }
-
-            ImGui::PopID();
+        if (const std::optional<std::string> clicked = plugin::drawTreeRows(treeRows())) {
+            (void)toggleTreeRow(*clicked);
         }
     }
     ImGui::EndChild();

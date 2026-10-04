@@ -230,7 +230,26 @@ void MainWindow::followPlan() {
 
 // ---- arrangement ---------------------------------------------------------
 
+void MainWindow::captureWaterfallSeed() {
+    const int focusedId = m_state.view().layout.focusedId;
+    const ViewPanel* best = nullptr;
+    for (const ViewPanel& panel : m_panels) {
+        if (!panel.waterfall || panel.waterfall->linesPushed() == 0) {
+            continue;
+        }
+        if (panel.id == focusedId) {
+            best = &panel;
+            break;
+        }
+        if (best == nullptr || panel.waterfall->linesPushed() > best->waterfall->linesPushed()) {
+            best = &panel;
+        }
+    }
+    m_waterfallSeed = best != nullptr ? best->waterfall->history() : WaterfallHistory{};
+}
+
 void MainWindow::setArrangement(PanelArrangement arrangement) {
+    captureWaterfallSeed();
     PanelLayout& layout = m_state.view().layout;
     const std::size_t wanted = slotCount(arrangement);
 
@@ -270,6 +289,7 @@ void MainWindow::setPanelMode(PanelMode mode) {
     if (layout.mode == mode) {
         return;
     }
+    captureWaterfallSeed();
     layout.mode = mode;
 
     if (mode == PanelMode::Mirror) {
@@ -897,8 +917,8 @@ void MainWindow::drawOverviewStrip(float height) {
     // The radio's whole reach when there is one; otherwise the plan with a
     // margin either side, so its outer segments are not flush with the edges.
     FrequencySpan full;
-    if (const ISdrDevice* device = m_state.device()) {
-        full = {std::max(0.0, device->info().minFrequencyHz), device->info().maxFrequencyHz};
+    if (const DeviceDescriptor* device = m_state.device()) {
+        full = {std::max(0.0, device->info.minFrequencyHz), device->info.maxFrequencyHz};
     }
     if (!full.valid()) {
         const SweepPlan& plan = m_state.sweepPlan();

@@ -28,7 +28,9 @@ set(SWEEPSFILE_TEST_SOURCES
     test_golden.cpp
     test_mappedfile.cpp
     test_metadata.cpp
+    test_records.cpp
     test_session.cpp
+    test_stream.cpp
     test_text.cpp
     test_version.cpp
 )
@@ -157,6 +159,7 @@ if(SWEEPSFILE_STANDALONE AND SWEEPSFILE_INSTALL)
 
     # A fixture rather than test ordering by hope: both consumers need the
     # install to have happened, and ctest is free to run tests in parallel.
+    # Extra arguments are passed to RunConsumer.cmake as further -D definitions.
     function(sweepsfile_add_consumer name directory executable)
         add_test(NAME ${name}
             COMMAND "${CMAKE_COMMAND}"
@@ -166,6 +169,7 @@ if(SWEEPSFILE_STANDALONE AND SWEEPSFILE_INSTALL)
                     "-DEXECUTABLE=${executable}"
                     "-DGENERATOR=${CMAKE_GENERATOR}"
                     "-DBUILD_TYPE=$<CONFIG>"
+                    ${ARGN}
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/RunConsumer.cmake")
         set_tests_properties(${name} PROPERTIES FIXTURES_REQUIRED installed)
     endfunction()
@@ -176,5 +180,7 @@ if(SWEEPSFILE_STANDALONE AND SWEEPSFILE_INSTALL)
     # compiler enabled can still link a library made entirely of C++ -- the two
     # ways the C ABI can be published and be useless.
     sweepsfile_add_consumer(consumer-cxx consumer sweeps-consumer)
-    sweepsfile_add_consumer(consumer-c consumer-c sweeps-consumer-c)
+    sweepsfile_add_consumer(consumer-c consumer-c sweeps-consumer-c
+        "-DSTREAM_EXECUTABLE=sweeps-stream-c"
+        "-DSTREAM_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/data/v1-golden.sweepstream")
 endif()

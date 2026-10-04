@@ -56,6 +56,9 @@ From left to right:
   selected marker, or at the centre of the view when no marker is selected.
 - **RX port.** Only on radios with more than one input. Shows which connector
   and antenna are in use, and whether antenna routing is on.
+- **Via.** Only when connected to a server: its name, the round trip and the
+  data rate. Amber when the network can't keep up and passes are being merged;
+  lower **Network resolution** then.
 - **Save now.** Saves the recording so far to a `.sweeps` file. See
   [Recording](#recording).
 - **Snapshot.** Copies a picture of the spectrum and waterfall. See
@@ -79,6 +82,11 @@ where the time goes.
 
 ### Performance window
 
+- **Link:** only when connected to a server: round trip, data rate, how many
+  frames the server merged because the network was slower, and how long it
+  takes to encode each. The sections below it are measured on the server.
+- **Server:** the server machine's CPU, memory, load, temperature (Linux),
+  free space where recordings go, and uptime.
 - **Input:** how full the USB link and buffers are, sample rate, dropped
   samples, overruns and gaps. **Reset** clears the counters.
 - **Device:** temperatures, power and similar readings, for radios that
@@ -112,6 +120,73 @@ With a radio open, the panel shows:
 Sweep++ reopens the last radio you used the next time it starts.
 
 [Supported devices](devices.md) describes each radio's settings.
+
+### Servers
+
+A radio on another computer is used the same way, through
+[`sweeppp-cli serve`](cli.md#serve) running there.
+
+- Servers answering on the network are listed under **On this network**.
+  Click one, enter its token, and click **Connect**. This works over a direct
+  Ethernet cable as well as a LAN.
+- Otherwise, click **Add server...** and enter a name, the address (`host` or
+  `host:port`) and the token.
+- Click a saved server to connect. Right-click it to edit or forget it.
+- **Disconnect** returns to the radios on this computer.
+
+While connected:
+
+- the radio is named "*radio* on *server*";
+- antennas, assignments and corrections are stored on the server;
+- **Bench** measures the server, where the transforms run;
+- **Network resolution** in the Analysis panel sets how many bins cross the
+  network. Fewer keep a slow link live; each bin shown is the strongest of
+  those it covers. The choice is kept per server;
+- **Recordings on** *server*, in the device panel, records on the server at
+  full or reduced resolution, independent of the network. Click the download
+  button to copy a recording to this computer, then open it in the History
+  viewer;
+- a profile names the server by address; its token stays in `servers.toml`.
+
+If the connection drops, Sweep++ returns to the radios on this computer and
+keeps trying the server, at longer intervals up to every 30 seconds. When it
+is back, the plan and settings are put back, the passes the server kept
+meanwhile fill the waterfall, and the recording carries on in the same file
+without a gap. **Stop trying**, in the device panel, gives up.
+
+### Watching and control
+
+A server started with `--shared` takes several desktops and browsers at once.
+One controls the radio; the others watch the same spectrum.
+
+- Watching, a banner reads "Watching — *name* has control", the Via chip says
+  **watching**, and the controls that change the radio are greyed out. Zoom,
+  markers, panels, snapshots, local recording and the History viewer still
+  work.
+- **Take control** in the banner takes it from whoever has it, at once; they
+  are told and go on watching.
+- The device panel lists who is connected. "In use, can watch" under **On
+  this network** marks a shared server someone controls.
+- If the one in control drops, control is free and the radio keeps running
+  for the others.
+
+### In a browser
+
+`sweeppp-cli serve --web 8080` serves the same instrument to a browser,
+phones included: open `http://<server>:8080` and log in with the token.
+
+- The browser has the live spectrum and waterfall, panels, markers, range,
+  analysis and corrections, device settings, antennas, recordings and
+  downloads, benchmark and performance, themes, band and channel labels,
+  snapshots, and a History view of the server's recordings.
+- Watching and **Take control** work as on the desktop, between browsers and
+  desktops alike.
+- **Bands** and **Channels** on the bar tick the server's allocations and
+  channel lists; **Menu → Data contributors** orders them.
+- Plugin windows (detections, plugin panels) and plugin management are
+  desktop-only.
+- View settings, profiles, range presets and marker presets are kept in the
+  browser.
 
 ## Setting the range
 
@@ -667,6 +742,7 @@ setup, start Sweep++ with `--config-dir <folder>` (see
 | `themes/`, `colormaps/`                     | Your themes and colour maps.                                                    |
 | `antennas/custom.toml`                      | Your antennas.                                                                  |
 | `antennas/assignments.toml`                 | Which antenna is on which input.                                                |
+| `servers.toml`                              | Saved servers and their tokens. Readable only by you.                           |
 | `bandplans/`, `channels/`                   | Your own band plans and channel lists. See [Plugins](plugins.md#your-own-data). |
 | `plugins.toml`                              | Which plugins are turned off, and the Data contributors order.                  |
 | `plugins/`                                  | Plugin settings, and plugins you install yourself.                              |

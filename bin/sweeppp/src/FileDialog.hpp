@@ -7,7 +7,13 @@
 #include <optional>
 #include <string>
 
+struct GLFWwindow;
+
 namespace sweeppp::ui {
+
+/// The window every dialog belongs to. Without it a dialog opens over
+/// whichever window is key, which with torn-off panels can be one of theirs.
+void setFileDialogParent(GLFWwindow* window) noexcept;
 
 /// The operating system's own save dialog.
 ///

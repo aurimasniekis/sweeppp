@@ -20,6 +20,7 @@
 #include "sweeppp/sdr/ISdrDevice.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <set>
 
@@ -422,6 +423,9 @@ struct PluginManager::Impl {
     // thunks hold references while it does.
     std::vector<std::unique_ptr<Record>> records;
     PluginEnablement enablement;
+
+    /// Bumped by every change to what the contributors hand out.
+    std::atomic<std::uint64_t> contributionsGeneration{0};
 
     std::vector<EventSubscription> eventSubscriptions;
     std::uint64_t nextEventId = 1;
@@ -1440,6 +1444,7 @@ void PluginManager::Impl::activateEnabled() {
 }
 
 void PluginManager::Impl::activate(Record& record) {
+    ++contributionsGeneration;
     if (record.desc == nullptr || !SWEEPPP_ABI_HAS(record.desc, activate) ||
         record.desc->activate == nullptr) {
         // A plugin with no activate is legal and does nothing but exist. It is
@@ -1518,6 +1523,7 @@ Status PluginManager::Impl::deactivate(Record& record) {
     if (!record.info.active) {
         return ok();
     }
+    ++contributionsGeneration;
 
     if (record.info.requiresRestart) {
         return fail(ErrorCode::Unavailable, "{} declares that it cannot be withdrawn live",
@@ -1702,6 +1708,7 @@ std::vector<std::pair<std::string, SdrValue>> PluginManager::collectProfileValue
 
 void PluginManager::applyProfileValues(std::span<const std::pair<std::string, SdrValue>> values) {
     const std::lock_guard lock(m_mutex);
+    ++m_impl->contributionsGeneration;
 
     for (const std::unique_ptr<Impl::Record>& record : m_impl->records) {
         if (!record->info.active || record->desc == nullptr) {
@@ -2065,6 +2072,9 @@ bool PluginManager::hideContribution(const Contribution& entry) {
             hidden = vtable->hide(facet.instance, &which) == SWEEPPP_PLUGIN_OK || hidden;
         });
     }
+    if (hidden) {
+        ++m_impl->contributionsGeneration;
+    }
     return hidden;
 }
 
@@ -2110,6 +2120,7 @@ Status PluginManager::setContributorOrder(std::span<const std::string> ids) {
     }
 
     m_impl->enablement.setContributorOrder(std::move(merged));
+    ++m_impl->contributionsGeneration;
     return m_impl->enablement.save();
 }
 
@@ -2121,6 +2132,7 @@ bool PluginManager::contributorShown(std::string_view id) const {
 Status PluginManager::setContributorShown(std::string_view id, bool shown) {
     const std::lock_guard lock(m_mutex);
     m_impl->enablement.setContributorShown(id, shown);
+    ++m_impl->contributionsGeneration;
     return m_impl->enablement.save();
 }
 
@@ -2196,10 +2208,79 @@ Status PluginManager::selectDataset(std::string_view id, std::uint32_t index) {
             return fail(ErrorCode::InvalidArgument, "'{}' refused dataset {}: {}", id, index,
                         statusName(status));
         }
+        ++m_impl->contributionsGeneration;
         return ok();
     }
 
     return fail(ErrorCode::NotFound, "no contributor with id '{}'", id);
+}
+
+std::vector<ContributorTreeRow> PluginManager::contributorTree(std::string_view id) const {
+    const std::lock_guard lock(m_mutex);
+
+    std::vector<ContributorTreeRow> rows;
+    for (const auto& [record, facet] : m_impl->rankedContributors()) {
+        if (record->info.id != id) {
+            continue;
+        }
+        const auto* vtable = static_cast<const sweeppp_contributor_vtable_t*>(facet->vtable);
+        if (!SWEEPPP_ABI_HAS(vtable, tree_toggle) || vtable->tree_rows == nullptr) {
+            continue;
+        }
+
+        m_impl->guarded(*record, *facet, [&] {
+            // Sized with one call and filled with a second; the strings are
+            // the plugin's until its next call, so they are copied here.
+            const std::uint32_t count =
+                std::min(vtable->tree_rows(facet->instance, nullptr, 0), kMaxContributions);
+            std::vector<sweeppp_tree_row_t> raw(count);
+            const std::uint32_t filled =
+                std::min(vtable->tree_rows(facet->instance, raw.data(), count), count);
+            rows.reserve(filled);
+            for (std::uint32_t i = 0; i < filled; ++i) {
+                const sweeppp_tree_row_t& row = raw[i];
+                rows.push_back(ContributorTreeRow{
+                    .depth = row.depth,
+                    .key = owned(row.key),
+                    .name = owned(row.name),
+                    .detail = owned(row.detail),
+                    .description = owned(row.description),
+                    .color = {row.color[0], row.color[1], row.color[2], row.color[3]},
+                    .anyOn = row.any_on != 0,
+                    .allOn = row.all_on != 0});
+            }
+        });
+        break;
+    }
+    return rows;
+}
+
+Status PluginManager::toggleContributorRow(std::string_view id, std::string_view key) {
+    const std::lock_guard lock(m_mutex);
+
+    for (const auto& [record, facet] : m_impl->rankedContributors()) {
+        if (record->info.id != id) {
+            continue;
+        }
+        const auto* vtable = static_cast<const sweeppp_contributor_vtable_t*>(facet->vtable);
+        if (!SWEEPPP_ABI_HAS(vtable, tree_toggle) || vtable->tree_toggle == nullptr) {
+            continue;
+        }
+
+        sweeppp_plugin_status_t status = SWEEPPP_PLUGIN_ERR_UNAVAILABLE;
+        m_impl->guarded(*record, *facet,
+                        [&] { status = vtable->tree_toggle(facet->instance, borrow(key)); });
+        if (status != SWEEPPP_PLUGIN_OK) {
+            return fail(ErrorCode::NotFound, "'{}' has no row '{}'", id, key);
+        }
+        ++m_impl->contributionsGeneration;
+        return ok();
+    }
+    return fail(ErrorCode::NotFound, "'{}' has no tree to tick", id);
+}
+
+std::uint64_t PluginManager::contributionsGeneration() const noexcept {
+    return m_impl->contributionsGeneration.load();
 }
 
 std::vector<std::string> PluginManager::providedDatasets() const {

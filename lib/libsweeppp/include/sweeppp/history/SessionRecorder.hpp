@@ -70,13 +70,19 @@ public:
     /// automatically.
     void attachEvents(EventBus& bus);
 
+    /// Keeps only frames that complete a sweep pass, for a recording at a
+    /// resolution where a sweep's partial frames would be most of the file.
+    /// Off while tuned, where every frame is a line. Callable from any thread.
+    void setCompletePassesOnly(bool enabled) noexcept { m_completePassesOnly.store(enabled); }
+
     /// Finishes the file. Idempotent, and called by the destructor -- but a
     /// session closed by power loss is still readable, by design.
     [[nodiscard]] Status close();
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return m_writer->path(); }
-    [[nodiscard]] std::uint64_t bytesWritten() const noexcept { return m_writer->bytesWritten(); }
-    [[nodiscard]] std::uint64_t linesWritten() const noexcept { return m_writer->linesWritten(); }
+    /// As of the recorder thread's last write. Callable from any thread.
+    [[nodiscard]] std::uint64_t bytesWritten() const noexcept { return m_bytesWritten.load(); }
+    [[nodiscard]] std::uint64_t linesWritten() const noexcept { return m_linesWritten.load(); }
     [[nodiscard]] std::uint32_t segmentCount() const noexcept { return m_writer->segmentCount(); }
 
     [[nodiscard]] bool retentionReached() const noexcept { return m_writer->retentionReached(); }
@@ -86,7 +92,7 @@ public:
 
     /// Events dropped because the pending queue was full.
     [[nodiscard]] std::uint64_t droppedEvents() const noexcept {
-        return m_eventsDropped.load(std::memory_order_relaxed);
+        return m_pending->dropped.load(std::memory_order_relaxed);
     }
 
 protected:
@@ -114,13 +120,30 @@ private:
     std::vector<EventBus::SubscriptionId> m_subscriptions;
     EventBus* m_eventBus = nullptr;
 
-    /// Events waiting to be serialised by the recorder thread. Bounded, because
-    /// a session whose frames have stopped must not accumulate retunes without
+    /// What waits to be serialised by the recorder thread. Bounded, because a
+    /// session whose frames have stopped must not accumulate retunes without
     /// limit; overflow is counted rather than allowed to grow.
-    mutable std::mutex m_eventMutex;
-    std::vector<SessionEvent> m_pendingEvents;
-    std::vector<PendingPluginData> m_pendingPluginData;
-    std::atomic<std::uint64_t> m_eventsDropped{0};
+    ///
+    /// Shared with the bus handlers rather than reached through `this`: a bus
+    /// calls a handler outside its lock, so one already under way when the
+    /// recorder unsubscribes still runs -- into this, which it keeps alive,
+    /// and not into a recorder being destroyed.
+    struct Pending {
+        std::mutex mutex;
+        std::vector<SessionEvent> events;
+        std::vector<PendingPluginData> pluginData;
+        std::atomic<std::uint64_t> dropped{0};
+
+        void push(const SessionEvent& event);
+    };
+    std::shared_ptr<Pending> m_pending = std::make_shared<Pending>();
+    std::atomic<bool> m_completePassesOnly{false};
+
+    /// The writer's counts, published by whichever thread wrote last: the
+    /// writer's own are plain fields that thread alone may read.
+    void publishCounts() noexcept;
+    std::atomic<std::uint64_t> m_bytesWritten{0};
+    std::atomic<std::uint64_t> m_linesWritten{0};
 };
 
 } // namespace sweeppp::session

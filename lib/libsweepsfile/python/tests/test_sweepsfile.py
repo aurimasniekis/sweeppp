@@ -540,5 +540,83 @@ class TestWriter(unittest.TestCase):
                 self.assertEqual(session.summary.total_lines, 0)
 
 
+GOLDEN_STREAM = os.path.join(DATA_DIR, "v1-golden.sweepstream")
+
+
+class TestStream(unittest.TestCase):
+    """The golden stream, as ``test_stream.cpp`` writes it and ``test_capi.c``
+    reads it."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(GOLDEN_STREAM, "rb") as handle:
+            cls.golden = handle.read()
+
+    def drain(self, data, chunk=7, max_payload_bytes=0):
+        types = []
+        lines = {}
+        with sweepsfile.StreamReader(max_payload_bytes) as reader, sweepsfile.StreamMirror() as mirror:
+            for offset in range(0, len(data), chunk):
+                reader.feed(data[offset : offset + chunk])
+                for record in reader.records():
+                    types.append(record.type)
+                    mirror.apply(record)
+                    if record.type == sweepsfile.RecordType.SEGMENT_CLOSE:
+                        lines["first"] = (mirror.line(), mirror.segment())
+            lines["last"] = (mirror.line(), mirror.segment())
+            return types, lines, reader.buffered
+
+    def test_golden(self):
+        types, lines, buffered = self.drain(self.golden)
+        self.assertEqual(len(types), 12)
+        self.assertEqual(types.count(sweepsfile.RecordType.TILE), 4)
+        self.assertEqual(types.count(sweepsfile.RecordType.PLUGIN_DATA), 3)
+        self.assertIn(0x42, types)
+        self.assertEqual(types[-1], sweepsfile.RecordType.END_OF_STREAM)
+        self.assertEqual(buffered, 0)
+
+        line, segment = lines["first"]
+        self.assertEqual((line.segment_id, line.bin_count, line.line), (7, 1500, 1))
+        self.assertEqual((line.start_hz, line.bin_width_hz), (100e6, 1000.0))
+        self.assertEqual(line.levels[10], sweepsfile.UNMEASURED_DB)
+        self.assertAlmostEqual(line.levels[700], -20.0, delta=0.25)
+        self.assertAlmostEqual(line.levels[1200], -15.0, delta=0.25)
+        self.assertEqual(segment.fft_size, 2048)
+        self.assertEqual(segment.window, WindowType.HANN)
+        self.assertEqual(segment.reason, "stream start")
+        self.assertEqual(segment.device_id, "golden-stream")
+        self.assertEqual(segment.gains, {"lna": 24.0})
+
+        line, segment = lines["last"]
+        self.assertEqual((line.segment_id, line.bin_count), (8, 300))
+        self.assertEqual(segment.start_hz, 433.05e6)
+        self.assertAlmostEqual(line.levels[299], -81.0, delta=0.25)
+
+    def test_no_line_before_a_segment(self):
+        with sweepsfile.StreamMirror() as mirror:
+            self.assertIsNone(mirror.line())
+            self.assertIsNone(mirror.segment())
+
+    def test_truncated(self):
+        types, _lines, buffered = self.drain(self.golden[: len(self.golden) // 2])
+        self.assertTrue(0 < len(types) < 12)
+        self.assertGreater(buffered, 0)
+
+    def test_bit_flip_breaks_the_stream(self):
+        damaged = bytearray(self.golden)
+        first_payload = int.from_bytes(damaged[20:24], "little")
+        damaged[16 + 12 + first_payload + 12 + 100] ^= 0x01
+        with self.assertRaises(sweepsfile.CorruptError):
+            self.drain(bytes(damaged))
+
+    def test_not_a_stream(self):
+        with sweepsfile.StreamReader() as reader:
+            with self.assertRaises(sweepsfile.SweepsError) as caught:
+                reader.feed(b"GET / HTTP/1.1\r\n")
+            self.assertEqual(caught.exception.status, sweepsfile.Status.PROTOCOL)
+            with self.assertRaises(sweepsfile.SweepsError):
+                reader.feed(self.golden[16:])
+
+
 if __name__ == "__main__":
     unittest.main()

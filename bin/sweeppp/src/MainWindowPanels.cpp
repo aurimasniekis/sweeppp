@@ -329,6 +329,17 @@ void fieldCaption(const std::string& text, float labelWidth = kFieldLabelWidth) 
 /// Built by joining only the parts that were filled in: a library entry with
 /// no category is common on a hand-typed one, and " ·  · discone" reads as a
 /// rendering fault rather than as an omission.
+/// The operator's own entries, which is what an edited library is saved as.
+std::vector<Antenna> userAntennas(const AntennaLibrary& library) {
+    std::vector<Antenna> entries;
+    for (const Antenna& antenna : library.entries()) {
+        if (!antenna.builtin) {
+            entries.push_back(antenna);
+        }
+    }
+    return entries;
+}
+
 std::string describeAntenna(const Antenna& antenna) {
     std::string text;
     const auto append = [&text](std::string_view part) {
@@ -780,7 +791,7 @@ bool MainWindow::drawPresetList(SweepPlan& plan) {
         ImGui::SetTooltip("Save the ranges above under this name");
     }
 
-    const ISdrDevice* device = m_state.device();
+    const DeviceDescriptor* device = m_state.device();
 
     // Square buttons the height of the row, so the three of them and the row
     // between them share one baseline. SmallButton is shorter than a frame and
@@ -797,8 +808,8 @@ bool MainWindow::drawPresetList(SweepPlan& plan) {
         // silently disappear when a narrower device is plugged in -- greying
         // it out says "this exists, just not for this radio".
         const bool reachable =
-            device == nullptr || (preset.lowestHz() >= device->info().minFrequencyHz &&
-                                  preset.highestHz() <= device->info().maxFrequencyHz);
+            device == nullptr || (preset.lowestHz() >= device->info.minFrequencyHz &&
+                                  preset.highestHz() <= device->info.maxFrequencyHz);
 
         // The star toggles favourite, which is what controls the ordering --
         // the list grows without bound otherwise and the daily handful sinks.
@@ -868,9 +879,9 @@ bool MainWindow::drawPresetList(SweepPlan& plan) {
             } else {
                 ImGui::SetTooltip(
                     "%s\n%s\n\nOutside what %s can tune (%s - %s).", preset.name.c_str(),
-                    range.c_str(), device->info().label.c_str(),
-                    toml_util::formatFrequencyShort(device->info().minFrequencyHz).c_str(),
-                    toml_util::formatFrequencyShort(device->info().maxFrequencyHz).c_str());
+                    range.c_str(), device->info.label.c_str(),
+                    toml_util::formatFrequencyShort(device->info.minFrequencyHz).c_str(),
+                    toml_util::formatFrequencyShort(device->info.maxFrequencyHz).c_str());
             }
         }
 
@@ -924,7 +935,7 @@ void MainWindow::addPresetToPlan(SweepPlan& plan, const SweepPreset& preset) {
 }
 
 void MainWindow::drawSourceSection() {
-    const ISdrDevice* device = m_state.device();
+    const DeviceDescriptor* device = m_state.device();
 
     // Nothing open means there is only one useful thing to show, whatever the
     // panel was last displaying.
@@ -933,6 +944,18 @@ void MainWindow::drawSourceSection() {
     }
 
     if (m_deviceChooserMode) {
+        // Above everything else: the radio the operator was using is the one
+        // being looked for, and stopping that is the first choice they have.
+        if (m_state.reconnecting()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(m_state.theme().chrome().warning));
+            ImGui::TextWrapped("%s", m_state.reconnectStatus().c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::Button("Stop trying", ImVec2(-1, 0))) {
+                m_state.stopReconnecting();
+            }
+            ImGui::Spacing();
+        }
+
         ImGui::SeparatorText(device == nullptr ? "Select a device" : "Switch device");
 
         const std::vector<SdrDeviceInfo>& available = m_state.availableDevices();
@@ -948,7 +971,8 @@ void MainWindow::drawSourceSection() {
         std::optional<SdrDeviceInfo> pendingOpen;
 
         for (const SdrDeviceInfo& info : available) {
-            const bool isOpen = device != nullptr && device->info().id == info.id;
+            const bool isOpen = device != nullptr && m_state.remoteInstrument() == nullptr &&
+                                device->info.id == info.id;
 
             // The whole row is the target, so the identifying detail can sit
             // under the name instead of being crammed into a button label.
@@ -981,6 +1005,9 @@ void MainWindow::drawSourceSection() {
             m_state.beginRefreshDevices();
         }
 
+        ImGui::Spacing();
+        const std::optional<remote::SavedServer> pendingConnect = drawServerList();
+
         if (device != nullptr) {
             if (ImGui::Button("Back to settings", ImVec2(-1, 0))) {
                 m_deviceChooserMode = false;
@@ -1002,15 +1029,25 @@ void MainWindow::drawSourceSection() {
             // Straight to its settings: choosing a radio is a step towards
             // using it, not the end of the task.
             m_deviceChooserMode = false;
+        } else if (pendingConnect) {
+            m_state.beginConnectServer(pendingConnect->endpoint, pendingConnect->name);
+            m_deviceChooserMode = false;
         }
         return;
     }
 
-    const SdrDeviceInfo& info = device->info();
+    const SdrDeviceInfo& info = device->info;
+    const remote::RemoteInstrument* remote = m_state.remoteInstrument();
 
     ImGui::SeparatorText(info.label.c_str());
 
     if (beginReadout("##identity")) {
+        if (remote != nullptr) {
+            readoutRow("Server", remote->serverName());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", remote->endpoint().address().c_str());
+            }
+        }
         if (!info.serial.empty()) {
             readoutRow("Serial", shortSerial(info.serial));
 
@@ -1033,28 +1070,388 @@ void MainWindow::drawSourceSection() {
     }
 
     ImGui::Spacing();
+    ImGui::BeginDisabled(!m_state.instrument().canControl());
     drawDeviceParameters();
 
     ImGui::Spacing();
     drawDeviceAntennas();
+    ImGui::EndDisabled();
+
+    if (remote::RemoteInstrument* server = m_state.remoteInstrument()) {
+        ImGui::Spacing();
+        drawServerRecordings(*server);
+        if (server->shared()) {
+            ImGui::Spacing();
+            drawServerClients(*server);
+        }
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
     if (ImGui::Button("Change device", ImVec2(-1, 0))) {
         m_deviceChooserMode = true;
     }
-    if (ImGui::Button("Close device", ImVec2(-1, 0))) {
+    if (ImGui::Button(remote != nullptr ? "Disconnect" : "Close device", ImVec2(-1, 0))) {
         m_state.stop();
         m_state.closeDevice();
         m_deviceChooserMode = true;
     }
 }
 
+void MainWindow::drawServerRecordings(remote::RemoteInstrument& remote) {
+    ImGui::SeparatorText(std::format("Recordings on {}", remote.serverName()).c_str());
+    const remote::ServerRecordings& recordings = remote.recordings();
+    const ChromeTheme& chrome = m_state.theme().chrome();
+    if (!recordings.available) {
+        fieldCaption("This server has nowhere to record to.", 0.0F);
+        return;
+    }
+    // Downloading is anyone's; recording and deleting are the controller's.
+    const bool watching = !remote.canControl();
+
+    // Recorded there at a resolution of its own, completed passes only while
+    // sweeping: independent of how much the network can carry.
+    struct Choice {
+        std::uint32_t bins;
+        const char* label;
+    };
+    static constexpr std::array<Choice, 4> kChoices{{{16'777'216, "Full"},
+                                                     {65'536, "65 536 bins"},
+                                                     {16'384, "16 384 bins"},
+                                                     {4'096, "4 096 bins"}}};
+    if (recordings.active) {
+        ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(chrome.record));
+        ImGui::TextWrapped("Recording %s", recordings.current.c_str());
+        ImGui::PopStyleColor();
+        fieldCaption(
+            std::format("{} lines, {}", recordings.lines, toml_util::formatBytes(recordings.bytes)),
+            0.0F);
+        ImGui::BeginDisabled(watching);
+        if (ImGui::Button("Stop recording", ImVec2(-1, 0))) {
+            remote.stopRecording();
+        }
+        ImGui::EndDisabled();
+    } else {
+        m_serverRecordBins =
+            std::clamp(m_serverRecordBins, 0, static_cast<int>(kChoices.size()) - 1);
+        field("Resolution", "Bins a line in the recording. Full keeps every bin of a sweep and "
+                            "can be gigabytes an hour.");
+        if (ImGui::BeginCombo("##recordbins",
+                              kChoices[static_cast<std::size_t>(m_serverRecordBins)].label)) {
+            for (std::size_t i = 0; i < kChoices.size(); ++i) {
+                if (ImGui::Selectable(kChoices[i].label,
+                                      static_cast<int>(i) == m_serverRecordBins)) {
+                    m_serverRecordBins = static_cast<int>(i);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::BeginDisabled(watching);
+        if (ImGui::Button("Record on server", ImVec2(-1, 0))) {
+            remote.startRecording(kChoices[static_cast<std::size_t>(m_serverRecordBins)].bins);
+        }
+        ImGui::EndDisabled();
+    }
+
+    const std::vector<remote::RemoteInstrument::Download> downloads = remote.downloads();
+    const float action = ImGui::GetFrameHeight();
+    for (const remote::RecordingFile& file : recordings.files) {
+        if (recordings.active && file.name == recordings.current) {
+            continue;
+        }
+        ImGui::PushID(file.name.c_str());
+        const auto download =
+            std::ranges::find(downloads, file.name, &remote::RemoteInstrument::Download::name);
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(file.name.c_str());
+        ImGui::SameLine();
+        const float rowRight = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(
+            std::max(ImGui::GetCursorPosX(),
+                     rowRight - ((action + ImGui::GetStyle().ItemSpacing.x) * 2.0F)));
+
+        const bool inFlight =
+            download != downloads.end() && !download->done && download->error.empty();
+        if (download != downloads.end() && download->done) {
+            if (iconButton("##open", icon::kOpen, "o", action)) {
+                launchHistoryViewer(download->path);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Open %s", download->path.string().c_str());
+            }
+        } else if (inFlight) {
+            if (iconButton("##cancel", icon::kClose, "x", action)) {
+                remote.cancelDownload(file.name);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Stop the download");
+            }
+        } else {
+            if (iconButton("##download", icon::kDownload, "v", action)) {
+                if (auto started = remote.beginDownload(file.name, Paths::instance().sessionsDir());
+                    !started) {
+                    toast(ToastSeverity::Error, started.error().describe());
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Download to %s",
+                                  Paths::instance().sessionsDir().string().c_str());
+            }
+        }
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(inFlight || watching);
+        if (iconButton("##delete", icon::kDelete, "-", action)) {
+            m_recordingToDelete = file.name;
+            ImGui::OpenPopup("##deleterecording");
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Delete it from %s", remote.serverName().c_str());
+        }
+
+        if (inFlight) {
+            const float fraction = download->totalBytes == 0
+                                       ? 0.0F
+                                       : static_cast<float>(download->received) /
+                                             static_cast<float>(download->totalBytes);
+            ImGui::ProgressBar(fraction, ImVec2(-1, 0),
+                               std::format("{} of {}", toml_util::formatBytes(download->received),
+                                           toml_util::formatBytes(download->totalBytes))
+                                   .c_str());
+        } else if (download != downloads.end() && !download->error.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(chrome.warning));
+            fieldCaption(download->error, 12.0F);
+            ImGui::PopStyleColor();
+        } else {
+            fieldCaption(toml_util::formatBytes(file.bytes), 12.0F);
+        }
+
+        if (ImGui::BeginPopup("##deleterecording")) {
+            ImGui::Text("Delete %s from %s?", m_recordingToDelete.c_str(),
+                        remote.serverName().c_str());
+            if (ImGui::Button("Delete")) {
+                remote.deleteRecording(m_recordingToDelete);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+    if (recordings.files.empty()) {
+        fieldCaption("Nothing recorded yet.", 0.0F);
+    }
+}
+
+void MainWindow::drawServerClients(const remote::RemoteInstrument& remote) {
+    ImGui::SeparatorText(std::format("Connected to {}", remote.serverName()).c_str());
+    if (beginReadout("##clients")) {
+        for (const remote::ConnectedClient& client : remote.clients()) {
+            const std::string who =
+                std::format("{}{}", client.name, client.you ? " (this desktop)" : "");
+            readoutRow(who.c_str(), client.controls ? "in control" : "watching");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s at %s", client.kind.c_str(), client.address.c_str());
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (remote.canControl()) {
+        fieldCaption("Anyone connected can take control.", 0.0F);
+    }
+}
+
+std::optional<remote::SavedServer> MainWindow::drawServerList() {
+    ImGui::SeparatorText("Servers");
+
+    const remote::RemoteInstrument* connected = m_state.remoteInstrument();
+    std::optional<remote::SavedServer> pendingConnect;
+    std::string pendingForget;
+
+    if (m_state.servers().entries().empty()) {
+        ImGui::TextDisabled("A radio on another machine,");
+        ImGui::TextDisabled("run by sweeppp-cli serve.");
+    }
+
+    for (const remote::SavedServer& server : m_state.servers().entries()) {
+        const std::string address = server.endpoint.address();
+        const bool isOpen = connected != nullptr && connected->profileId() == address;
+
+        ImGui::PushID(address.c_str());
+        ImGui::BeginGroup();
+        if (ImGui::Selectable("##server", isOpen, ImGuiSelectableFlags_None,
+                              ImVec2(0, ImGui::GetTextLineHeight() * 2.4F))) {
+            pendingConnect = server;
+        }
+        if (ImGui::BeginPopupContextItem("##servermenu")) {
+            if (ImGui::MenuItem("Edit...")) {
+                beginEditingServer(&server);
+            }
+            if (ImGui::MenuItem("Forget")) {
+                pendingForget = address;
+            }
+            ImGui::EndPopup();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Connect to %s\nRight-click to edit or forget it.", address.c_str());
+        }
+
+        const ImVec2 rowMin = ImGui::GetItemRectMin();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F),
+                      packed(m_state.theme().chrome().text), server.name.c_str());
+        const std::string detail =
+            std::format("{}{}", address, server.endpoint.token.empty() ? "" : "  token");
+        draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F + ImGui::GetTextLineHeight()),
+                      packed(m_state.theme().chrome().textDim), detail.c_str());
+        ImGui::EndGroup();
+        ImGui::PopID();
+    }
+
+    // After the loop, which is iterating the list this edits.
+    if (!pendingForget.empty()) {
+        m_state.servers().remove(pendingForget);
+        m_state.saveServers();
+        pendingConnect.reset();
+    }
+
+    // Found by asking the network, and not already in the list above. A click
+    // fills in the server window, which only wants the token.
+    std::vector<remote::mdns::DiscoveredServer> nearby = m_state.discoveredServers();
+    std::erase_if(nearby, [this](const remote::mdns::DiscoveredServer& server) {
+        return m_state.servers().find(server.endpoint.address()) != nullptr;
+    });
+    if (!nearby.empty()) {
+        ImGui::TextDisabled("On this network");
+        for (const remote::mdns::DiscoveredServer& server : nearby) {
+            const std::string address = server.endpoint.address();
+            ImGui::PushID(address.c_str());
+            ImGui::BeginGroup();
+            if (ImGui::Selectable("##nearby", false, ImGuiSelectableFlags_None,
+                                  ImVec2(0, ImGui::GetTextLineHeight() * 2.4F))) {
+                const remote::SavedServer found{.name = server.found.instance,
+                                                .endpoint = server.endpoint};
+                beginEditingServer(&found, true);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s at %s", server.found.device.c_str(), address.c_str());
+            }
+            const ImVec2 rowMin = ImGui::GetItemRectMin();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F),
+                          packed(m_state.theme().chrome().text), server.found.instance.c_str());
+            const char* state = !server.found.busy    ? ""
+                                : server.found.shared ? "  in use, can watch"
+                                                      : "  in use";
+            const std::string detail = std::format("{}{}", server.found.device, state);
+            draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F + ImGui::GetTextLineHeight()),
+                          packed(m_state.theme().chrome().textDim), detail.c_str());
+            ImGui::EndGroup();
+            ImGui::PopID();
+        }
+    }
+
+    if (ImGui::Button("Add server...", ImVec2(-1, 0))) {
+        beginEditingServer(nullptr);
+    }
+    return pendingConnect;
+}
+
+void MainWindow::beginEditingServer(const remote::SavedServer* server, bool isNew) {
+    if (server != nullptr) {
+        m_editingServer = *server;
+        m_editingServerAddress = server->endpoint.address();
+        m_editingServerOriginal = isNew ? std::string{} : m_editingServerAddress;
+    } else {
+        m_editingServer = remote::SavedServer{};
+        m_editingServerAddress.clear();
+        m_editingServerOriginal.clear();
+    }
+    m_showServerEditor = true;
+}
+
+void MainWindow::drawServerEditor() {
+    if (!ImGui::Begin("Server", &m_showServerEditor, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::End();
+        return;
+    }
+
+    const auto textField = [](const char* label, std::string& value, const char* hint,
+                              ImGuiInputTextFlags flags = ImGuiInputTextFlags_None) {
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer), "%s", value.c_str());
+        ImGui::SetNextItemWidth(260.0F);
+        if (ImGui::InputTextWithHint(label, hint, buffer, sizeof(buffer), flags)) {
+            value = buffer;
+        }
+    };
+
+    textField("Name", m_editingServer.name, "Roof Pi");
+    textField("Address", m_editingServerAddress, "pi.local:7332");
+    textField("Token", m_editingServer.endpoint.token, "the server's --token",
+              ImGuiInputTextFlags_Password);
+    helpMarker("Needed when the server listens beyond its own machine. Kept in servers.toml, "
+               "readable only by you, and never in a profile.");
+
+    ImGui::Separator();
+
+    const auto parsed = remote::RemoteEndpoint::parse(m_editingServerAddress);
+    if (!parsed) {
+        ImGui::TextColored(toImVec4(m_state.theme().chrome().warning), "%s",
+                           m_editingServerAddress.empty() ? "an address is required"
+                                                          : parsed.error().message().c_str());
+    }
+
+    // Saved either way: a server worth connecting to once is worth finding
+    // in the list again.
+    const auto save = [&]() -> remote::SavedServer {
+        remote::SavedServer server = m_editingServer;
+        server.endpoint.host = parsed->host;
+        server.endpoint.port = parsed->port;
+        if (server.name.empty()) {
+            server.name = server.endpoint.host;
+        }
+        if (!m_editingServerOriginal.empty() &&
+            m_editingServerOriginal != server.endpoint.address()) {
+            m_state.servers().remove(m_editingServerOriginal);
+        }
+        m_state.servers().put(server);
+        m_state.saveServers();
+        return server;
+    };
+
+    ImGui::BeginDisabled(!parsed);
+    if (ImGui::Button("Connect", ImVec2(120.0F, 0))) {
+        const remote::SavedServer server = save();
+        m_state.beginConnectServer(server.endpoint, server.name);
+        m_deviceChooserMode = false;
+        m_showServerEditor = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save", ImVec2(120.0F, 0))) {
+        (void)save();
+        m_showServerEditor = false;
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120.0F, 0))) {
+        m_showServerEditor = false;
+    }
+
+    ImGui::End();
+}
+
 void MainWindow::drawAntennaRow(const char* label, const SdrRxPort* port,
                                 std::string_view assignedId, bool biasTeeOn, bool deviceHasBiasTee,
                                 const std::function<void(std::string_view)>& assign,
                                 const std::function<void(std::string_view)>& assignSwitcher) {
-    const AntennaLibrary& library = m_state.antennas();
+    const AntennaLibrary& library = m_state.instrument().antennas();
     const ChromeTheme& chrome = m_state.theme().chrome();
     const Antenna* assigned = assignedId.empty() ? nullptr : library.find(assignedId);
 
@@ -1077,10 +1474,11 @@ void MainWindow::drawAntennaRow(const char* label, const SdrRxPort* port,
         // box cannot carry another one. Nothing in the model forbids nesting,
         // and nothing in the RF does either -- but a chain the panel cannot
         // draw is a chain an operator cannot check against the bench.
-        if (assignSwitcher && !m_switcherList.empty()) {
+        const std::span<const RfPathInfo> switchers = m_state.instrument().availableSwitchers();
+        if (assignSwitcher && !switchers.empty()) {
             ImGui::Separator();
             ImGui::TextDisabled("Switchers");
-            for (const RfPathInfo& info : m_switcherList) {
+            for (const RfPathInfo& info : switchers) {
                 const std::string key = rfPathKey(info);
                 if (ImGui::Selectable(info.label.c_str())) {
                     assignSwitcher(key);
@@ -1141,37 +1539,48 @@ void MainWindow::drawAntennaRow(const char* label, const SdrRxPort* port,
 }
 
 void MainWindow::drawDeviceAntennas() {
-    ISdrDevice* device = m_state.device();
+    const DeviceDescriptor* device = m_state.device();
     if (device == nullptr) {
         return;
     }
 
     ImGui::SeparatorText("Antennas");
 
+    Instrument& instrument = m_state.instrument();
+
     // Rescanned on a timer rather than per frame: `enumerate` is a bus scan
-    // per driver, and this panel is drawn sixty times a second.
+    // per driver, and this panel is drawn sixty times a second. On the machine
+    // the radio is on, which may not be this one.
     if (const std::uint64_t now = monotonicNs();
         now - m_switcherListNs > secondsToNs(2.0) || m_switcherListNs == 0) {
-        m_switcherList = RfPathManager::instance().enumerateAll();
+        instrument.rescanSwitchers();
         m_switcherListNs = now;
     }
 
-    const std::span<const SdrRxPort> ports = device->rxPorts();
-    const std::string deviceKey = m_state.deviceAntennaKey();
-    const AntennaLibrary& library = m_state.antennas();
+    const std::span<const SdrRxPort> ports = device->rxPorts;
+    const std::string deviceKey = instrument.deviceAntennaKey();
+    const AntennaLibrary& library = instrument.antennas();
     const SweepPlan& plan = m_state.sweepPlan();
-    AntennaAssignments& assignments = m_state.antennaAssignments();
+
+    // Edited as a copy and handed back whole: the assignments belong to the
+    // bench the radio is on, and a change there is a write and a re-plan.
+    AntennaAssignments assignments = instrument.antennaAssignments();
+    const auto commit = [&] {
+        if (auto saved = instrument.setAntennaAssignments(assignments); !saved) {
+            toast(ToastSeverity::Error, saved.error().describe());
+        }
+    };
 
     // Whether the radio's bias tee is on right now, where it has one at all.
     // Per-device rather than per-port on every radio in the tree, which is why
     // the warning distinguishes "this port cannot supply it" from "it is
     // switched off".
-    const std::span<const SdrParameter> parameters = device->parameters();
+    const std::span<const SdrParameter> parameters = device->parameters;
     const bool hasBiasTee =
         std::ranges::any_of(parameters, [](const SdrParameter& p) { return p.key == "bias_tee"; });
     bool biasTeeOn = false;
     if (hasBiasTee) {
-        if (const auto value = device->getParameter("bias_tee")) {
+        if (const auto value = m_state.instrument().parameter("bias_tee")) {
             biasTeeOn = asBool(*value);
         }
     }
@@ -1179,7 +1588,7 @@ void MainWindow::drawDeviceAntennas() {
     // A radio with one connector still gets a row: the antenna in front of it
     // is just as much a fact about the measurement. What it does not get is a
     // port chooser, because there is nothing to choose.
-    const std::string_view selected = device->selectedRxPort();
+    const std::string selected = instrument.selectedRxPort();
     const std::size_t rowCount = std::max<std::size_t>(ports.size(), 1);
 
     for (std::size_t i = 0; i < rowCount; ++i) {
@@ -1191,31 +1600,32 @@ void MainWindow::drawDeviceAntennas() {
 
         const std::string switcherKey{assignments.switcherFor(deviceKey, portId)};
         if (!switcherKey.empty()) {
-            IRfPath* switcher = m_state.switcher(switcherKey);
+            const SwitcherView* switcher = instrument.switcher(switcherKey);
 
             field(label.c_str(),
                   port != nullptr && !port->connector.empty() ? port->connector.c_str() : nullptr);
-            if (ImGui::BeginCombo("##switcher", switcher != nullptr ? switcher->info().label.c_str()
+            if (ImGui::BeginCombo("##switcher", switcher != nullptr ? switcher->info.label.c_str()
                                                                     : switcherKey.c_str())) {
                 if (ImGui::Selectable("- none -")) {
                     assignments.assignSwitcher(deviceKey, portId, {});
-                    m_state.saveAntennaAssignments();
+                    commit();
                 }
                 for (const Antenna& antenna : library.entries()) {
                     if (ImGui::Selectable(antenna.name.c_str())) {
                         assignments.assign(deviceKey, portId, antenna.id);
-                        m_state.saveAntennaAssignments();
+                        commit();
                     }
                 }
-                if (!m_switcherList.empty()) {
+                const std::span<const RfPathInfo> available = instrument.availableSwitchers();
+                if (!available.empty()) {
                     ImGui::Separator();
                     ImGui::TextDisabled("Switchers");
                 }
-                for (const RfPathInfo& info : m_switcherList) {
+                for (const RfPathInfo& info : available) {
                     const std::string key = rfPathKey(info);
                     if (ImGui::Selectable(info.label.c_str(), key == switcherKey)) {
                         assignments.assignSwitcher(deviceKey, portId, key);
-                        m_state.saveAntennaAssignments();
+                        commit();
                     }
                 }
                 ImGui::EndCombo();
@@ -1233,7 +1643,7 @@ void MainWindow::drawDeviceAntennas() {
             // indent is the whole visual statement that this is a chain and
             // not four more connectors on the radio.
             ImGui::Indent(12.0F);
-            const std::span<const RfPathInput> inputs = switcher->inputs();
+            const std::span<const RfPathInput> inputs = switcher->inputs;
             for (std::size_t in = 0; in < inputs.size(); ++in) {
                 ImGui::PushID(static_cast<int>(in));
                 const std::string inputId = inputs[in].id;
@@ -1243,7 +1653,7 @@ void MainWindow::drawDeviceAntennas() {
                 drawAntennaRow(inputs[in].label.c_str(), port, assignedId, biasTeeOn, hasBiasTee,
                                [&](std::string_view antennaId) {
                                    assignments.assignInput(switcherKey, inputId, antennaId);
-                                   m_state.saveAntennaAssignments();
+                                   commit();
                                },
                                {});
 
@@ -1263,11 +1673,11 @@ void MainWindow::drawDeviceAntennas() {
             label.c_str(), port, assignedId, biasTeeOn, hasBiasTee,
             [&](std::string_view antennaId) {
                 assignments.assign(deviceKey, portId, antennaId);
-                m_state.saveAntennaAssignments();
+                commit();
             },
             [&](std::string_view key) {
                 assignments.assignSwitcher(deviceKey, portId, key);
-                m_state.saveAntennaAssignments();
+                commit();
             });
 
         if (port != nullptr && port->id == selected) {
@@ -1289,7 +1699,7 @@ void MainWindow::drawDeviceAntennas() {
         // "RX1 (Wideband discone)" are different answers to "what will hear
         // the band nothing claims".
         const auto describePort = [&](const SdrRxPort& port) {
-            const Antenna* antenna = m_state.antennaOnPort(port.id);
+            const Antenna* antenna = instrument.antennaOnPort(port.id);
             if (antenna != nullptr) {
                 return std::format("{} ({})", port.label, antenna->name);
             }
@@ -1308,12 +1718,12 @@ void MainWindow::drawDeviceAntennas() {
                                                     : "- leave as is -")) {
             if (ImGui::Selectable("- leave as is -", current == ports.end())) {
                 assignments.setFallbackPort(deviceKey, {});
-                m_state.saveAntennaAssignments();
+                commit();
             }
             for (const SdrRxPort& port : ports) {
                 if (ImGui::Selectable(describePort(port).c_str(), port.id == fallbackId)) {
                     assignments.setFallbackPort(deviceKey, port.id);
-                    m_state.saveAntennaAssignments();
+                    commit();
                 }
             }
             ImGui::EndCombo();
@@ -1329,7 +1739,7 @@ void MainWindow::drawDeviceAntennas() {
     if (!plan.segments.empty()) {
         double covered = 0.0;
         for (const SweepSegment& segment : plan.segments) {
-            for (const auto& [startHz, stopHz] : m_state.antennaCoverage()) {
+            for (const auto& [startHz, stopHz] : instrument.antennaCoverage()) {
                 covered += std::max(0.0, std::min(segment.stopHz, stopHz) -
                                              std::max(segment.startHz, startHz));
             }
@@ -1344,7 +1754,7 @@ void MainWindow::drawDeviceAntennas() {
 }
 
 void MainWindow::drawDeviceParameters() {
-    ISdrDevice* device = m_state.device();
+    const DeviceDescriptor* device = m_state.device();
     if (device == nullptr) {
         return;
     }
@@ -1353,7 +1763,7 @@ void MainWindow::drawDeviceParameters() {
     // anywhere in the project: a driver that describes its parameters properly
     // gets a correct panel for free, and one that does not cannot be fixed
     // here.
-    const std::span<const SdrParameter> parameters = device->parameters();
+    const std::span<const SdrParameter> parameters = device->parameters;
 
     // Gathered by group instead of trusting the order they were declared in. A
     // driver may append a parameter after the ones it belongs with -- the
@@ -1398,7 +1808,7 @@ void MainWindow::drawDeviceParameters() {
         // something. An unreadable dependency is treated as satisfied: a row
         // hidden by a parameter that no longer exists is unreachable.
         if (!parameter.appliesWhenKey.empty()) {
-            if (auto governing = device->getParameter(parameter.appliesWhenKey)) {
+            if (auto governing = m_state.instrument().parameter(parameter.appliesWhenKey)) {
                 const std::string held = asString(*governing);
                 if (!std::ranges::contains(parameter.appliesWhenValues, held)) {
                     continue;
@@ -1411,13 +1821,14 @@ void MainWindow::drawDeviceParameters() {
             ImGui::SeparatorText(currentGroup.c_str());
         }
 
-        auto current = device->getParameter(parameter.key);
+        auto current = m_state.instrument().parameter(parameter.key);
         if (!current) {
             continue;
         }
 
         const bool disabled =
-            parameter.readOnly || (m_state.parameterNeedsStop(parameter) && m_state.running());
+            parameter.readOnly ||
+            (m_state.instrument().parameterNeedsStop(parameter) && m_state.running());
         if (disabled) {
             ImGui::BeginDisabled();
         }
@@ -1426,7 +1837,7 @@ void MainWindow::drawDeviceParameters() {
         // carries the description rather than a (?) marker, which would cost a
         // column of width on every row.
         std::string tooltip = parameter.description;
-        if (m_state.parameterNeedsStop(parameter) && m_state.running()) {
+        if (m_state.instrument().parameterNeedsStop(parameter) && m_state.running()) {
             if (!tooltip.empty()) {
                 tooltip += "\n\n";
             }
@@ -1554,19 +1965,12 @@ void MainWindow::drawDeviceParameters() {
             ImGui::EndDisabled();
         }
 
+        // The instrument publishes the change, so the session records it once
+        // wherever the radio is.
         if (changed) {
-            if (auto applied = m_state.setDeviceParameter(parameter.key, updated); !applied) {
+            if (auto applied = m_state.instrument().setDeviceParameter(parameter.key, updated);
+                !applied) {
                 toast(ToastSeverity::Error, applied.error().describe());
-            } else {
-                // Published so the session records it. A grid-affecting change
-                // opens a new segment; a calibration-affecting one is noted
-                // because the noise floor just moved.
-                m_state.events().publish(
-                    ParameterChangedEvent{.monotonicNs = monotonicNs(),
-                                          .key = parameter.key,
-                                          .value = toString(updated),
-                                          .gridAffecting = parameter.gridAffecting,
-                                          .calibrationAffecting = parameter.calibrationAffecting});
             }
         }
     }
@@ -1574,6 +1978,7 @@ void MainWindow::drawDeviceParameters() {
 
 void MainWindow::drawRangeSection() {
     ImGui::Indent(6.0F);
+    ImGui::BeginDisabled(!m_state.instrument().canControl());
 
     SweepPlan plan = m_state.sweepPlan();
     bool changed = false;
@@ -1744,8 +2149,8 @@ void MainWindow::drawRangeSection() {
     // range is the first thing to look at on an unfamiliar band, it is the
     // only range that is a property of the hardware rather than of the
     // operator's interest, and it changes when the device does.
-    if (const ISdrDevice* device = m_state.device()) {
-        const SdrDeviceInfo& info = device->info();
+    if (const DeviceDescriptor* device = m_state.device()) {
+        const SdrDeviceInfo& info = device->info;
 
         ImGui::Spacing();
         const std::string caption = std::format(
@@ -1768,7 +2173,8 @@ void MainWindow::drawRangeSection() {
         // an antenna range is what it *can*, and the difference is usually
         // most of the span -- time spent sweeping bands no antenna on the
         // bench responds to, printed as spectrum.
-        if (const std::vector<std::pair<double, double>> coverage = m_state.antennaCoverage();
+        if (const std::vector<std::pair<double, double>> coverage =
+                m_state.instrument().antennaCoverage();
             !coverage.empty()) {
             double total = 0.0;
             for (const auto& [startHz, stopHz] : coverage) {
@@ -1812,14 +2218,17 @@ void MainWindow::drawRangeSection() {
         }
     }
 
+    ImGui::EndDisabled();
     ImGui::Unindent(6.0F);
 }
 
 void MainWindow::drawAnalysisSection() {
     ImGui::Indent(6.0F);
+    // Everything here but Network resolution, which is this connection's own.
+    ImGui::BeginDisabled(!m_state.instrument().canControl());
 
     SweepPlan plan = m_state.sweepPlan();
-    PipelineConfig config = m_state.pipelineConfig();
+    PipelineConfig config = m_state.instrument().pipelineConfig();
     bool planChanged = false;
     bool configChanged = false;
 
@@ -1854,7 +2263,7 @@ void MainWindow::drawAnalysisSection() {
 
     bool sweeping = m_state.sweeping();
     if (ImGui::Checkbox("Sweep the planned range", &sweeping)) {
-        if (auto applied = m_state.setSweeping(sweeping); !applied) {
+        if (auto applied = m_state.instrument().setSweeping(sweeping); !applied) {
             toast(ToastSeverity::Error, applied.error().describe());
         }
     }
@@ -1873,8 +2282,8 @@ void MainWindow::drawAnalysisSection() {
             planChanged = true;
         }
 
-        const ISdrDevice* device = m_state.device();
-        const std::size_t portCount = device != nullptr ? device->rxPorts().size() : 0;
+        const DeviceDescriptor* device = m_state.device();
+        const std::size_t portCount = device != nullptr ? device->rxPorts.size() : 0;
 
         if (ImGui::Checkbox("Route by antenna", &plan.antennaRouting)) {
             planChanged = true;
@@ -1906,7 +2315,7 @@ void MainWindow::drawAnalysisSection() {
         }
 
         if (plan.antennaRouting) {
-            const SweepSchedule& schedule = m_state.sweepEngine().schedule();
+            const ScheduleSummary& schedule = m_state.instrument().schedule();
             if (!schedule.unroutedHz.empty()) {
                 std::string ranges;
                 for (const auto& [fromHz, toHz] : schedule.unroutedHz) {
@@ -1919,11 +2328,11 @@ void MainWindow::drawAnalysisSection() {
                 // Named where the operator nominated one, because "swept on
                 // RX1" and "swept on whatever is connected" are different
                 // amounts of trouble.
-                const ISdrDevice* routed = m_state.device();
+                const DeviceDescriptor* routed = m_state.device();
                 const std::string_view fallback =
-                    routed != nullptr
-                        ? m_state.antennaAssignments().fallbackPort(m_state.deviceAntennaKey())
-                        : std::string_view{};
+                    routed != nullptr ? m_state.instrument().antennaAssignments().fallbackPort(
+                                            m_state.instrument().deviceAntennaKey())
+                                      : std::string_view{};
 
                 ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(m_state.theme().chrome().warning));
                 fieldCaption(fallback.empty()
@@ -1950,10 +2359,11 @@ void MainWindow::drawAnalysisSection() {
     if (!sweeping) {
         // Fixed tune has no plan to read the rate from, so it comes from the
         // radio itself.
-        const ISdrDevice* device = m_state.device();
-        sampleRate = device != nullptr
-                         ? asDouble(device->getParameter("sample_rate").value_or(SdrValue{20e6}))
-                         : 20e6;
+        const DeviceDescriptor* device = m_state.device();
+        sampleRate =
+            device != nullptr
+                ? asDouble(m_state.instrument().parameter("sample_rate").value_or(SdrValue{20e6}))
+                : 20e6;
     }
     const double enbw = windowEnbw(config.window, config.windowBeta);
 
@@ -1961,7 +2371,7 @@ void MainWindow::drawAnalysisSection() {
     // stored one -- the planner derives it from the RBW and the pipeline is
     // configured from the result.
     const auto activePoints = [&]() -> std::uint32_t {
-        return sweeping ? m_state.sweepEngine().schedule().fftSize : config.fftSize;
+        return sweeping ? m_state.instrument().schedule().fftSize : config.fftSize;
     };
 
     if (m_advancedAnalysis == 0) {
@@ -2127,13 +2537,13 @@ void MainWindow::drawAnalysisSection() {
 
         // Backend selector. Unavailable backends stay in the list with their
         // reason -- that is the entire point of showing them.
-        const std::vector<FftBackendInfo> backends = FftBackendManager::instance().enumerate();
+        const std::vector<FftBackendInfo> backends = m_state.instrument().fftBackends();
 
         // The backend in use, not `suggestedDefault()`. The latter is fixed at
         // whichever available backend registered first, so with two installed
         // the combo showed that one for ever and the selection appeared not to
         // take.
-        const std::string_view currentBackend = m_state.fftBackendName();
+        const std::string currentBackend = m_state.instrument().fftBackendName();
         const auto active =
             std::ranges::find_if(backends, [currentBackend](const FftBackendInfo& backend) {
                 return backend.name == currentBackend;
@@ -2157,7 +2567,8 @@ void MainWindow::drawAnalysisSection() {
                 const bool selected = backend.name == currentBackend;
                 if (ImGui::Selectable(backend.displayName.c_str(), selected) && backend.available) {
                     // Selection is explicit; nothing is ever chosen silently.
-                    if (auto switched = m_state.setFftBackend(backend.name); !switched) {
+                    if (auto switched = m_state.instrument().setFftBackend(backend.name);
+                        !switched) {
                         toast(ToastSeverity::Error,
                               std::format("could not switch to '{}': {}", backend.name,
                                           switched.error().message()));
@@ -2183,7 +2594,9 @@ void MainWindow::drawAnalysisSection() {
             m_showFftBenchmark = true;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Benchmark every available backend on this machine");
+            const std::string host = m_state.instrument().computeHost();
+            ImGui::SetTooltip("Benchmark every available backend on %s",
+                              host.empty() ? "this machine" : host.c_str());
         }
 
         int throttle = static_cast<int>(config.throttleMode);
@@ -2218,20 +2631,51 @@ void MainWindow::drawAnalysisSection() {
         }
     }
     if (configChanged) {
-        if (auto applied = m_state.applyPipelineConfig(config); !applied) {
+        if (auto applied = m_state.instrument().applyPipelineConfig(config); !applied) {
             toast(ToastSeverity::Error, applied.error().describe());
         }
     }
 
     drawCorrectionsBlock(sweeping);
+    ImGui::EndDisabled();
+
+    // How finely the spectrum crosses the network, which is a property of the
+    // link rather than of the analysis: the server measures at full resolution
+    // whatever this says.
+    if (const remote::RemoteInstrument* remote = m_state.remoteInstrument()) {
+        struct Choice {
+            std::uint32_t bins;
+            const char* label;
+        };
+        static constexpr std::array<Choice, 4> kChoices{{{0, "Full"},
+                                                         {262'144, "262 144 bins"},
+                                                         {65'536, "65 536 bins"},
+                                                         {16'384, "16 384 bins"}}};
+        const std::uint32_t current = remote->linkResolution();
+        const auto selected = std::ranges::find(kChoices, current, &Choice::bins);
+        field("Network resolution",
+              "How finely the spectrum crosses the network. Fewer bins keep a slow link live; "
+              "each bin shown is the strongest of those it covers. Recording on the server "
+              "keeps full resolution.");
+        if (ImGui::BeginCombo("##linkbins", selected != kChoices.end()
+                                                ? selected->label
+                                                : std::format("{} bins", current).c_str())) {
+            for (const Choice& choice : kChoices) {
+                if (ImGui::Selectable(choice.label, choice.bins == current)) {
+                    m_state.setLinkResolution(choice.bins);
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
 
     // What the plan will actually do, before it is started.
-    if (sweeping && !m_state.sweepEngine().schedule().steps.empty()) {
-        const SweepSchedule& schedule = m_state.sweepEngine().schedule();
+    if (sweeping && m_state.instrument().schedule().stepCount > 0) {
+        const ScheduleSummary& schedule = m_state.instrument().schedule();
         ImGui::SeparatorText("Predicted");
 
         if (beginReadout("##predicted")) {
-            readoutRow("steps", groupedCount(schedule.steps.size()));
+            readoutRow("steps", groupedCount(schedule.stepCount));
             readoutRow("FFT size", groupedCount(schedule.fftSize));
             readoutRow("actual RBW", toml_util::formatFrequencyShort(schedule.actualRbwHz));
             readoutRow("pass time", formatDuration(schedule.estimatedPassSeconds));
@@ -2240,6 +2684,18 @@ void MainWindow::drawAnalysisSection() {
             readoutRow("retune cost",
                        std::format("{:.0f}% of the pass", schedule.retuneOverheadFraction * 100.0),
                        "Share of the pass spent retuning rather than measuring.");
+            if (const remote::RemoteInstrument* remote = m_state.remoteInstrument();
+                remote != nullptr && remote->linkResolution() > 0 &&
+                schedule.gridBinCount > remote->linkResolution()) {
+                const std::size_t group = (schedule.gridBinCount + remote->linkResolution() - 1) /
+                                          remote->linkResolution();
+                readoutRow("over the network",
+                           std::format("{} bins of {}",
+                                       groupedCount((schedule.gridBinCount + group - 1) / group),
+                                       toml_util::formatFrequencyShort(schedule.gridBinWidthHz *
+                                                                       static_cast<double>(group))),
+                           "What crosses the network after Network resolution reduces it.");
+            }
             ImGui::EndTable();
         }
     }
@@ -2250,12 +2706,13 @@ void MainWindow::drawAnalysisSection() {
 void MainWindow::drawCorrectionsBlock(bool sweeping) {
     ImGui::SeparatorText("Corrections");
 
-    CorrectionSettings corrections = m_state.correctionSettings();
-    const CorrectionSet* learned = m_state.corrections();
-    const bool haveFloor = learned != nullptr && !learned->floor.empty();
-    const std::string& stale = m_state.floorStaleReason();
-    const std::size_t spurs = m_state.spurCount();
-    const std::size_t automatic = m_state.automaticSpurCount();
+    Instrument& instrument = m_state.instrument();
+    CorrectionSettings corrections = instrument.correctionSettings();
+    const CorrectionSummary learned = instrument.correctionSummary();
+    const bool haveFloor = learned.floorPoints > 0;
+    const std::string& stale = learned.floorStaleReason;
+    const std::size_t spurs = learned.spurs;
+    const std::size_t automatic = learned.automaticSpurs;
     bool changed = false;
 
     // Two switches to a row. Measured from where the row starts rather than
@@ -2310,12 +2767,12 @@ void MainWindow::drawCorrectionsBlock(bool sweeping) {
     }
 
     if (changed) {
-        m_state.setCorrectionSettings(corrections);
+        m_state.instrument().setCorrectionSettings(corrections);
     }
 
     // One line for what is known, then the two actions.
     std::string status;
-    if (learned == nullptr) {
+    if (!learned.present) {
         status = "nothing learned for this radio";
     } else {
         status = !haveFloor       ? "no floor"
@@ -2325,18 +2782,21 @@ void MainWindow::drawCorrectionsBlock(bool sweeping) {
         if (automatic > 0) {
             status += std::format(" ({} auto)", automatic);
         }
-        if (learned->learnedAt.size() >= 10) {
-            status += std::format(", learned {}", learned->learnedAt.substr(0, 10));
+        if (learned.learnedAt.size() >= 10) {
+            status += std::format(", learned {}", learned.learnedAt.substr(0, 10));
         }
     }
     ImGui::TextDisabled("%s", status.c_str());
+    if (const remote::RemoteInstrument* remote = m_state.remoteInstrument()) {
+        ImGui::TextDisabled("Stored on %s", remote->serverName().c_str());
+    }
 
-    if (m_state.learning()) {
+    if (m_state.instrument().learning()) {
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(m_state.learningLabel().c_str());
+        ImGui::TextUnformatted(m_state.instrument().learningLabel().c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("Cancel")) {
-            m_state.cancelLearning();
+            m_state.instrument().cancelLearning();
         }
         return;
     }
@@ -2352,7 +2812,7 @@ void MainWindow::drawCorrectionsBlock(bool sweeping) {
         true);
 
     ImGui::SameLine();
-    ImGui::BeginDisabled(learned == nullptr);
+    ImGui::BeginDisabled(!learned.present);
     if (ImGui::Button("Clear")) {
         m_showClearCorrectionsPrompt = true;
     }
@@ -2363,9 +2823,7 @@ void MainWindow::drawCorrectionsBlock(bool sweeping) {
 void MainWindow::drawLearnPrompt() {
     constexpr const char* kId = "Learn receiver corrections";
     ImGui::OpenPopup(kId);
-
-    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    bar::placePrompt();
 
     if (ImGui::BeginPopupModal(kId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0F);
@@ -2374,15 +2832,16 @@ void MainWindow::drawLearnPrompt() {
                                "it learns is masked out of every sweep after.");
         ImGui::Spacing();
         if (m_state.sweeping()) {
-            const double passSeconds = m_state.sweepEngine().schedule().estimatedPassSeconds;
+            const double passSeconds = m_state.instrument().schedule().estimatedPassSeconds;
             ImGui::TextUnformatted(
-                std::format(
-                    "Takes about {} passes, roughly {}.", AppState::learnPasses(),
-                    formatDuration(passSeconds * static_cast<double>(AppState::learnPasses())))
+                std::format("Takes about {} passes, roughly {}.", LocalInstrument::learnPasses(),
+                            formatDuration(passSeconds *
+                                           static_cast<double>(LocalInstrument::learnPasses())))
                     .c_str());
         } else {
             ImGui::TextUnformatted(
-                std::format("Takes {} frames at this tuning.", AppState::kLearnFrames).c_str());
+                std::format("Takes {} frames at this tuning.", LocalInstrument::kLearnFrames)
+                    .c_str());
         }
         ImGui::Spacing();
         ImGui::TextDisabled("Use the gain, bandwidth and sample rate you will sweep with: the "
@@ -2391,7 +2850,7 @@ void MainWindow::drawLearnPrompt() {
         ImGui::Separator();
 
         if (ImGui::Button("Learn", ImVec2(120, 0))) {
-            if (auto started = m_state.startLearning(); !started) {
+            if (auto started = m_state.instrument().startLearning(); !started) {
                 toast(ToastSeverity::Error, started.error().describe());
             }
             m_showLearnPrompt = false;
@@ -2409,18 +2868,16 @@ void MainWindow::drawLearnPrompt() {
 void MainWindow::drawClearCorrectionsPrompt() {
     constexpr const char* kId = "Clear corrections?";
     ImGui::OpenPopup(kId);
-
-    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    bar::placePrompt();
 
     if (ImGui::BeginPopupModal(kId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        const std::size_t automatic = m_state.automaticSpurCount();
+        const std::size_t automatic = m_state.instrument().correctionSummary().automaticSpurs;
         ImGui::TextWrapped("Forget the learned floor and spurs for this radio? Its calibration "
                            "file is deleted; Learn makes a new one.");
         ImGui::Separator();
 
         if (ImGui::Button("Clear", ImVec2(120, 0))) {
-            m_state.clearCorrections();
+            m_state.instrument().clearCorrections();
             toast(ToastSeverity::Info, "Corrections cleared");
             m_showClearCorrectionsPrompt = false;
             ImGui::CloseCurrentPopup();
@@ -2428,7 +2885,7 @@ void MainWindow::drawClearCorrectionsPrompt() {
         if (automatic > 0) {
             ImGui::SameLine();
             if (ImGui::Button("Only auto spurs", ImVec2(140, 0))) {
-                m_state.clearAutoSpurs();
+                m_state.instrument().clearAutoSpurs();
                 m_showClearCorrectionsPrompt = false;
                 ImGui::CloseCurrentPopup();
             }
@@ -3978,7 +4435,8 @@ void MainWindow::beginEditingAntenna(const Antenna* antenna) {
 }
 
 void MainWindow::drawAntennasSection() {
-    AntennaLibrary& library = m_state.antennas();
+    const AntennaLibrary& library = m_state.instrument().antennas();
+    ImGui::BeginDisabled(!m_state.instrument().canControl());
 
     fieldCaption("Assign these to connectors in the device panel.", 0.0F);
 
@@ -4034,8 +4492,11 @@ void MainWindow::drawAntennasSection() {
     // Deferred: removing inside the loop would invalidate the span being
     // iterated.
     if (!pendingRemoval.empty()) {
-        library.remove(pendingRemoval);
-        m_state.saveAntennas();
+        AntennaLibrary edited = library;
+        edited.remove(pendingRemoval);
+        if (auto saved = m_state.instrument().setUserAntennas(userAntennas(edited)); !saved) {
+            toast(ToastSeverity::Error, saved.error().describe());
+        }
     }
 
     ImGui::Separator();
@@ -4043,9 +4504,14 @@ void MainWindow::drawAntennasSection() {
         beginEditingAntenna(nullptr);
     }
 
-    fieldCaption(
-        std::format("Stored in {}", (Paths::instance().antennasDir() / "custom.toml").string()),
-        0.0F);
+    if (const remote::RemoteInstrument* remote = m_state.remoteInstrument()) {
+        fieldCaption(std::format("Stored on {}", remote->serverName()), 0.0F);
+    } else {
+        fieldCaption(
+            std::format("Stored in {}", (Paths::instance().antennasDir() / "custom.toml").string()),
+            0.0F);
+    }
+    ImGui::EndDisabled();
 }
 
 void MainWindow::drawAntennaEditor() {
@@ -4114,7 +4580,9 @@ void MainWindow::drawAntennaEditor() {
 
     ImGui::BeginDisabled(nameEmpty || rangeBad);
     if (ImGui::Button("Save", ImVec2(120.0F, 0))) {
-        AntennaLibrary& library = m_state.antennas();
+        // Edited as a copy and handed back whole: the library belongs to the
+        // bench the radio is on.
+        AntennaLibrary library = m_state.instrument().antennas();
 
         // A new entry needs an id; an existing one keeps the one assignments
         // already store, *including* when a shipped antenna is being copied --
@@ -4128,7 +4596,9 @@ void MainWindow::drawAntennaEditor() {
         }
 
         library.add(antenna);
-        m_state.saveAntennas();
+        if (auto saved = m_state.instrument().setUserAntennas(userAntennas(library)); !saved) {
+            toast(ToastSeverity::Error, saved.error().describe());
+        }
         m_showAntennaEditor = false;
     }
     ImGui::EndDisabled();
@@ -4278,35 +4748,52 @@ void MainWindow::drawFftBenchmarkWindow() {
     ImGui::SetNextWindowSizeConstraints(bar::scaled(ImVec2(460.0F, 320.0F)),
                                         ImVec2(FLT_MAX, FLT_MAX));
 
-    if (!ImGui::Begin("FFT benchmark", &m_showFftBenchmark)) {
+    // Named for the machine it measures, which is the one the transforms run
+    // on: this one, or the server.
+    const std::string host = m_state.instrument().computeHost();
+    const std::string title = host.empty() ? std::string("FFT benchmark###fftbench")
+                                           : std::format("FFT benchmark on {}###fftbench", host);
+    if (!ImGui::Begin(title.c_str(), &m_showFftBenchmark)) {
         ImGui::End();
         return;
     }
 
     const ChromeTheme& chrome = m_state.theme().chrome();
-    const bool running = m_fftBenchmark.running();
+    const BenchmarkStatus status = m_state.instrument().benchmark();
+    const bool running = status.running;
 
-    const std::uint32_t workers = m_state.pipelineConfig().workerCount != 0
-                                      ? m_state.pipelineConfig().workerCount
-                                      : defaultWorkerCount();
+    // The server's own worker count when remote: the default is a property of
+    // the machine the pipeline runs on.
+    std::uint32_t workers = m_state.instrument().pipelineConfig().workerCount;
+    if (workers == 0) {
+        const TelemetrySnapshot* engine = m_state.instrument().engineTelemetry();
+        workers = engine != nullptr && engine->process.workerCount > 0 ? engine->process.workerCount
+                                                                       : defaultWorkerCount();
+    }
 
     // The sample rate in force, so a transform size can be shown as the
     // resolution bandwidth it buys -- which is the unit the size was chosen in
     // and the only one the table means anything in.
     double sampleRate = m_state.sweepPlan().sampleRate;
     if (!m_state.sweeping()) {
-        const ISdrDevice* device = m_state.device();
-        sampleRate = device != nullptr
-                         ? asDouble(device->getParameter("sample_rate").value_or(SdrValue{20e6}))
-                         : 20e6;
+        const DeviceDescriptor* device = m_state.device();
+        sampleRate =
+            device != nullptr
+                ? asDouble(m_state.instrument().parameter("sample_rate").value_or(SdrValue{20e6}))
+                : 20e6;
     }
-    const double enbw =
-        windowEnbw(m_state.pipelineConfig().window, m_state.pipelineConfig().windowBeta);
+    const double enbw = windowEnbw(m_state.instrument().pipelineConfig().window,
+                                   m_state.instrument().pipelineConfig().windowBeta);
     const auto rbwFor = [sampleRate, enbw](std::size_t size) {
         return size == 0 ? 0.0 : sampleRate * enbw / static_cast<double>(size);
     };
 
-    ImGui::TextWrapped("Times every available backend on this machine.");
+    if (host.empty()) {
+        ImGui::TextWrapped("Times every available backend on this machine.");
+    } else {
+        ImGui::TextWrapped("Times every available backend on %s, where the transforms run.",
+                           host.c_str());
+    }
 
     ImGui::Spacing();
 
@@ -4358,7 +4845,7 @@ void MainWindow::drawFftBenchmarkWindow() {
     config.sizes = benchLadder(kBenchLadderTops[static_cast<std::size_t>(m_fftBenchTop)]);
     // Always the size actually configured, wherever the ladder stops: the
     // comparison has to include the one this installation is going to run.
-    config.sizes.push_back(m_state.pipelineConfig().fftSize);
+    config.sizes.push_back(m_state.instrument().pipelineConfig().fftSize);
     std::ranges::sort(config.sizes);
     {
         const auto duplicates = std::ranges::unique(config.sizes);
@@ -4376,28 +4863,33 @@ void MainWindow::drawFftBenchmarkWindow() {
     }
 
     std::size_t availableBackends = 0;
-    for (const FftBackendInfo& info : FftBackendManager::instance().enumerate()) {
+    for (const FftBackendInfo& info : m_state.instrument().fftBackends()) {
         availableBackends += info.available ? 1 : 0;
     }
     const std::size_t steps = fftBenchmarkStepCount(config, availableBackends);
 
     ImGui::Spacing();
-    ImGui::BeginDisabled(running);
+    const bool watching = !m_state.instrument().canControl();
+    ImGui::BeginDisabled(running || watching);
     if (ImGui::Button(running ? "Running..." : "Run benchmark")) {
-        m_fftBenchmark.start(config);
+        if (auto started = m_state.instrument().startBenchmark(config); !started) {
+            toast(ToastSeverity::Error, started.error().describe());
+        }
     }
     ImGui::EndDisabled();
 
     if (running) {
         ImGui::SameLine();
+        ImGui::BeginDisabled(watching);
         if (ImGui::Button("Cancel")) {
-            m_fftBenchmark.cancel();
+            m_state.instrument().cancelBenchmark();
         }
+        ImGui::EndDisabled();
     }
 
     ImGui::SameLine();
     if (running) {
-        ImGui::TextDisabled("%s", formatBenchTime(m_fftBenchmark.elapsedSeconds()).c_str());
+        ImGui::TextDisabled("%s", formatBenchTime(status.elapsedSeconds).c_str());
     } else {
         // Planning is excluded: it is measured, not predicted, and on FFTW it
         // is most of a short run.
@@ -4407,11 +4899,10 @@ void MainWindow::drawFftBenchmarkWindow() {
     }
 
     if (running) {
-        const std::size_t total = m_fftBenchmark.stepsTotal();
+        const std::size_t total = status.stepsTotal;
         const float fraction =
-            total == 0 ? 0.0F
-                       : static_cast<float>(m_fftBenchmark.stepsDone()) / static_cast<float>(total);
-        ImGui::ProgressBar(fraction, ImVec2(-1, 0), m_fftBenchmark.currentStep().c_str());
+            total == 0 ? 0.0F : static_cast<float>(status.stepsDone) / static_cast<float>(total);
+        ImGui::ProgressBar(fraction, ImVec2(-1, 0), status.currentStep.c_str());
     }
 
     // Said while it can still be acted on rather than printed beside the
@@ -4424,7 +4915,7 @@ void MainWindow::drawFftBenchmarkWindow() {
         ImGui::PopStyleColor();
     }
 
-    const std::vector<FftBenchmarkEntry> results = m_fftBenchmark.results();
+    const std::vector<FftBenchmarkEntry>& results = status.results;
     if (results.empty()) {
         ImGui::Spacing();
         ImGui::TextDisabled("%s", running ? "Measuring..." : "No results yet.");
@@ -4617,19 +5108,22 @@ void MainWindow::drawFftBenchmarkWindow() {
 
     // The button switches to whichever wins at the size actually configured,
     // because that is the only size this installation is going to run.
-    const FftBenchmarkEntry* forThisSize = fastestAt(m_state.pipelineConfig().fftSize, widest);
+    const FftBenchmarkEntry* forThisSize =
+        fastestAt(m_state.instrument().pipelineConfig().fftSize, widest);
     if (forThisSize == nullptr) {
         ImGui::End();
         return;
     }
 
     ImGui::Spacing();
-    if (m_state.fftBackendName() == forThisSize->backend) {
+    if (m_state.instrument().fftBackendName() == forThisSize->backend) {
         ImGui::TextDisabled("%s is already selected, and wins at the configured size of %u.",
-                            forThisSize->backend.c_str(), m_state.pipelineConfig().fftSize);
+                            forThisSize->backend.c_str(),
+                            m_state.instrument().pipelineConfig().fftSize);
     } else {
         if (ImGui::Button(std::format("Use {}", forThisSize->backend).c_str())) {
-            if (auto switched = m_state.setFftBackend(forThisSize->backend); !switched) {
+            if (auto switched = m_state.instrument().setFftBackend(forThisSize->backend);
+                !switched) {
                 toast(ToastSeverity::Error,
                       std::format("could not switch to '{}': {}", forThisSize->backend,
                                   switched.error().message()));
@@ -4640,7 +5134,7 @@ void MainWindow::drawFftBenchmarkWindow() {
         }
         ImGui::SameLine();
         ImGui::TextDisabled("fastest at the configured size of %u",
-                            m_state.pipelineConfig().fftSize);
+                            m_state.instrument().pipelineConfig().fftSize);
     }
 
     ImGui::End();
@@ -4711,6 +5205,109 @@ void MainWindow::drawPerformancePanel() {
         }
         ImGui::SetCursorPosY(resume);
     };
+
+    // The network first when there is one: everything below it was measured
+    // on the server, and what the link drops is what the server merged.
+    if (const remote::RemoteInstrument* remote = m_state.remoteInstrument()) {
+        const LinkStats link = remote->link();
+        section("Link");
+        ImGui::TextDisabled("Input and processing below are measured on %s.",
+                            remote->serverName().c_str());
+        const AppState::LinkHistory& linkHistory = m_state.linkHistory();
+        if (ImGui::BeginTable("##link", 3,
+                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+            setupStatColumns();
+            statRow("Server", remote->endpoint().address());
+
+            int count = flatten(linkHistory.roundTripMs, buffer);
+            statRow("Round trip", std::format("{:.1f} ms", link.roundTripMs), buffer.data(), count,
+                    0.0F, std::max(linkHistory.roundTripMs.max(), 1.0F), &chrome.warning);
+
+            count = flatten(linkHistory.bytesPerSec, buffer);
+            statRow("Receiving", toml_util::formatByteRate(link.bytesPerSec), buffer.data(), count,
+                    0.0F, std::max(linkHistory.bytesPerSec.max(), 1.0F), &chrome.accent);
+
+            count = flatten(linkHistory.framesSentPerSec, buffer);
+            statRow("Frames sent",
+                    std::format("{} ({:.0f}/s)", link.framesSent,
+                                static_cast<double>(linkHistory.framesSentPerSec.latest())),
+                    buffer.data(), count, 0.0F, std::max(linkHistory.framesSentPerSec.max(), 1.0F),
+                    &chrome.accent);
+
+            statRow("Passes merged", std::format("{}", link.passesCoalesced));
+            statRow("Partials merged", std::format("{}", link.partialsCoalesced));
+            statRow("Events dropped", std::format("{}", link.eventsDropped));
+            if (link.framesSent > 0) {
+                statRow("Server encoding",
+                        std::format("{:.2f} ms a frame", static_cast<double>(link.encodeNs) / 1e6 /
+                                                             static_cast<double>(link.framesSent)));
+            }
+            ImGui::EndTable();
+        }
+
+        // The machine at the other end, which nobody is sitting at: a Pi
+        // throttling at 85 °C or a disk filling with recordings has no other
+        // way to say so.
+        if (const std::optional<HostStats>& host = remote->serverHost()) {
+            section("Server");
+            if (ImGui::BeginTable("##serverhost", 3,
+                                  ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+                setupStatColumns();
+                if (!host->system.empty()) {
+                    statRow("System", std::format("{}, {} cores", host->system, host->cores));
+                }
+                if (host->cpuPercent >= 0.0) {
+                    const int count = flatten(linkHistory.serverCpuPercent, buffer);
+                    statRow("CPU", std::format("{:.0f}% of all cores", host->cpuPercent),
+                            buffer.data(), count, 0.0F, 100.0F, &chrome.warning);
+                }
+                if (host->processCpuPercent >= 0.0 || host->processMemoryBytes > 0) {
+                    statRow("sweeppp-cli",
+                            std::format("{:.0f}% of one core, {}",
+                                        std::max(host->processCpuPercent, 0.0),
+                                        toml_util::formatBytes(host->processMemoryBytes)));
+                }
+                if (host->memoryTotalBytes > 0) {
+                    const int count = flatten(linkHistory.serverMemoryPercent, buffer);
+                    statRow("Memory",
+                            std::format("{} of {} ({:.0f}%)",
+                                        toml_util::formatBytes(host->memoryUsedBytes),
+                                        toml_util::formatBytes(host->memoryTotalBytes),
+                                        100.0 * static_cast<double>(host->memoryUsedBytes) /
+                                            static_cast<double>(host->memoryTotalBytes)),
+                            buffer.data(), count, 0.0F, 100.0F, &chrome.accent);
+                }
+                if (host->temperatureC) {
+                    const int count = flatten(linkHistory.serverTemperatureC, buffer);
+                    const bool hot = *host->temperatureC >= 80.0;
+                    if (hot) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(chrome.danger));
+                    }
+                    statRow("Temperature", std::format("{:.1f} °C", *host->temperatureC),
+                            buffer.data(), count, 20.0F,
+                            std::max(linkHistory.serverTemperatureC.max(), 90.0F), &chrome.danger);
+                    if (hot) {
+                        ImGui::PopStyleColor();
+                    }
+                }
+                if (host->load1 >= 0.0) {
+                    statRow("Load", std::format("{:.2f}", host->load1));
+                }
+                if (host->diskTotalBytes > 0) {
+                    statRow("Recordings disk",
+                            std::format("{} free of {}",
+                                        toml_util::formatBytes(host->diskFreeBytes),
+                                        toml_util::formatBytes(host->diskTotalBytes)));
+                }
+                if (host->uptimeSeconds >= 0.0) {
+                    const auto hours = static_cast<long long>(host->uptimeSeconds / 3600.0);
+                    statRow("Up", hours >= 48 ? std::format("{} d {} h", hours / 24, hours % 24)
+                                              : formatDuration(host->uptimeSeconds));
+                }
+                ImGui::EndTable();
+            }
+        }
+    }
 
     // Link utilisation gets a bar rather than a number: an operator seeing a
     // nearly full bar knows instantly that the cable or the port is the limit,
@@ -4854,7 +5451,7 @@ void MainWindow::drawPerformancePanel() {
         statRow("CPU", std::format("{:.0f}% of one core", stats.render.cpuPercent), buffer.data(),
                 count, 0.0F, std::max(history.cpuPercent.max(), 100.0F), &chrome.warning);
 
-        statRow("Sweep speed", std::format("{:.1f} MHz/s", stats.render.sweepSpeedHzPerSec / 1e6));
+        statRow("Sweep speed", std::format("{:.1f} MHz/s", stats.process.sweepSpeedHzPerSec / 1e6));
         statRow("Uptime", formatDuration(stats.uptimeSeconds));
         ImGui::EndTable();
     }
@@ -5043,9 +5640,8 @@ void MainWindow::drawStartupCard() {
     // The window is up and drawing underneath, which is the point: these
     // seconds used to be spent before it existed at all, so a radio slow to
     // come up was indistinguishable from an application that failed to start.
-    drawProgressCard("##devicestartup", m_state.deviceStartupRunning(),
-                     m_state.deviceStartupLabel(), m_state.deviceStartupDetail(),
-                     m_state.deviceStartupStartedNs());
+    drawProgressCard("##devicestartup", m_state.deviceStartupShown(), m_state.deviceStartupLabel(),
+                     m_state.deviceStartupDetail(), m_state.deviceStartupStartedNs());
 }
 
 void MainWindow::drawProgressCard(const char* id, bool active, const std::string& heading,

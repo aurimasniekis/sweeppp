@@ -75,6 +75,30 @@ with sweepsfile.open("session.sweeps") as session:
 **From the command line**, `sweeps dump` turns a recording into CSV, and
 `sweeps manifest` and `sweeps events` print JSON. See [`sweeps`](cli.md#sweeps).
 
+## Streams
+
+The same records also travel live, as a stream (Appendix C of the format):
+`sweeppp-cli record -o -` writes one to stdout. `sweeps.h` reads it:
+
+- `sweeps_stream_reader_create`, `_feed` and `_next_record` check the stream
+  header and split the bytes into records, however they arrive;
+- `sweeps_stream_mirror_create`, `_apply`, `_line` and `_segment` keep the
+  current line: its grid and its levels in dB.
+
+```c
+sweeps_stream_record_t record = {.struct_size = sizeof record};
+sweeps_stream_line_t line = {.struct_size = sizeof line};
+
+sweeps_stream_reader_feed(reader, buffer, got);
+for (int has = 1; sweeps_stream_reader_next_record(reader, &record, &has) == SWEEPS_OK && has;)
+    sweeps_stream_mirror_apply(mirror, &record);
+sweeps_stream_mirror_line(mirror, &line);   /* line.levels[0 .. line.bin_count) */
+```
+
+Python has the same as `sweepsfile.StreamReader` and `StreamMirror`. A
+server's encrypted link is not a plain stream: this API reads what
+`record -o -` writes, not what `serve` sends.
+
 ## Using libsweepsfile on its own
 
 The library is **MIT**, **C++17**, and depends on nothing: no radio driver, no

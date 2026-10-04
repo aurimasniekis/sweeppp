@@ -3,6 +3,7 @@
 
 #include "sweeppp/core/Clock.hpp"
 #include "sweeppp/core/Log.hpp"
+#include "sweeppp/history/EventMapping.hpp"
 #include "sweeppp/history/IFrameSource.hpp"
 #include "sweeppp/history/SweepsLog.hpp"
 
@@ -98,76 +99,9 @@ void SessionReplay::applyEventsUpTo(std::uint64_t monotonicNs) {
            events[m_nextEventIndex].monotonicNs <= monotonicNs) {
         const SessionEvent& event = events[m_nextEventIndex++];
 
-        // Each body is typed, so republishing is a field-for-field copy.
-        switch (event.kindEnum()) {
-        case SessionEvent::Kind::Retune:
-            if (const auto* body = event.as<RetuneData>()) {
-                m_events.publish(RetuneEvent{.monotonicNs = event.monotonicNs,
-                                             .centerHz = body->centerHz,
-                                             .stepIndex = body->stepIndex});
-            }
-            break;
-
-        case SessionEvent::Kind::ParameterChanged:
-            if (const auto* body = event.as<ParameterChangedData>()) {
-                m_events.publish(
-                    ParameterChangedEvent{.monotonicNs = event.monotonicNs,
-                                          .key = body->key,
-                                          .value = body->value,
-                                          .gridAffecting = body->gridAffecting,
-                                          .calibrationAffecting = body->calibrationAffecting});
-            }
-            break;
-
-        case SessionEvent::Kind::SweepPass:
-            if (const auto* body = event.as<SweepPassData>()) {
-                m_events.publish(SweepPassEvent{.monotonicNs = event.monotonicNs,
-                                                .passId = body->passId,
-                                                .startHz = body->startHz,
-                                                .stopHz = body->stopHz,
-                                                .durationSeconds = body->durationSeconds});
-            }
-            break;
-
-        case SessionEvent::Kind::Marker:
-            if (const auto* body = event.as<MarkerData>()) {
-                m_events.publish(MarkerEvent{.monotonicNs = event.monotonicNs,
-                                             .label = body->label,
-                                             .frequencyHz = body->frequencyHz,
-                                             .levelDbm = body->levelDbm});
-            }
-            break;
-
-        case SessionEvent::Kind::Annotation:
-            if (const auto* body = event.as<AnnotationData>()) {
-                m_events.publish(AnnotationEvent{.monotonicNs = event.monotonicNs,
-                                                 .text = body->text,
-                                                 .startHz = body->startHz,
-                                                 .stopHz = body->stopHz});
-            }
-            break;
-
-        case SessionEvent::Kind::ThrottleChanged:
-            if (const auto* body = event.as<ThrottleChangedData>()) {
-                m_events.publish(
-                    ThrottleChangedEvent{.monotonicNs = event.monotonicNs,
-                                         .reason = body->reason,
-                                         .processedFraction = body->processedFraction});
-            }
-            break;
-
-        case SessionEvent::Kind::SegmentBoundary:
-        case SessionEvent::Kind::DeviceError:
-        case SessionEvent::Kind::Alert:
-        case SessionEvent::Kind::Plugin:
-        default:
-            // Segment boundaries are implicit in the frames themselves, and a
-            // recorded device error is history rather than a live condition.
-            // Alert is reserved and carries no body; a plugin event belongs to a
-            // plugin this replay has no way to reach. The default arm is what
-            // keeps an event id from a newer writer from being a compile error
-            // here rather than something skipped.
-            break;
+        // A recorded device error is history rather than a live condition.
+        if (event.kindEnum() != SessionEvent::Kind::DeviceError) {
+            publishSessionEvent(m_events, event, event.monotonicNs);
         }
     }
 }

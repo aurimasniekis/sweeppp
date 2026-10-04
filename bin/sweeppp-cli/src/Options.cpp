@@ -286,6 +286,62 @@ Result<Options> parseArguments(int argc, char** argv) {
                 return std::unexpected(value.error());
             }
             options.token = *value;
+        } else if (argument == "--linger") {
+            auto value = durationValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.lingerSeconds = *value;
+        } else if (argument == "--backlog") {
+            auto value = durationValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.backlogSeconds = *value;
+        } else if (argument == "--no-advertise") {
+            options.noAdvertise = true;
+        } else if (argument == "--web") {
+            auto value = intValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            if (*value < 1 || *value > 65535) {
+                return fail<Options>(ErrorCode::InvalidArgument, "--web takes a port");
+            }
+            options.webPort = static_cast<std::uint16_t>(*value);
+        } else if (argument == "--web-listen") {
+            auto value = stringValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.webListen = *value;
+        } else if (argument == "--web-root") {
+            auto value = stringValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.webRoot = *value;
+        } else if (argument == "--shared") {
+            options.shared = true;
+        } else if (argument == "--max-clients") {
+            auto value = intValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            if (*value < 1 || *value > 64) {
+                return fail<Options>(ErrorCode::InvalidArgument, "--max-clients takes 1 to 64");
+            }
+            options.maxClients = static_cast<std::uint32_t>(*value);
+        } else if (argument == "--record") {
+            options.record = true;
+        } else if (argument == "--new-token") {
+            options.newToken = true;
+        } else if (argument == "--token-file") {
+            auto value = stringValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.tokenFile = *value;
         } else if (argument == "--from") {
             auto value = durationValue();
             if (!value) {
@@ -331,7 +387,7 @@ COMMANDS
   sweep      Sweep and write CSV. The throughput and correctness harness.
   calibrate  Learn the receiver's floor and spurs. Disconnect the antenna first.
   record     Capture to a .sweeps session file, no GUI.
-  serve      Run the engine and expose the remote protocol. Not available yet.
+  serve      Run the engine for a remote desktop to connect to.
   replay     Play back a .sweeps file.
   info       Describe devices and FFT backends, or a .sweeps file.
   extract    Cut a time+frequency range out of a .sweeps file.
@@ -376,10 +432,26 @@ OUTPUT
   -o, --output <path>      CSV or .sweeps destination; '-' means stdout
   -i, --input <path>       source .sweeps file for replay/info/extract
 
-SERVE (accepted, unused until serve exists)
-  --listen <address>       default 127.0.0.1 -- exposing the node is deliberate
-  --port <n>               default 7332
+SERVE
+  --listen <address>       default 127.0.0.1; 0.0.0.0 for every interface
+  --port <n>               default 7332; 0 picks a free one
   --token <secret>         required for any non-loopback listener
+  --token-file <path>      the token from a file; or set SWEEPPP_REMOTE_TOKEN
+  --new-token              print a new random token and exit
+  --linger <time>          keep sweeping this long for a desktop that dropped
+                           (default: 30s; 0 stops at once)
+  --backlog <time>         passes kept meanwhile and sent when it is back
+                           (default: 120s, at most 64 MiB; 0 keeps none)
+  --record                 record from the start, into the config folder's
+                           sessions/; desktops can download what is recorded
+  --no-advertise           do not answer desktops looking for servers (mDNS);
+                           only a non-loopback listener answers at all
+  --shared                 several clients at once: one controls, the rest
+                           watch, and any can take control
+  --max-clients <n>        with --shared (default: 8)
+  --web <port>             serve the browser UI on this port too
+  --web-listen <address>   where the browser UI listens (default: --listen)
+  --web-root <dir>         serve the UI's files from here, for working on it
 
 EXTRACT
   --from <time>            offset from session start
@@ -399,6 +471,13 @@ EXAMPLES
   # Learn a bladeRF's floor and spurs with no antenna, then sweep through them
   sweeppp-cli calibrate --device bladerf --start 2300M --stop 3400M --sample-rate 61.44M
   sweeppp-cli sweep --device bladerf --start 2300M --stop 3400M --flatten --spur-mask
+
+  # Serve a HackRF to desktops on the local network
+  sweeppp-cli serve --device hackrf --listen 0.0.0.0 --token-file ~/.sweeppp-token
+
+  # ...and to browsers, several at once
+  sweeppp-cli serve --device hackrf --listen 0.0.0.0 --token-file ~/.sweeppp-token \
+      --shared --web 8080
 
   # What is available in this build?
   sweeppp-cli info)");

@@ -197,6 +197,16 @@ private:
     mutable std::mutex m_gridMutex;
     std::vector<float> m_grid;
     std::vector<std::uint8_t> m_gridWritten;
+
+    /// Bins written since the last frame was published, as a range; the
+    /// whole grid when `m_dirtyAll`, after a reset. Guarded by m_gridMutex.
+    std::size_t m_dirtyFirst = 0;
+    std::size_t m_dirtyEnd = 0;
+    bool m_dirtyAll = true;
+
+    /// Stamps `frame` with the range and starts the next one. Called with
+    /// m_gridMutex held.
+    void takeDirtyRange(SpectrumFrame& frame);
     /// `m_schedule.coveredBinCount()`, taken once in configure.
     std::size_t m_coveredBinCount = 0;
 

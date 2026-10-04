@@ -358,8 +358,12 @@ Status CorrectionSet::save(const std::filesystem::path& path) const {
 }
 
 std::filesystem::path CorrectionSet::pathFor(const SdrDeviceInfo& info) {
-    return Paths::instance().calibrationDir() /
-           (sanitisedFileStem(AntennaAssignments::deviceKey(info)) + ".toml");
+    return pathFor(info, Paths::instance().calibrationDir());
+}
+
+std::filesystem::path CorrectionSet::pathFor(const SdrDeviceInfo& info,
+                                             const std::filesystem::path& directory) {
+    return directory / (sanitisedFileStem(AntennaAssignments::deviceKey(info)) + ".toml");
 }
 
 void applyCorrections(std::span<float> bins, double centerHz, double sampleRate,

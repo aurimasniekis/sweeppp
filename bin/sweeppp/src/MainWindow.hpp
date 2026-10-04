@@ -5,7 +5,6 @@
 
 #include "AppState.hpp"
 #include "ContributionOverlay.hpp"
-#include "FftBenchmarkRunner.hpp"
 #include "UpdateCheck.hpp"
 #include "ViewPanel.hpp"
 #include "render/HistoryView.hpp"
@@ -96,6 +95,8 @@ private:
 public:
 private:
     void drawToolbar();
+    /// Under the toolbar while watching a radio another client controls.
+    void drawControlBanner();
 
     /// The panel launchers, and the popups they open.
     ///
@@ -189,6 +190,8 @@ private:
     /// Clones the focused panel into new slots or drops trailing attached
     /// panels, until the attached ones fill `arrangement`.
     void setArrangement(PanelArrangement arrangement);
+    /// Keeps the waterfall a rearrangement is about to take from new panels.
+    void captureWaterfallSeed();
 
     void setPanelMode(PanelMode mode);
 
@@ -345,6 +348,15 @@ private:
     /// beside it, and a popover closes the moment attention moves.
     void drawAntennaEditor();
 
+    /// Opens the server window on a saved server, or on a new one -- filled
+    /// in from `server` but saved as new when `isNew`.
+    void beginEditingServer(const remote::SavedServer* server, bool isNew = false);
+    void drawServerEditor();
+
+    /// The saved servers, for the device chooser. The one clicked, to be
+    /// connected to once nothing still points into the list.
+    [[nodiscard]] std::optional<remote::SavedServer> drawServerList();
+
     /// Opens the editor on `antenna`, or on a blank entry when it is null.
     void beginEditingAntenna(const Antenna* antenna);
 
@@ -356,12 +368,20 @@ private:
     /// concept exactly as `info()` and `healthReadings()` are.
     void drawDeviceAntennas();
 
+    /// What the server has recorded and is recording, with downloads.
+    void drawServerRecordings(remote::RemoteInstrument& remote);
+    /// Who else is connected to a shared server.
+    void drawServerClients(const remote::RemoteInstrument& remote);
+
     /// Which connector the radio is listening on right now, in the status bar.
     ///
     /// Live rather than configured: a routed sweep moves it several times a
     /// pass, and "which antenna measured this" is the question an operator has
     /// while looking at the trace, not while setting the bench up.
     void drawRxPortChip(const ChromeTheme& chrome);
+
+    /// The server the radio is on, the round trip and the rate, while remote.
+    void drawLinkChip(const ChromeTheme& chrome);
 
     /// One assignment row: a label, a combo, and the caption under it.
     ///
@@ -449,6 +469,10 @@ private:
     /// `m_frameLines` reduced to a texture width, by width, made on first use
     /// this frame and shared by every Mirror panel that width.
     std::map<std::uint32_t, std::vector<std::vector<float>>> m_reducedLines;
+
+    /// The focused panel's waterfall as it was just before the panels were
+    /// rearranged, for the panels that arrangement makes. Held for one frame.
+    WaterfallHistory m_waterfallSeed;
     std::vector<float> m_reduceScratch;
 
     /// The plan generation and segments the views were last fitted and bound
@@ -575,6 +599,11 @@ private:
     float m_historyOverviewHeight = 72.0F;
 
     bool m_showPerformance = false;
+
+    /// When the server last had to merge passes for a link that could not
+    /// keep up, so the link chip can say so for a while afterwards.
+    std::uint64_t m_linkMergedSeen = 0;
+    std::uint64_t m_linkMergedAtNs = 0;
     bool m_showHistory = false;
     bool m_showGradientEditor = false;
     bool m_showFftBenchmark = false;
@@ -591,18 +620,27 @@ private:
     /// which id the copy has to carry to shadow it.
     std::string m_editingAntennaOriginalId;
 
-    /// The switchers on the bench, and when they were last looked for.
-    ///
-    /// Cached rather than asked per frame: `enumerate` is a bus scan per
-    /// driver, and the panel is drawn sixty times a second.
-    std::vector<RfPathInfo> m_switcherList;
+    /// The resolution a recording on the server is started at, as an index
+    /// into the choices the section offers.
+    int m_serverRecordBins = 1;
+    /// The recording waiting on its delete prompt.
+    std::string m_recordingToDelete;
+
+    bool m_showServerEditor = false;
+    remote::SavedServer m_editingServer;
+    /// As typed, which may not parse yet.
+    std::string m_editingServerAddress;
+    /// The address it was saved under; empty for a new one.
+    std::string m_editingServerOriginal;
+
+    /// When the switchers on the bench were last looked for. Not per frame:
+    /// `enumerate` is a bus scan per driver.
     std::uint64_t m_switcherListNs = 0;
 
     /// Which backend is fastest is a property of this machine, so it is
     /// measured here rather than asserted in a document. Owned by the window
     /// and not by AppState: nothing outside the panel acts on the result, and
     /// the run must be abandoned when the window goes away.
-    FftBenchmarkRunner m_fftBenchmark;
 
     /// How long to spend per measurement: 0 quick, 1 normal, 2 thorough.
     int m_fftBenchDepth = 1;

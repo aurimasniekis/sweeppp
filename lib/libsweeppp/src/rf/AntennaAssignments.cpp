@@ -19,6 +19,15 @@ bool isPortEntry(const AntennaAssignment& entry) {
 
 } // namespace
 
+AntennaAssignments
+AntennaAssignments::of(std::vector<AntennaAssignment> entries,
+                       std::vector<std::pair<std::string, std::string>> fallbackPorts) {
+    AntennaAssignments assignments;
+    assignments.m_entries = std::move(entries);
+    assignments.m_fallbackPorts = std::move(fallbackPorts);
+    return assignments;
+}
+
 AntennaAssignments AntennaAssignments::load(const std::filesystem::path& path) {
     AntennaAssignments assignments;
 

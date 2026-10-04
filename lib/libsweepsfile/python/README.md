@@ -126,6 +126,20 @@ rather than written: the format's arrays are homogeneous and coerce a mismatched
 element to its type's default, so writing one could quietly lose data — encode
 the list yourself and make the loss your decision.
 
+## Live streams
+
+```python
+reader, mirror = sweepsfile.StreamReader(), sweepsfile.StreamMirror()
+for chunk in iter(lambda: sys.stdin.buffer.read1(65536), b""):
+    reader.feed(chunk)
+    for record in reader.records():
+        mirror.apply(record)
+        if record.type == sweepsfile.RecordType.PLUGIN_DATA:
+            line = mirror.line()       # .start_hz, .bin_width_hz, .levels
+```
+
+A bad header, checksum or oversized record raises, and keeps raising.
+
 ## Errors
 
 Every call checks its status and raises. `SweepsError` carries both halves the C

@@ -2,6 +2,7 @@ set(SWEEPPP_SOURCES
     src/core/BlockPool.cpp
     src/core/CrashHandler.cpp
     src/core/EventBus.cpp
+    src/core/HostStats.cpp
     src/core/Log.cpp
     src/core/Paths.cpp
     src/core/SystemInfo.cpp
@@ -11,16 +12,31 @@ set(SWEEPPP_SOURCES
 
     src/dsp/Convert.cpp
 
+    src/crypto/Noise.cpp
+    src/crypto/Sha1.cpp
+    src/crypto/Sha256.cpp
+
     src/correction/CorrectionLearner.cpp
     src/correction/Corrections.cpp
 
     src/fft/FftBackendManager.cpp
     src/fft/FftBenchmark.cpp
+    src/fft/FftBenchmarkRunner.cpp
     src/fft/IFftBackend.cpp
     src/fft/Window.cpp
 
-    src/history/SessionReplay.cpp
+    src/history/EventMapping.cpp
     src/history/SessionRecorder.cpp
+    src/history/SessionReplay.cpp
+
+    src/instrument/LocalInstrument.cpp
+
+    src/net/Base64.cpp
+    src/net/Http.cpp
+    src/net/SecureChannel.cpp
+    src/net/Socket.cpp
+    src/net/Udp.cpp
+    src/net/WebSocket.cpp
 
     src/pipeline/AsyncFrameConsumer.cpp
     src/pipeline/FrameBus.cpp
@@ -32,6 +48,18 @@ set(SWEEPPP_SOURCES
     src/plugin/PluginHost.cpp
     src/plugin/PluginSearchPath.cpp
     src/plugin/PluginSettings.cpp
+
+    src/remote/ClockMap.cpp
+    src/remote/FrameCodec.cpp
+    src/remote/Handshake.cpp
+    src/remote/Mdns.cpp
+    src/remote/Messages.cpp
+    src/remote/Reconnector.cpp
+    src/remote/RemoteInstrument.cpp
+    src/remote/RemoteServer.cpp
+    src/remote/ServerList.cpp
+    src/remote/StreamIo.cpp
+    src/remote/WireCodec.cpp
 
     src/rf/Antenna.cpp
     src/rf/AntennaAssignments.cpp
@@ -56,6 +84,8 @@ set(SWEEPPP_SOURCES
     src/ui/ToastCenter.cpp
     src/ui/TraceStore.cpp
 
+    src/web/WebServer.cpp
+
     src/backends/sdr/iqfile/IqFileDevice.cpp
     src/backends/sdr/synthetic/SyntheticDevice.cpp
 )
@@ -75,13 +105,18 @@ target_include_directories(sweeppp
 # rather than guessed.
 target_link_libraries(sweeppp
     PUBLIC  sweeps::sweepsfile tomlplusplus::tomlplusplus Threads::Threads
-    PRIVATE sweeppp_warnings ${CMAKE_DL_LIBS})
+    PRIVATE sweeppp_warnings sweeppp_monocypher nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})
 
 # dbghelp is the crash handler's, and nothing else in the tree needs it:
 # turning a captured return address into a name is SymFromAddr's job, and the
 # POSIX side gets the same from backtrace_symbols_fd in libc.
 if(WIN32)
     target_link_libraries(sweeppp PRIVATE dbghelp)
+endif()
+
+# Winsock for the remote link, and the system generator its nonces come from.
+if(WIN32)
+    target_link_libraries(sweeppp PRIVATE ws2_32 bcrypt iphlpapi)
 endif()
 
 target_compile_definitions(sweeppp PRIVATE

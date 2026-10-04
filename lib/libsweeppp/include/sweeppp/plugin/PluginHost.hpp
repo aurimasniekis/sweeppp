@@ -183,6 +183,9 @@ struct Contribution {
     [[nodiscard]] double widthHz() const noexcept { return stopHz - startHz; }
 };
 
+/// One row of a contributor's tick tree, copied out of the plugin.
+using ContributorTreeRow = plugin::TreeRow;
+
 /// A version as it is shown: "v1.2.0".
 ///
 /// Display only. `PluginInfo::version` stays the bare dotted decimal the
@@ -495,6 +498,17 @@ public:
     [[nodiscard]] std::uint32_t activeDataset(std::string_view id) const;
 
     [[nodiscard]] Status selectDataset(std::string_view id, std::uint32_t index);
+
+    /// One contributor's tick tree, in drawing order. Empty for one that has
+    /// none.
+    [[nodiscard]] std::vector<ContributorTreeRow> contributorTree(std::string_view id) const;
+
+    /// The operator clicked one row's tick in that tree.
+    [[nodiscard]] Status toggleContributorRow(std::string_view id, std::string_view key);
+
+    /// Counts every change to what the contributors hand out -- shown, order,
+    /// dataset, a tick, a hidden entry -- so a client knows to ask again.
+    [[nodiscard]] std::uint64_t contributionsGeneration() const noexcept;
 
     /// Dataset names every active contributor offers, as "plugin id: dataset".
     [[nodiscard]] std::vector<std::string> providedDatasets() const;

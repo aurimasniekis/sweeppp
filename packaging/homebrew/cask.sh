@@ -62,7 +62,6 @@ cask "$token" do
 
   app "sweeppp-#{version}-macos-#{arch}/$name.app"
   binary "sweeppp-#{version}-macos-#{arch}/sweeppp-cli"$(target "sweeppp$suffix-cli")
-  binary "sweeppp-#{version}-macos-#{arch}/sweeppp-server"$(target "sweeppp$suffix-server")
   binary "sweeppp-#{version}-macos-#{arch}/sweeps"$(target "sweeps$suffix")
 
   zap trash: "~/Library/Application Support/sweeppp$suffix"

@@ -61,7 +61,7 @@ namespace sweeppp {
 
 /// Version of the remote streaming protocol. Shares the container's record
 /// encoding, but negotiates independently of the file format.
-inline constexpr std::uint32_t kRemoteProtocolVersion = 1;
+inline constexpr std::uint32_t kRemoteProtocolVersion = 2;
 
 /// Plugin ABI version. Bumped on any change to `sweeppp_host_api_t`'s layout,
 /// or to any other struct in <sweeppp/plugin/PluginAbi.h>; the host refuses to
