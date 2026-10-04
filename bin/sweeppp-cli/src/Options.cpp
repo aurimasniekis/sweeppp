@@ -286,6 +286,18 @@ Result<Options> parseArguments(int argc, char** argv) {
                 return std::unexpected(value.error());
             }
             options.token = *value;
+        } else if (argument == "--linger") {
+            auto value = durationValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.lingerSeconds = *value;
+        } else if (argument == "--no-advertise") {
+            options.noAdvertise = true;
+        } else if (argument == "--record") {
+            options.record = true;
+        } else if (argument == "--new-token") {
+            options.newToken = true;
         } else if (argument == "--token-file") {
             auto value = stringValue();
             if (!value) {
@@ -387,6 +399,13 @@ SERVE
   --port <n>               default 7332; 0 picks a free one
   --token <secret>         required for any non-loopback listener
   --token-file <path>      the token from a file; or set SWEEPPP_REMOTE_TOKEN
+  --new-token              print a new random token and exit
+  --linger <time>          keep sweeping this long for a desktop that dropped
+                           (default: 30s; 0 stops at once)
+  --record                 record from the start, into the config folder's
+                           sessions/; desktops can download what is recorded
+  --no-advertise           do not answer desktops looking for servers (mDNS);
+                           only a non-loopback listener answers at all
 
 EXTRACT
   --from <time>            offset from session start

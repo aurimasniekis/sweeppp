@@ -19,15 +19,10 @@ inline constexpr std::string_view kPluginId = "org.sweeppp.remote";
 inline constexpr std::uint32_t kProtocolVersion = kRemoteProtocolVersion;
 inline constexpr std::uint16_t kDefaultPort = 7332;
 
-/// What the MAC is computed over, ahead of the two nonces. Names the protocol
-/// version so a MAC from one can never be replayed into another.
-inline constexpr std::string_view kAuthContext = "sweeppp-remote-1";
-inline constexpr std::size_t kNonceBytes = 32;
-
 // ---- limits -----------------------------------------------------------------
 
-/// Largest record a server accepts before the client has authenticated: a
-/// hello or an auth, never more.
+/// Largest handshake message a server accepts before the client has shown it
+/// holds the token: a hello, never more.
 inline constexpr std::uint32_t kMaxPreAuthRecordBytes = 4U * 1024U;
 inline constexpr std::uint32_t kMaxClientRecordBytes = 4U * 1024U * 1024U;
 inline constexpr std::uint32_t kMaxServerRecordBytes = 16U * 1024U * 1024U;
@@ -38,19 +33,28 @@ inline constexpr unsigned kMaxMetadataDepth = 8;
 /// A grid wider than this is refused by the receiver: 64 MiB of levels.
 inline constexpr std::uint32_t kMaxGridBins = 16U * 1024U * 1024U;
 
+/// The fewest bins a link may reduce frames to.
+inline constexpr std::uint32_t kMinLinkBins = 1024;
+
 inline constexpr std::size_t kMaxQueuedCommands = 256;
+
+/// One piece of a recording being downloaded, and how many a client may have
+/// asked for and not yet received.
+inline constexpr std::uint32_t kChunkBytes = 256U * 1024U;
+inline constexpr std::size_t kMaxChunksInFlight = 4;
 
 inline constexpr std::chrono::seconds kHandshakeTimeout{5};
 inline constexpr std::chrono::seconds kSilenceTimeout{10};
 inline constexpr std::chrono::milliseconds kRefusalDelay{1000};
 inline constexpr std::chrono::milliseconds kPingInterval{1000};
 
+/// How long a server keeps a radio running for a client that dropped without
+/// saying goodbye, so a reconnect finds it still sweeping.
+inline constexpr std::chrono::seconds kDefaultLinger{30};
+
 // ---- message names -------------------------------------------------------------
 
 namespace msg {
-inline constexpr std::string_view kHello = "hello";
-inline constexpr std::string_view kChallenge = "challenge";
-inline constexpr std::string_view kAuth = "auth";
 inline constexpr std::string_view kWelcome = "welcome";
 inline constexpr std::string_view kRefused = "refused";
 inline constexpr std::string_view kCommand = "command";
@@ -61,11 +65,11 @@ inline constexpr std::string_view kFrame = "frame";
 inline constexpr std::string_view kPing = "ping";
 inline constexpr std::string_view kPong = "pong";
 inline constexpr std::string_view kBye = "bye";
+inline constexpr std::string_view kChunk = "chunk";
 } // namespace msg
 
 /// Why a server turned a connection away.
 namespace refusal {
-inline constexpr std::string_view kAuth = "auth";
 inline constexpr std::string_view kBusy = "busy";
 inline constexpr std::string_view kVersion = "version";
 inline constexpr std::string_view kLimit = "limit";
@@ -93,6 +97,16 @@ inline constexpr std::string_view kClearCorrections = "clearCorrections";
 inline constexpr std::string_view kSetUserAntennas = "setUserAntennas";
 inline constexpr std::string_view kSetAssignments = "setAssignments";
 inline constexpr std::string_view kRescanSwitchers = "rescanSwitchers";
+/// The connection's, not the instrument's: how many bins frames are reduced
+/// to before they are sent. Zero sends them whole.
+inline constexpr std::string_view kSetLinkResolution = "setLinkResolution";
+inline constexpr std::string_view kStartBenchmark = "startBenchmark";
+inline constexpr std::string_view kCancelBenchmark = "cancelBenchmark";
+inline constexpr std::string_view kStartRecording = "startRecording";
+inline constexpr std::string_view kStopRecording = "stopRecording";
+inline constexpr std::string_view kDeleteRecording = "deleteRecording";
+/// Answered with a `chunk` of the file rather than in a state section.
+inline constexpr std::string_view kFetchRecording = "fetchRecording";
 } // namespace op
 
 /// The parts of an instrument's state a `state` message carries, each a hash
@@ -111,6 +125,9 @@ inline constexpr std::string_view kAntennas = "antennas";
 inline constexpr std::string_view kAssignments = "assignments";
 inline constexpr std::string_view kSwitchers = "switchers";
 inline constexpr std::string_view kRfPath = "rfPath";
+inline constexpr std::string_view kLink = "link";
+inline constexpr std::string_view kBenchmark = "benchmark";
+inline constexpr std::string_view kRecordings = "recordings";
 } // namespace section
 
 } // namespace sweeppp::remote

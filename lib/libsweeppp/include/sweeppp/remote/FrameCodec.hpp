@@ -17,6 +17,46 @@
 
 namespace sweeppp::remote {
 
+/// The bins that changed across one or more frames: a range, nothing, or
+/// unknown -- which is everything.
+struct ChangedBins {
+    bool known = true;
+    std::size_t first = 0;
+    std::size_t end = 0;
+
+    [[nodiscard]] static ChangedBins unknown() noexcept { return {.known = false}; }
+
+    /// What `frame` says changed since the frame before it.
+    [[nodiscard]] static ChangedBins of(const SpectrumFrame& frame) noexcept;
+
+    [[nodiscard]] bool empty() const noexcept { return known && first >= end; }
+
+    void add(const ChangedBins& other) noexcept;
+};
+
+/// `frame` reduced to at most `maxBins`, each new bin the strongest of the
+/// `ceil(bins / maxBins)` it covers -- so a narrow carrier survives the
+/// reduction at its true level -- and unmeasured where none of them was.
+/// `changed` is narrowed to the reduced grid along with it.
+[[nodiscard]] SpectrumFrame reduceFrame(const SpectrumFrame& frame, std::size_t maxBins,
+                                        ChangedBins& changed);
+
+/// `reduceFrame` for a stream of frames, keeping the reduced grid between
+/// them: only the groups `changed` touches are recomputed, so a sweep's
+/// partial frames cost their own width rather than the whole grid's.
+class FrameReducer {
+public:
+    [[nodiscard]] SpectrumFrame reduce(const SpectrumFrame& frame, std::size_t maxBins,
+                                       ChangedBins& changed);
+
+private:
+    std::vector<float> m_levels;
+    std::size_t m_sourceBins = 0;
+    double m_startHz = 0.0;
+    double m_binWidthHz = 0.0;
+    std::size_t m_group = 0;
+};
+
 /// Turns the frames a server publishes into the records that rebuild them on
 /// the client: a SegmentOpen when the grid or the acquisition config changes,
 /// a tile for each 1024-bin block whose quantised levels changed, and a
@@ -33,8 +73,11 @@ public:
     };
 
     /// Appends the records that take a mirror from the last frame encoded to
-    /// `frame`. A frame with no bins appends nothing.
-    void encode(const SpectrumFrame& frame, std::vector<std::byte>& out);
+    /// `frame`. `changed` is every bin that moved since that frame; blocks
+    /// outside it are not even compared. A frame with no bins appends
+    /// nothing.
+    void encode(const SpectrumFrame& frame, std::vector<std::byte>& out,
+                ChangedBins changed = ChangedBins::unknown());
 
     /// Appends a SegmentClose for the open segment, if there is one.
     void close(std::uint64_t monotonicNs, std::vector<std::byte>& out);

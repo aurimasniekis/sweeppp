@@ -93,6 +93,14 @@ struct Options {
     std::uint16_t port = 7332;
     std::string token;
     std::string tokenFile;
+    /// Print a fresh token and exit.
+    bool newToken = false;
+    /// How long the radio keeps running for a client that dropped.
+    double lingerSeconds = 30.0;
+    /// Record on the server from the start.
+    bool record = false;
+    /// Stay out of desktops' "On this network" lists.
+    bool noAdvertise = false;
 
     /// extract
     double fromSeconds = 0.0;

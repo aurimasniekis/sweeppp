@@ -944,6 +944,18 @@ void MainWindow::drawSourceSection() {
     }
 
     if (m_deviceChooserMode) {
+        // Above everything else: the radio the operator was using is the one
+        // being looked for, and stopping that is the first choice they have.
+        if (m_state.reconnecting()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(m_state.theme().chrome().warning));
+            ImGui::TextWrapped("%s", m_state.reconnectStatus().c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::Button("Stop trying", ImVec2(-1, 0))) {
+                m_state.stopReconnecting();
+            }
+            ImGui::Spacing();
+        }
+
         ImGui::SeparatorText(device == nullptr ? "Select a device" : "Switch device");
 
         const std::vector<SdrDeviceInfo>& available = m_state.availableDevices();
@@ -1063,6 +1075,11 @@ void MainWindow::drawSourceSection() {
     ImGui::Spacing();
     drawDeviceAntennas();
 
+    if (remote::RemoteInstrument* server = m_state.remoteInstrument()) {
+        ImGui::Spacing();
+        drawServerRecordings(*server);
+    }
+
     ImGui::Spacing();
     ImGui::Separator();
     if (ImGui::Button("Change device", ImVec2(-1, 0))) {
@@ -1072,6 +1089,150 @@ void MainWindow::drawSourceSection() {
         m_state.stop();
         m_state.closeDevice();
         m_deviceChooserMode = true;
+    }
+}
+
+void MainWindow::drawServerRecordings(remote::RemoteInstrument& remote) {
+    ImGui::SeparatorText(std::format("Recordings on {}", remote.serverName()).c_str());
+    const remote::ServerRecordings& recordings = remote.recordings();
+    const ChromeTheme& chrome = m_state.theme().chrome();
+    if (!recordings.available) {
+        fieldCaption("This server has nowhere to record to.", 0.0F);
+        return;
+    }
+
+    // Recorded there at a resolution of its own, completed passes only while
+    // sweeping: independent of how much the network can carry.
+    struct Choice {
+        std::uint32_t bins;
+        const char* label;
+    };
+    static constexpr std::array<Choice, 4> kChoices{{{16'777'216, "Full"},
+                                                     {65'536, "65 536 bins"},
+                                                     {16'384, "16 384 bins"},
+                                                     {4'096, "4 096 bins"}}};
+    if (recordings.active) {
+        ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(chrome.record));
+        ImGui::TextWrapped("Recording %s", recordings.current.c_str());
+        ImGui::PopStyleColor();
+        fieldCaption(
+            std::format("{} lines, {}", recordings.lines, toml_util::formatBytes(recordings.bytes)),
+            0.0F);
+        if (ImGui::Button("Stop recording", ImVec2(-1, 0))) {
+            remote.stopRecording();
+        }
+    } else {
+        m_serverRecordBins =
+            std::clamp(m_serverRecordBins, 0, static_cast<int>(kChoices.size()) - 1);
+        field("Resolution", "Bins a line in the recording. Full keeps every bin of a sweep and "
+                            "can be gigabytes an hour.");
+        if (ImGui::BeginCombo("##recordbins",
+                              kChoices[static_cast<std::size_t>(m_serverRecordBins)].label)) {
+            for (std::size_t i = 0; i < kChoices.size(); ++i) {
+                if (ImGui::Selectable(kChoices[i].label,
+                                      static_cast<int>(i) == m_serverRecordBins)) {
+                    m_serverRecordBins = static_cast<int>(i);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::Button("Record on server", ImVec2(-1, 0))) {
+            remote.startRecording(kChoices[static_cast<std::size_t>(m_serverRecordBins)].bins);
+        }
+    }
+
+    const std::vector<remote::RemoteInstrument::Download> downloads = remote.downloads();
+    const float action = ImGui::GetFrameHeight();
+    for (const remote::RecordingFile& file : recordings.files) {
+        if (recordings.active && file.name == recordings.current) {
+            continue;
+        }
+        ImGui::PushID(file.name.c_str());
+        const auto download =
+            std::ranges::find(downloads, file.name, &remote::RemoteInstrument::Download::name);
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(file.name.c_str());
+        ImGui::SameLine();
+        const float rowRight = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(
+            std::max(ImGui::GetCursorPosX(),
+                     rowRight - ((action + ImGui::GetStyle().ItemSpacing.x) * 2.0F)));
+
+        const bool inFlight =
+            download != downloads.end() && !download->done && download->error.empty();
+        if (download != downloads.end() && download->done) {
+            if (iconButton("##open", icon::kOpen, "o", action)) {
+                launchHistoryViewer(download->path);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Open %s", download->path.string().c_str());
+            }
+        } else if (inFlight) {
+            if (iconButton("##cancel", icon::kClose, "x", action)) {
+                remote.cancelDownload(file.name);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Stop the download");
+            }
+        } else {
+            if (iconButton("##download", icon::kDownload, "v", action)) {
+                if (auto started = remote.beginDownload(file.name, Paths::instance().sessionsDir());
+                    !started) {
+                    toast(ToastSeverity::Error, started.error().describe());
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Download to %s",
+                                  Paths::instance().sessionsDir().string().c_str());
+            }
+        }
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(inFlight);
+        if (iconButton("##delete", icon::kDelete, "-", action)) {
+            m_recordingToDelete = file.name;
+            ImGui::OpenPopup("##deleterecording");
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Delete it from %s", remote.serverName().c_str());
+        }
+
+        if (inFlight) {
+            const float fraction = download->totalBytes == 0
+                                       ? 0.0F
+                                       : static_cast<float>(download->received) /
+                                             static_cast<float>(download->totalBytes);
+            ImGui::ProgressBar(fraction, ImVec2(-1, 0),
+                               std::format("{} of {}", toml_util::formatBytes(download->received),
+                                           toml_util::formatBytes(download->totalBytes))
+                                   .c_str());
+        } else if (download != downloads.end() && !download->error.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(chrome.warning));
+            fieldCaption(download->error, 12.0F);
+            ImGui::PopStyleColor();
+        } else {
+            fieldCaption(toml_util::formatBytes(file.bytes), 12.0F);
+        }
+
+        if (ImGui::BeginPopup("##deleterecording")) {
+            ImGui::Text("Delete %s from %s?", m_recordingToDelete.c_str(),
+                        remote.serverName().c_str());
+            if (ImGui::Button("Delete")) {
+                remote.deleteRecording(m_recordingToDelete);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+    if (recordings.files.empty()) {
+        fieldCaption("Nothing recorded yet.", 0.0F);
     }
 }
 
@@ -1129,17 +1290,51 @@ std::optional<remote::SavedServer> MainWindow::drawServerList() {
         pendingConnect.reset();
     }
 
+    // Found by asking the network, and not already in the list above. A click
+    // fills in the server window, which only wants the token.
+    std::vector<remote::mdns::DiscoveredServer> nearby = m_state.discoveredServers();
+    std::erase_if(nearby, [this](const remote::mdns::DiscoveredServer& server) {
+        return m_state.servers().find(server.endpoint.address()) != nullptr;
+    });
+    if (!nearby.empty()) {
+        ImGui::TextDisabled("On this network");
+        for (const remote::mdns::DiscoveredServer& server : nearby) {
+            const std::string address = server.endpoint.address();
+            ImGui::PushID(address.c_str());
+            ImGui::BeginGroup();
+            if (ImGui::Selectable("##nearby", false, ImGuiSelectableFlags_None,
+                                  ImVec2(0, ImGui::GetTextLineHeight() * 2.4F))) {
+                const remote::SavedServer found{.name = server.found.instance,
+                                                .endpoint = server.endpoint};
+                beginEditingServer(&found, true);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s at %s", server.found.device.c_str(), address.c_str());
+            }
+            const ImVec2 rowMin = ImGui::GetItemRectMin();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F),
+                          packed(m_state.theme().chrome().text), server.found.instance.c_str());
+            const std::string detail =
+                std::format("{}{}", server.found.device, server.found.busy ? "  in use" : "");
+            draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F + ImGui::GetTextLineHeight()),
+                          packed(m_state.theme().chrome().textDim), detail.c_str());
+            ImGui::EndGroup();
+            ImGui::PopID();
+        }
+    }
+
     if (ImGui::Button("Add server...", ImVec2(-1, 0))) {
         beginEditingServer(nullptr);
     }
     return pendingConnect;
 }
 
-void MainWindow::beginEditingServer(const remote::SavedServer* server) {
+void MainWindow::beginEditingServer(const remote::SavedServer* server, bool isNew) {
     if (server != nullptr) {
         m_editingServer = *server;
         m_editingServerAddress = server->endpoint.address();
-        m_editingServerOriginal = m_editingServerAddress;
+        m_editingServerOriginal = isNew ? std::string{} : m_editingServerAddress;
     } else {
         m_editingServer = remote::SavedServer{};
         m_editingServerAddress.clear();
@@ -2358,21 +2553,14 @@ void MainWindow::drawAnalysisSection() {
             ImGui::EndCombo();
         }
 
-        // The bench measures this machine, which is not where a remote
-        // radio's transforms run.
         ImGui::SameLine();
-        ImGui::BeginDisabled(!m_state.instrument().canBenchmark());
         if (ImGui::Button(benchLabel.c_str(), ImVec2(benchWidth, 0.0F))) {
             m_showFftBenchmark = true;
         }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            if (const remote::RemoteInstrument* remote = m_state.remoteInstrument()) {
-                ImGui::SetTooltip("The transforms run on %s, not here",
-                                  remote->serverName().c_str());
-            } else {
-                ImGui::SetTooltip("Benchmark every available backend on this machine");
-            }
+        if (ImGui::IsItemHovered()) {
+            const std::string host = m_state.instrument().computeHost();
+            ImGui::SetTooltip("Benchmark every available backend on %s",
+                              host.empty() ? "this machine" : host.c_str());
         }
 
         int throttle = static_cast<int>(config.throttleMode);
@@ -2414,6 +2602,36 @@ void MainWindow::drawAnalysisSection() {
 
     drawCorrectionsBlock(sweeping);
 
+    // How finely the spectrum crosses the network, which is a property of the
+    // link rather than of the analysis: the server measures at full resolution
+    // whatever this says.
+    if (const remote::RemoteInstrument* remote = m_state.remoteInstrument()) {
+        struct Choice {
+            std::uint32_t bins;
+            const char* label;
+        };
+        static constexpr std::array<Choice, 4> kChoices{{{0, "Full"},
+                                                         {262'144, "262 144 bins"},
+                                                         {65'536, "65 536 bins"},
+                                                         {16'384, "16 384 bins"}}};
+        const std::uint32_t current = remote->linkResolution();
+        const auto selected = std::ranges::find(kChoices, current, &Choice::bins);
+        field("Network resolution",
+              "How finely the spectrum crosses the network. Fewer bins keep a slow link live; "
+              "each bin shown is the strongest of those it covers. Recording on the server "
+              "keeps full resolution.");
+        if (ImGui::BeginCombo("##linkbins", selected != kChoices.end()
+                                                ? selected->label
+                                                : std::format("{} bins", current).c_str())) {
+            for (const Choice& choice : kChoices) {
+                if (ImGui::Selectable(choice.label, choice.bins == current)) {
+                    m_state.setLinkResolution(choice.bins);
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+
     // What the plan will actually do, before it is started.
     if (sweeping && m_state.instrument().schedule().stepCount > 0) {
         const ScheduleSummary& schedule = m_state.instrument().schedule();
@@ -2429,6 +2647,18 @@ void MainWindow::drawAnalysisSection() {
             readoutRow("retune cost",
                        std::format("{:.0f}% of the pass", schedule.retuneOverheadFraction * 100.0),
                        "Share of the pass spent retuning rather than measuring.");
+            if (const remote::RemoteInstrument* remote = m_state.remoteInstrument();
+                remote != nullptr && remote->linkResolution() > 0 &&
+                schedule.gridBinCount > remote->linkResolution()) {
+                const std::size_t group = (schedule.gridBinCount + remote->linkResolution() - 1) /
+                                          remote->linkResolution();
+                readoutRow("over the network",
+                           std::format("{} bins of {}",
+                                       groupedCount((schedule.gridBinCount + group - 1) / group),
+                                       toml_util::formatFrequencyShort(schedule.gridBinWidthHz *
+                                                                       static_cast<double>(group))),
+                           "What crosses the network after Network resolution reduces it.");
+            }
             ImGui::EndTable();
         }
     }
@@ -4483,17 +4713,28 @@ void MainWindow::drawFftBenchmarkWindow() {
     ImGui::SetNextWindowSizeConstraints(bar::scaled(ImVec2(460.0F, 320.0F)),
                                         ImVec2(FLT_MAX, FLT_MAX));
 
-    if (!ImGui::Begin("FFT benchmark", &m_showFftBenchmark)) {
+    // Named for the machine it measures, which is the one the transforms run
+    // on: this one, or the server.
+    const std::string host = m_state.instrument().computeHost();
+    const std::string title = host.empty() ? std::string("FFT benchmark###fftbench")
+                                           : std::format("FFT benchmark on {}###fftbench", host);
+    if (!ImGui::Begin(title.c_str(), &m_showFftBenchmark)) {
         ImGui::End();
         return;
     }
 
     const ChromeTheme& chrome = m_state.theme().chrome();
-    const bool running = m_fftBenchmark.running();
+    const BenchmarkStatus status = m_state.instrument().benchmark();
+    const bool running = status.running;
 
-    const std::uint32_t workers = m_state.instrument().pipelineConfig().workerCount != 0
-                                      ? m_state.instrument().pipelineConfig().workerCount
-                                      : defaultWorkerCount();
+    // The server's own worker count when remote: the default is a property of
+    // the machine the pipeline runs on.
+    std::uint32_t workers = m_state.instrument().pipelineConfig().workerCount;
+    if (workers == 0) {
+        const TelemetrySnapshot* engine = m_state.instrument().engineTelemetry();
+        workers = engine != nullptr && engine->process.workerCount > 0 ? engine->process.workerCount
+                                                                       : defaultWorkerCount();
+    }
 
     // The sample rate in force, so a transform size can be shown as the
     // resolution bandwidth it buys -- which is the unit the size was chosen in
@@ -4512,7 +4753,12 @@ void MainWindow::drawFftBenchmarkWindow() {
         return size == 0 ? 0.0 : sampleRate * enbw / static_cast<double>(size);
     };
 
-    ImGui::TextWrapped("Times every available backend on this machine.");
+    if (host.empty()) {
+        ImGui::TextWrapped("Times every available backend on this machine.");
+    } else {
+        ImGui::TextWrapped("Times every available backend on %s, where the transforms run.",
+                           host.c_str());
+    }
 
     ImGui::Spacing();
 
@@ -4582,7 +4828,7 @@ void MainWindow::drawFftBenchmarkWindow() {
     }
 
     std::size_t availableBackends = 0;
-    for (const FftBackendInfo& info : FftBackendManager::instance().enumerate()) {
+    for (const FftBackendInfo& info : m_state.instrument().fftBackends()) {
         availableBackends += info.available ? 1 : 0;
     }
     const std::size_t steps = fftBenchmarkStepCount(config, availableBackends);
@@ -4590,20 +4836,22 @@ void MainWindow::drawFftBenchmarkWindow() {
     ImGui::Spacing();
     ImGui::BeginDisabled(running);
     if (ImGui::Button(running ? "Running..." : "Run benchmark")) {
-        m_fftBenchmark.start(config);
+        if (auto started = m_state.instrument().startBenchmark(config); !started) {
+            toast(ToastSeverity::Error, started.error().describe());
+        }
     }
     ImGui::EndDisabled();
 
     if (running) {
         ImGui::SameLine();
         if (ImGui::Button("Cancel")) {
-            m_fftBenchmark.cancel();
+            m_state.instrument().cancelBenchmark();
         }
     }
 
     ImGui::SameLine();
     if (running) {
-        ImGui::TextDisabled("%s", formatBenchTime(m_fftBenchmark.elapsedSeconds()).c_str());
+        ImGui::TextDisabled("%s", formatBenchTime(status.elapsedSeconds).c_str());
     } else {
         // Planning is excluded: it is measured, not predicted, and on FFTW it
         // is most of a short run.
@@ -4613,11 +4861,10 @@ void MainWindow::drawFftBenchmarkWindow() {
     }
 
     if (running) {
-        const std::size_t total = m_fftBenchmark.stepsTotal();
+        const std::size_t total = status.stepsTotal;
         const float fraction =
-            total == 0 ? 0.0F
-                       : static_cast<float>(m_fftBenchmark.stepsDone()) / static_cast<float>(total);
-        ImGui::ProgressBar(fraction, ImVec2(-1, 0), m_fftBenchmark.currentStep().c_str());
+            total == 0 ? 0.0F : static_cast<float>(status.stepsDone) / static_cast<float>(total);
+        ImGui::ProgressBar(fraction, ImVec2(-1, 0), status.currentStep.c_str());
     }
 
     // Said while it can still be acted on rather than printed beside the
@@ -4630,7 +4877,7 @@ void MainWindow::drawFftBenchmarkWindow() {
         ImGui::PopStyleColor();
     }
 
-    const std::vector<FftBenchmarkEntry> results = m_fftBenchmark.results();
+    const std::vector<FftBenchmarkEntry>& results = status.results;
     if (results.empty()) {
         ImGui::Spacing();
         ImGui::TextDisabled("%s", running ? "Measuring..." : "No results yet.");
@@ -4944,6 +5191,11 @@ void MainWindow::drawPerformancePanel() {
             row("Passes merged", std::format("{}", link.passesCoalesced));
             row("Partial updates merged", std::format("{}", link.partialsCoalesced));
             row("Events dropped", std::format("{}", link.eventsDropped));
+            if (link.framesSent > 0) {
+                row("Encoding on the server",
+                    std::format("{:.2f} ms a frame", static_cast<double>(link.encodeNs) / 1e6 /
+                                                         static_cast<double>(link.framesSent)));
+            }
             ImGui::EndTable();
         }
     }
@@ -5279,9 +5531,8 @@ void MainWindow::drawStartupCard() {
     // The window is up and drawing underneath, which is the point: these
     // seconds used to be spent before it existed at all, so a radio slow to
     // come up was indistinguishable from an application that failed to start.
-    drawProgressCard("##devicestartup", m_state.deviceStartupRunning(),
-                     m_state.deviceStartupLabel(), m_state.deviceStartupDetail(),
-                     m_state.deviceStartupStartedNs());
+    drawProgressCard("##devicestartup", m_state.deviceStartupShown(), m_state.deviceStartupLabel(),
+                     m_state.deviceStartupDetail(), m_state.deviceStartupStartedNs());
 }
 
 void MainWindow::drawProgressCard(const char* id, bool active, const std::string& heading,

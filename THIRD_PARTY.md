@@ -42,6 +42,7 @@ downloads go into `build/<preset>/_deps`.
 | [Material Design Icons](https://github.com/Templarian/MaterialDesign-Webfont)  | `v7.4.47`          | Apache-2.0           | GUI: icon font file                   |
 | [nlohmann/json](https://github.com/nlohmann/json)                              | `v3.12.0`          | MIT                  | Server, GUI update check              |
 | [toml++](https://github.com/marzer/tomlplusplus)                               | `v3.4.0`           | MIT                  | `libsweeppp`: config files            |
+| [Monocypher](https://github.com/LoupVaillant/Monocypher)                       | `4.0.2`            | CC0-1.0 or BSD-2-Clause | `libsweeppp`: remote link encryption |
 | [PocketFFT](https://github.com/mreineck/pocketfft) (`cpp` branch)              | `c90e55b3`         | BSD-3-Clause         | `fft-pocketfft` plugin                |
 | [libfobos](https://github.com/rigexpert/libfobos)                              | `v2.4.0`           | LGPL-2.1             | `sdr-fobos` plugin, linked statically |
 | [libfobos-sdr-agile](https://github.com/rigexpert/libfobos-sdr-agile)          | `v.3.3.0`          | LGPL-2.1             | `sdr-fobos` plugin, linked statically |

@@ -5,7 +5,6 @@
 
 #include "sweeppp/core/Result.hpp"
 #include "sweeppp/core/Telemetry.hpp"
-#include "sweeppp/crypto/Sha256.hpp"
 #include "sweeppp/instrument/Instrument.hpp"
 
 #include <array>
@@ -21,8 +20,6 @@
 /// The control messages: PluginData records under `kPluginId`, each body a
 /// typed-metadata hash.
 namespace sweeppp::remote {
-
-using Nonce = std::array<std::uint8_t, 32>;
 
 /// One control message off the stream.
 struct Message {
@@ -45,36 +42,15 @@ void appendMessage(std::vector<std::byte>& out, std::string_view name, const swe
 /// them until that arrives -- so an edit the server refused is put back.
 [[nodiscard]] std::span<const std::string_view> sectionsTouchedBy(std::string_view op) noexcept;
 
-/// HMAC-SHA256(token, kAuthContext || serverNonce || clientNonce).
-[[nodiscard]] crypto::Sha256Digest authMac(std::string_view token, const Nonce& serverNonce,
-                                           const Nonce& clientNonce);
-
 // ---- the handshake ---------------------------------------------------------------
 
+/// The client's half of the handshake's payload.
 struct Hello {
     std::uint32_t protocolVersion = 0;
     std::string software; ///< "Sweep++ 0.2.0"
 
     [[nodiscard]] sweeps::Metadata toMetadata() const;
     [[nodiscard]] static Hello from(const sweeps::Metadata& in);
-};
-
-struct Challenge {
-    std::uint32_t protocolVersion = 0;
-    Nonce serverNonce{};
-    bool authRequired = false;
-    std::string software;
-
-    [[nodiscard]] sweeps::Metadata toMetadata() const;
-    [[nodiscard]] static Challenge from(const sweeps::Metadata& in);
-};
-
-struct Auth {
-    Nonce clientNonce{};
-    crypto::Sha256Digest mac{};
-
-    [[nodiscard]] sweeps::Metadata toMetadata() const;
-    [[nodiscard]] static Auth from(const sweeps::Metadata& in);
 };
 
 struct Welcome {
@@ -165,6 +141,38 @@ struct Bye {
 
     [[nodiscard]] sweeps::Metadata toMetadata() const;
     [[nodiscard]] static Bye from(const sweeps::Metadata& in);
+};
+
+// ---- recordings on the server -------------------------------------------------------
+
+struct RecordingFile {
+    std::string name;
+    std::uint64_t bytes = 0;
+    std::uint64_t modifiedWallNs = 0;
+};
+
+/// What the server is recording, and what it has recorded.
+struct ServerRecordings {
+    bool available = false; ///< Whether the server has somewhere to record to
+    bool active = false;
+    std::string current;
+    std::uint64_t lines = 0;
+    std::uint64_t bytes = 0;
+    std::vector<RecordingFile> files;
+
+    [[nodiscard]] sweeps::Metadata toMetadata() const;
+    [[nodiscard]] static ServerRecordings from(const sweeps::Metadata& in);
+};
+
+/// A piece of a recording, in answer to `fetchRecording`.
+struct Chunk {
+    std::string name;
+    std::uint64_t offset = 0;
+    std::uint64_t totalBytes = 0;
+    std::vector<std::byte> data;
+
+    [[nodiscard]] sweeps::Metadata toMetadata() const;
+    [[nodiscard]] static Chunk from(const sweeps::Metadata& in);
 };
 
 // ---- telemetry ------------------------------------------------------------------

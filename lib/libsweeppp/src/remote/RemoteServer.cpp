@@ -6,10 +6,12 @@
 #include "remote/StreamIo.hpp"
 #include "sweeppp/core/Clock.hpp"
 #include "sweeppp/core/Log.hpp"
-#include "sweeppp/crypto/Sha256.hpp"
 #include "sweeppp/history/EventMapping.hpp"
+#include "sweeppp/history/SessionRecorder.hpp"
 #include "sweeppp/net/Socket.hpp"
 #include "sweeppp/remote/FrameCodec.hpp"
+#include "sweeppp/remote/Handshake.hpp"
+#include "sweeppp/remote/Mdns.hpp"
 #include "sweeppp/remote/Messages.hpp"
 #include "sweeppp/remote/WireCodec.hpp"
 
@@ -17,7 +19,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -77,7 +81,7 @@ bool supersedes(std::string_view op) {
 /// writing to it, and what is queued for the latter.
 class Session {
 public:
-    Session(net::TcpSocket socket, sweeps::RecordFramer framer,
+    Session(net::SecureChannel socket, sweeps::RecordFramer framer,
             std::chrono::milliseconds silenceTimeout)
         : m_socket(std::move(socket)), m_framer(std::move(framer)), m_peer(m_socket.peerAddress()),
           m_silenceTimeout(silenceTimeout) {}
@@ -100,6 +104,9 @@ public:
     }
 
     [[nodiscard]] bool alive() const noexcept { return m_alive.load(); }
+
+    /// Whether the client ended it, rather than the network.
+    [[nodiscard]] bool saidGoodbye() const noexcept { return m_saidGoodbye.load(); }
     [[nodiscard]] const std::string& peer() const noexcept { return m_peer; }
 
     /// Ends the session from outside: both threads wake and leave.
@@ -143,6 +150,20 @@ public:
         m_wake.notify_all();
     }
 
+    /// A download's chunk: sent after everything else, so a file never holds
+    /// up the live view. False when too many are already waiting.
+    bool pushBulk(std::vector<std::byte> bytes) {
+        {
+            const std::lock_guard lock(m_mutex);
+            if (m_bulk.size() >= kMaxChunksInFlight * 2) {
+                return false;
+            }
+            m_bulk.push_back(std::move(bytes));
+        }
+        m_wake.notify_all();
+        return true;
+    }
+
     void pushEvent(std::vector<std::byte> bytes, bool droppable) {
         {
             const std::lock_guard lock(m_mutex);
@@ -163,9 +184,14 @@ public:
 
     /// From the bus thread: one slot for a completed pass, one for the newest
     /// partial. A pass replaces any partial waiting, which is older than it.
+    ///
+    /// Each slot carries what changed since the frame before it went out,
+    /// gathered over every frame it absorbed: the encoder then compares only
+    /// that much of the grid, merged frames included.
     void offerFrame(const SpectrumFramePtr& frame) {
         {
             const std::lock_guard lock(m_mutex);
+            m_partialChanged.add(ChangedBins::of(*frame));
             if (frame->passComplete) {
                 if (m_pass) {
                     m_passesCoalesced.fetch_add(1);
@@ -175,6 +201,8 @@ public:
                     m_partial.reset();
                 }
                 m_pass = frame;
+                m_passChanged.add(m_partialChanged);
+                m_partialChanged = ChangedBins{};
             } else {
                 if (m_partial) {
                     m_partialsCoalesced.fetch_add(1);
@@ -194,12 +222,17 @@ public:
         m_wake.notify_all();
     }
 
+    /// Zero sends frames whole.
+    void setMaxBins(std::uint32_t bins) noexcept { m_maxBins.store(bins); }
+    [[nodiscard]] std::uint32_t maxBins() const noexcept { return m_maxBins.load(); }
+
     [[nodiscard]] LinkStats link() const {
         LinkStats link;
         link.framesSent = m_framesSent.load();
         link.passesCoalesced = m_passesCoalesced.load();
         link.partialsCoalesced = m_partialsCoalesced.load();
         link.eventsDropped = m_eventsDropped.load();
+        link.encodeNs = m_encodeNs.load();
         return link;
     }
 
@@ -277,6 +310,7 @@ private:
             }
         } else if (message->name == msg::kBye) {
             logInfo("remote", "{} disconnected", m_peer);
+            m_saidGoodbye.store(true);
             return false;
         }
         // Any other name is from a newer client, and ignored.
@@ -285,27 +319,35 @@ private:
 
     void sendLoop() {
         FrameEncoder encoder;
+        FrameReducer reducer;
         std::vector<std::byte> buffer;
         std::vector<std::vector<std::byte>> control;
         std::deque<OutgoingEvent> events;
+        std::vector<std::vector<std::byte>> bulk;
         while (true) {
             SpectrumFramePtr pass;
             SpectrumFramePtr partial;
+            ChangedBins passChanged;
+            ChangedBins partialChanged;
             bool closeSegment = false;
             bool finishing = false;
             {
                 std::unique_lock lock(m_mutex);
                 m_wake.wait(lock, [this] {
                     return !m_alive.load() || m_finishing || !m_control.empty() ||
-                           !m_events.empty() || m_pass || m_partial || m_closeSegment;
+                           !m_events.empty() || m_pass || m_partial || m_closeSegment ||
+                           !m_bulk.empty();
                 });
                 if (!m_alive.load() && !m_finishing) {
                     return;
                 }
                 control.swap(m_control);
                 events.swap(m_events);
+                bulk.swap(m_bulk);
                 pass = std::exchange(m_pass, nullptr);
                 partial = std::exchange(m_partial, nullptr);
+                passChanged = std::exchange(m_passChanged, ChangedBins{});
+                partialChanged = std::exchange(m_partialChanged, ChangedBins{});
                 closeSegment = std::exchange(m_closeSegment, false);
                 finishing = m_finishing;
             }
@@ -319,14 +361,30 @@ private:
             }
             control.clear();
             events.clear();
-            if (pass) {
-                encoder.encode(*pass, buffer);
+            const std::uint64_t encodeStart = monotonicNs();
+            const std::uint32_t cap = m_maxBins.load();
+            const auto encode = [&](const SpectrumFrame& frame, ChangedBins changed) {
+                if (cap > 0 && frame.binCount() > cap) {
+                    const SpectrumFrame reduced = reducer.reduce(frame, cap, changed);
+                    encoder.encode(reduced, buffer, changed);
+                } else {
+                    encoder.encode(frame, buffer, changed);
+                }
                 m_framesSent.fetch_add(1);
+            };
+            if (pass) {
+                encode(*pass, passChanged);
             }
             if (partial) {
-                encoder.encode(*partial, buffer);
-                m_framesSent.fetch_add(1);
+                encode(*partial, partialChanged);
             }
+            if (pass || partial) {
+                m_encodeNs.fetch_add(monotonicNs() - encodeStart);
+            }
+            for (const std::vector<std::byte>& chunk : bulk) {
+                buffer.insert(buffer.end(), chunk.begin(), chunk.end());
+            }
+            bulk.clear();
             if (closeSegment || finishing) {
                 encoder.close(monotonicNs(), buffer);
             }
@@ -347,18 +405,22 @@ private:
         }
     }
 
-    net::TcpSocket m_socket;
+    net::SecureChannel m_socket;
     sweeps::RecordFramer m_framer;
     std::string m_peer;
     std::chrono::milliseconds m_silenceTimeout;
     std::atomic<bool> m_alive{true};
+    std::atomic<bool> m_saidGoodbye{false};
 
     std::mutex m_mutex;
     std::condition_variable m_wake;
     std::vector<std::vector<std::byte>> m_control;
     std::deque<OutgoingEvent> m_events;
+    std::vector<std::vector<std::byte>> m_bulk;
     SpectrumFramePtr m_pass;
     SpectrumFramePtr m_partial;
+    ChangedBins m_passChanged;
+    ChangedBins m_partialChanged;
     bool m_closeSegment = false;
     bool m_finishing = false;
 
@@ -366,6 +428,8 @@ private:
     std::atomic<std::uint64_t> m_passesCoalesced{0};
     std::atomic<std::uint64_t> m_partialsCoalesced{0};
     std::atomic<std::uint64_t> m_eventsDropped{0};
+    std::atomic<std::uint64_t> m_encodeNs{0};
+    std::atomic<std::uint32_t> m_maxBins{0};
 
     std::thread m_reader;
     std::thread m_sender;
@@ -402,7 +466,7 @@ struct RemoteServer::Impl {
     };
 
     struct Arrival {
-        net::TcpSocket socket;
+        net::SecureChannel socket;
         sweeps::RecordFramer framer;
     };
 
@@ -445,95 +509,38 @@ struct RemoteServer::Impl {
         const auto deadline = Clock::now() + config.handshakeTimeout;
         (void)socket.setNoDelay(true);
 
-        if (!io::sendStreamHeader(socket)) {
-            return;
-        }
-        if (auto theirs = io::readStreamHeader(socket, deadline, stopping); !theirs) {
-            logInfo("remote", "{}: {}", peer, theirs.error().describe());
-            return;
-        }
-
-        const auto refuse = [&](std::string_view reason, std::string text) {
-            (void)socket.sendAll(asBytes(messageBytes(
-                msg::kRefused,
-                Refused{.reason = std::string(reason), .message = std::move(text)}.toMetadata())));
-            socket.shutdown();
-        };
-
-        sweeps::RecordFramer framer(kMaxPreAuthRecordBytes);
-        const auto nextMessage = [&](std::string_view expected) -> Result<Message> {
-            auto record = io::readRecord(socket, framer, deadline, stopping);
-            if (!record) {
-                return std::unexpected(std::move(record).error());
-            }
-            if (!isControl(*record)) {
-                return fail<Message>(ErrorCode::ProtocolError,
-                                     "expected '{}', got a record of type {}", expected,
-                                     record->header.type);
-            }
-            auto message = decodeMessage(*record);
-            if (message && message->name != expected) {
-                return fail<Message>(ErrorCode::ProtocolError, "expected '{}', got '{}'", expected,
-                                     message->name);
-            }
-            return message;
-        };
-
-        auto hello = nextMessage(msg::kHello);
-        if (!hello) {
-            logInfo("remote", "{}: {}", peer, hello.error().describe());
-            if (hello.error().code() == ErrorCode::Unsupported) {
-                refuse(refusal::kVersion, hello.error().message());
-            } else if (hello.error().code() == ErrorCode::ProtocolError) {
-                refuse(refusal::kProtocol, hello.error().message());
-            }
-            return;
-        }
-        const Hello greeting = Hello::from(hello->body);
-        if (greeting.protocolVersion != kProtocolVersion) {
-            refuse(refusal::kVersion, std::format("this server speaks protocol {}, the client {}",
-                                                  kProtocolVersion, greeting.protocolVersion));
-            return;
-        }
-
-        Challenge challenge{.protocolVersion = kProtocolVersion,
-                            .authRequired = !config.token.empty(),
-                            .software = std::format("{} {}", productName(), versionString())};
-        if (!crypto::fillRandom(challenge.serverNonce)) {
-            refuse(refusal::kProtocol, "the server could not make a nonce");
-            return;
-        }
-        if (!socket.sendAll(asBytes(messageBytes(msg::kChallenge, challenge.toMetadata())))) {
-            return;
-        }
-
-        auto auth = nextMessage(msg::kAuth);
-        if (!auth) {
-            logInfo("remote", "{}: {}", peer, auth.error().describe());
-            if (auth.error().code() == ErrorCode::ProtocolError) {
-                refuse(refusal::kProtocol, auth.error().message());
-            }
-            return;
-        }
-        if (challenge.authRequired) {
-            const Auth answer = Auth::from(auth->body);
-            const crypto::Sha256Digest expected =
-                authMac(config.token, challenge.serverNonce, answer.clientNonce);
-            if (!crypto::constantTimeEqual(expected, answer.mac)) {
+        auto accepted =
+            acceptChannel(std::move(socket), config.token,
+                          std::format("{} {}", productName(), versionString()), deadline, stopping);
+        if (!accepted) {
+            if (accepted.error().code() == ErrorCode::PermissionDenied) {
                 logWarn("remote", "{}: wrong token", peer);
-                // Slows guessing to one try a second per connection.
+                // Slows guessing to one try a second per connection; then the
+                // connection simply ends, telling a guesser nothing.
                 std::unique_lock lock(controlMutex);
                 controlWake.wait_for(lock, config.refusalDelay, [this] { return stopping.load(); });
-                lock.unlock();
-                refuse(refusal::kAuth, "the token was not accepted");
-                return;
+            } else {
+                logInfo("remote", "{}: {}", peer, accepted.error().describe());
             }
+            return;
         }
 
-        framer.setMaxPayloadBytes(kMaxClientRecordBytes);
+        net::SecureChannel& channel = accepted->channel;
+        if (accepted->hello.protocolVersion != kProtocolVersion) {
+            (void)channel.sendAll(asBytes(messageBytes(
+                msg::kRefused,
+                Refused{.reason = std::string(refusal::kVersion),
+                        .message = std::format("this server speaks protocol {}, the client {}",
+                                               kProtocolVersion, accepted->hello.protocolVersion)}
+                    .toMetadata())));
+            channel.shutdown();
+            return;
+        }
+
         {
             const std::lock_guard lock(controlMutex);
-            arrivals.push_back(Arrival{.socket = std::move(socket), .framer = std::move(framer)});
+            arrivals.push_back(Arrival{.socket = std::move(channel),
+                                       .framer = sweeps::RecordFramer(kMaxClientRecordBytes)});
         }
         controlWake.notify_all();
     }
@@ -603,9 +610,16 @@ struct RemoteServer::Impl {
             for (Arrival& arrival : arrived) {
                 admit(std::move(arrival));
             }
+            if (lingerUntil && Clock::now() >= *lingerUntil && !currentSession()) {
+                logInfo("remote", "nobody came back; acquisition stopped");
+                idle();
+            }
 
             const bool executed = execute(batch);
             instrument.tick(monotonicNs());
+            if (recorder) {
+                recorder->setCompletePassesOnly(instrument.sweeping());
+            }
             const bool wasRunning = running;
             running = instrument.running();
 
@@ -638,10 +652,157 @@ struct RemoteServer::Impl {
             activeSession.reset();
         }
         instrument.stop();
+        (void)stopRecording();
         {
             const std::lock_guard lock(controlMutex);
             arrivals.clear();
         }
+    }
+
+    // ---- recordings ---------------------------------------------------------------
+
+    Status startRecording(std::uint32_t bins) {
+        if (config.sessionsDir.empty()) {
+            return fail(ErrorCode::Unsupported, "this server has nowhere to record to");
+        }
+        if (recorder) {
+            return ok();
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(config.sessionsDir, ec);
+        const std::string name =
+            std::format("server-{}.sweeps", formatWallClockCompact(wallClockNs()));
+        session::RecorderConfig recorderConfig;
+        recorderConfig.binsPerLine = bins;
+        recorderConfig.sessionName = name;
+        auto created = session::SessionRecorder::create(config.sessionsDir / name, recorderConfig);
+        if (!created) {
+            return std::unexpected(std::move(created).error());
+        }
+        recorder = std::move(*created);
+        recorder->attachEvents(events);
+        recorder->setCompletePassesOnly(instrument.sweeping());
+        recorderSubscription = output.subscribe(recorder.get());
+        recordingName = name;
+        logInfo("remote", "recording to {}", (config.sessionsDir / name).string());
+        listRecordings();
+        return ok();
+    }
+
+    Status stopRecording() {
+        if (!recorder) {
+            return ok();
+        }
+        output.unsubscribe(recorderSubscription);
+        Status closed = recorder->close();
+        recorder.reset();
+        recordingName.clear();
+        listRecordings();
+        return closed;
+    }
+
+    /// Only a name this server listed, so nothing from a client is ever a
+    /// path.
+    Result<std::filesystem::path> recordingPath(const std::string& name) {
+        if (name.empty() || name.find_first_of("/\\") != std::string::npos ||
+            name.find("..") != std::string::npos) {
+            return fail<std::filesystem::path>(ErrorCode::InvalidArgument,
+                                               "'{}' is not a recording's name", name);
+        }
+        listRecordings();
+        if (std::ranges::find(recordings, name, &RecordingFile::name) == recordings.end()) {
+            return fail<std::filesystem::path>(ErrorCode::NotFound, "no recording called '{}'",
+                                               name);
+        }
+        if (name == recordingName) {
+            return fail<std::filesystem::path>(ErrorCode::Unavailable,
+                                               "'{}' is still being recorded", name);
+        }
+        return config.sessionsDir / name;
+    }
+
+    Status deleteRecording(const std::string& name) {
+        auto path = recordingPath(name);
+        if (!path) {
+            return std::unexpected(std::move(path).error());
+        }
+        std::error_code ec;
+        std::filesystem::remove(*path, ec);
+        listRecordings();
+        if (ec) {
+            return fail(ErrorCode::IoError, "could not delete '{}': {}", name, ec.message());
+        }
+        return ok();
+    }
+
+    Status fetchRecording(const std::string& name, std::uint64_t offset) {
+        auto path = recordingPath(name);
+        if (!path) {
+            return std::unexpected(std::move(path).error());
+        }
+        std::ifstream in(*path, std::ios::binary);
+        std::error_code ec;
+        const std::uint64_t total = std::filesystem::file_size(*path, ec);
+        if (!in || ec) {
+            return fail(ErrorCode::IoError, "could not read '{}'", name);
+        }
+        Chunk chunk{.name = name, .offset = std::min(offset, total), .totalBytes = total};
+        chunk.data.resize(
+            static_cast<std::size_t>(std::min<std::uint64_t>(kChunkBytes, total - chunk.offset)));
+        in.seekg(static_cast<std::streamoff>(chunk.offset));
+        in.read(reinterpret_cast<char*>(chunk.data.data()),
+                static_cast<std::streamsize>(chunk.data.size()));
+        if (!in) {
+            return fail(ErrorCode::IoError, "could not read '{}'", name);
+        }
+        std::shared_ptr<Session> current = currentSession();
+        if (current && !current->pushBulk(messageBytes(msg::kChunk, chunk.toMetadata()))) {
+            return fail(ErrorCode::Unavailable, "too many pieces of '{}' asked for at once", name);
+        }
+        return ok();
+    }
+
+    void listRecordings() {
+        recordings.clear();
+        lastListing = Clock::now();
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(config.sessionsDir, ec)) {
+            const std::string name = entry.path().filename().string();
+            if (!entry.is_regular_file(ec) || entry.path().extension() != ".sweeps" ||
+                name.starts_with('.')) {
+                continue;
+            }
+            // Through each clock's now: libc++ has no clock_cast, and a
+            // second either way is nothing to a file listing.
+            const auto modified = entry.last_write_time(ec);
+            const auto wall = std::chrono::system_clock::now() +
+                              std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                                  modified - std::filesystem::file_time_type::clock::now());
+            recordings.push_back(RecordingFile{
+                .name = name,
+                .bytes = entry.file_size(ec),
+                .modifiedWallNs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(wall.time_since_epoch())
+                        .count())});
+        }
+        std::ranges::sort(recordings, std::greater<>(), &RecordingFile::name);
+    }
+
+    [[nodiscard]] ServerRecordings recordingsState() {
+        // The folder is read again every few seconds rather than every state:
+        // something else on the server may add or remove files.
+        if (!config.sessionsDir.empty() && Clock::now() - lastListing > std::chrono::seconds(3)) {
+            listRecordings();
+        }
+        ServerRecordings state{.available = !config.sessionsDir.empty(),
+                               .active = recorder != nullptr,
+                               .current = recordingName,
+                               .files = recordings};
+        if (recorder) {
+            state.lines = recorder->linesWritten();
+            state.bytes = recorder->bytesWritten();
+        }
+        return state;
     }
 
     void admit(Arrival arrival) {
@@ -654,6 +815,13 @@ struct RemoteServer::Impl {
                                                 .toMetadata())));
             arrival.socket.shutdown();
             return;
+        }
+
+        // Whoever arrives takes over a radio left running for a dropped
+        // client: the same desktop reconnecting, nearly always.
+        lingerUntil.reset();
+        if (advertiser) {
+            advertiser->setBusy(true);
         }
 
         auto fresh = std::make_shared<Session>(std::move(arrival.socket), std::move(arrival.framer),
@@ -701,7 +869,25 @@ struct RemoteServer::Impl {
             commands.clear();
         }
         ended->join();
+        if (advertiser) {
+            advertiser->setBusy(false);
+        }
+
+        // A goodbye is someone leaving; anything else may be a cable, and
+        // the desktop at the other end is already trying to come back.
+        if (!ended->saidGoodbye() && config.linger.count() > 0 && instrument.running()) {
+            lingerUntil = Clock::now() + config.linger;
+            logInfo("remote", "{} dropped; the radio keeps running for {} s", ended->peer(),
+                    std::chrono::duration_cast<std::chrono::seconds>(config.linger).count());
+            return;
+        }
         logInfo("remote", "{} gone; acquisition stopped", ended->peer());
+        idle();
+    }
+
+    /// The radio stopped with nobody to watch it.
+    void idle() {
+        lingerUntil.reset();
         instrument.cancelLearning();
         instrument.stop();
         running = false;
@@ -822,6 +1008,40 @@ struct RemoteServer::Impl {
             instrument.rescanSwitchers();
             return ok();
         }
+        if (name == op::kStartRecording) {
+            const std::int64_t bins = args.getInt("maxBins", config.recordBins);
+            return startRecording(bins > 0 && bins <= kMaxGridBins
+                                      ? static_cast<std::uint32_t>(bins)
+                                      : config.recordBins);
+        }
+        if (name == op::kStopRecording) {
+            return stopRecording();
+        }
+        if (name == op::kDeleteRecording) {
+            return deleteRecording(args.getString("name"));
+        }
+        if (name == op::kFetchRecording) {
+            return fetchRecording(args.getString("name"),
+                                  static_cast<std::uint64_t>(args.getInt("offset")));
+        }
+        if (name == op::kStartBenchmark) {
+            return instrument.startBenchmark(decodeBenchmarkConfig(hashAt(args, "config")));
+        }
+        if (name == op::kCancelBenchmark) {
+            instrument.cancelBenchmark();
+            return ok();
+        }
+        if (name == op::kSetLinkResolution) {
+            const std::int64_t bins = args.getInt("maxBins");
+            if (bins != 0 && (bins < kMinLinkBins || bins > kMaxGridBins)) {
+                return fail(ErrorCode::OutOfRange, "{} bins is outside {}..{}", bins, kMinLinkBins,
+                            kMaxGridBins);
+            }
+            if (std::shared_ptr<Session> current = currentSession()) {
+                current->setMaxBins(static_cast<std::uint32_t>(bins));
+            }
+            return ok();
+        }
         return fail(ErrorCode::Unsupported, "this server does not know '{}'", name);
     }
 
@@ -911,6 +1131,13 @@ struct RemoteServer::Impl {
         rfPath.setHash("coverage", encodeRanges(instrument.antennaCoverage()));
         offer(section::kRfPath, std::move(rfPath));
 
+        Metadata link;
+        link.setInt("maxBins", target.maxBins());
+        offer(section::kLink, std::move(link));
+
+        offer(section::kBenchmark, encodeBenchmarkStatus(instrument.benchmark()));
+        offer(section::kRecordings, recordingsState().toMetadata());
+
         // An acknowledgement goes out even when nothing changed: the client
         // is holding its own copy of what it edited until it arrives.
         if (sections.empty() && lastAck == lastSentAck) {
@@ -969,6 +1196,14 @@ struct RemoteServer::Impl {
     std::uint64_t lastAck = 0;
     std::uint64_t lastSentAck = 0;
     bool running = false;
+    std::optional<Clock::time_point> lingerUntil;
+
+    std::unique_ptr<mdns::Advertiser> advertiser;
+    std::unique_ptr<session::SessionRecorder> recorder;
+    FrameBus::SubscriptionId recorderSubscription = 0;
+    std::string recordingName;
+    std::vector<RecordingFile> recordings;
+    Clock::time_point lastListing{};
 };
 
 RemoteServer::RemoteServer(LocalInstrument& instrument, FrameBus& output, EventBus& events,
@@ -1015,6 +1250,34 @@ Status RemoteServer::start() {
         forward.operator()<DeviceErrorEvent>(false),
     };
 
+    // Before the control thread exists, which is the only other place the
+    // recorder is touched.
+    if (!impl.config.sessionsDir.empty()) {
+        impl.listRecordings();
+    }
+    if (impl.config.recordAtStart) {
+        if (auto recording = impl.startRecording(impl.config.recordBins); !recording) {
+            logWarn("remote", "not recording: {}", recording.error().describe());
+        }
+    }
+
+    if (impl.config.advertise) {
+        // The machine's own name, its first label: "pi" whether the system
+        // calls it pi, pi.local or pi.localdomain.
+        std::string host = impl.serverName.substr(0, impl.serverName.find('.'));
+        auto advertiser =
+            mdns::Advertiser::start(mdns::Advert{.instance = std::format("Sweep++ on {}", host),
+                                                 .host = host,
+                                                 .port = impl.listener.port(),
+                                                 .device = impl.instrument.displayLabel(),
+                                                 .authRequired = !impl.config.token.empty()});
+        if (advertiser) {
+            impl.advertiser = std::move(*advertiser);
+        } else {
+            logWarn("remote", "not advertised on the LAN: {}", advertiser.error().describe());
+        }
+    }
+
     impl.controlThread = std::thread([&impl] { impl.controlLoop(); });
     impl.listenThread = std::thread([&impl] { impl.listenLoop(); });
     impl.started = true;
@@ -1042,6 +1305,7 @@ void RemoteServer::stop() {
     }
     impl.eventSubscriptions.clear();
     impl.output.unsubscribe(impl.sinkSubscription);
+    impl.advertiser.reset();
     impl.listener.close();
     impl.started = false;
 }

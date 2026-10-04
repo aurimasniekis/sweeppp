@@ -9,12 +9,15 @@
 #include <doctest/doctest.h>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <mutex>
 #include <sweeppp/backends/sdr/SyntheticDevice.hpp>
 #include <sweeppp/core/Clock.hpp>
 #include <sweeppp/fft/FftBackendManager.hpp>
 #include <sweeppp/instrument/LocalInstrument.hpp>
+#include <sweeppp/remote/Reconnector.hpp>
 #include <sweeppp/remote/RemoteInstrument.hpp>
 #include <sweeppp/remote/RemoteServer.hpp>
 #include <sweeppp/remote/ServerList.hpp>
@@ -67,9 +70,12 @@ public:
         local->adoptDevice(std::move(*device));
         REQUIRE(local->applySweepPlan(quickPlan()).has_value());
 
-        server = std::make_unique<RemoteServer>(
-            *local, serverOutput, serverEvents, serverTelemetry,
-            ServerConfig{.port = 0, .token = "secret", .serverName = "bench"});
+        server =
+            std::make_unique<RemoteServer>(*local, serverOutput, serverEvents, serverTelemetry,
+                                           ServerConfig{.port = 0,
+                                                        .token = "secret",
+                                                        .serverName = "bench",
+                                                        .sessionsDir = m_root / "server-sessions"});
         REQUIRE(server->start().has_value());
         counterSubscription = output.subscribe(&counter);
     }
@@ -187,7 +193,7 @@ TEST_CASE("a remote radio arrives with the server's state") {
     CHECK(remote.profileDriver() == "remote");
     CHECK(remote.profileId() == loop.endpoint().address());
     CHECK(remote.displayLabel().ends_with(" on bench"));
-    CHECK_FALSE(remote.canBenchmark());
+    CHECK(remote.computeHost() == "bench");
     CHECK(remote.sweeping());
     CHECK(remote.sweepPlan().lowestHz() == doctest::Approx(100e6));
     CHECK(remote.schedule().stepCount > 0);
@@ -295,6 +301,39 @@ TEST_CASE("a burst of plans settles on the last") {
     CHECK(loop.remote->schedule().gridStartHz == doctest::Approx(329e6).epsilon(0.01));
 }
 
+TEST_CASE("a slow link can ask for fewer bins") {
+    Loopback loop;
+    loop.connect();
+    SweepPlan wide = Loopback::quickPlan();
+    wide.segments = {SweepSegment{.startHz = 100e6, .stopHz = 900e6}};
+    wide.rbwHz = 20e3;
+    REQUIRE(loop.remote->applySweepPlan(wide).has_value());
+    REQUIRE(loop.tickUntil([&] { return loop.remote->schedule().gridBinCount > 20'000; }));
+
+    loop.remote->setLinkResolution(4096);
+    CHECK(loop.tickUntil([&] { return loop.remote->linkResolution() == 4096; }));
+    REQUIRE(loop.remote->start().has_value());
+    CHECK(loop.tickUntil([&] {
+        const std::lock_guard lock(loop.counter.mutex);
+        return loop.counter.passes >= 3;
+    }));
+    {
+        const std::lock_guard lock(loop.counter.mutex);
+        CHECK(loop.counter.bins <= 4096);
+        CHECK(loop.counter.bins > 0);
+    }
+
+    loop.remote->setLinkResolution(10);
+    std::vector<InstrumentNotice> notices;
+    CHECK(loop.tickUntil([&] {
+        for (InstrumentNotice& notice : loop.remote->takeNotices()) {
+            notices.push_back(std::move(notice));
+        }
+        return !notices.empty();
+    }));
+    CHECK(loop.tickUntil([&] { return loop.remote->linkResolution() == 4096; }));
+}
+
 TEST_CASE("bench edits made here are kept on the server") {
     Loopback loop;
     loop.connect();
@@ -399,26 +438,50 @@ TEST_CASE("throughput over loopback at bladeRF-class settings" * doctest::skip()
     REQUIRE(loop.tickUntil([&] { return loop.remote->schedule().fftSize >= 16384; }));
     REQUIRE(loop.remote->start().has_value());
 
-    const std::uint64_t startNs = monotonicNs();
-    loop.tickFor(3000ms);
-    const double seconds = nsToSeconds(monotonicNs() - startNs);
-    const LinkStats link = loop.remote->link();
-    std::uint64_t frames = 0;
-    std::uint64_t passes = 0;
-    {
-        const std::lock_guard lock(loop.counter.mutex);
-        frames = loop.counter.frames;
-        passes = loop.counter.passes;
-    }
+    // Each figure over its own three seconds, the link's counters taken as
+    // differences so the second run is not averaged with the first.
+    const auto measure = [&](std::string_view label) {
+        const LinkStats before = loop.remote->link();
+        std::uint64_t framesBefore = 0;
+        std::uint64_t passesBefore = 0;
+        {
+            const std::lock_guard lock(loop.counter.mutex);
+            framesBefore = loop.counter.frames;
+            passesBefore = loop.counter.passes;
+        }
+        const std::uint64_t startNs = monotonicNs();
+        loop.tickFor(3000ms);
+        const double seconds = nsToSeconds(monotonicNs() - startNs);
+        const LinkStats after = loop.remote->link();
+        std::uint64_t frames = 0;
+        std::uint64_t passes = 0;
+        std::size_t bins = 0;
+        {
+            const std::lock_guard lock(loop.counter.mutex);
+            frames = loop.counter.frames - framesBefore;
+            passes = loop.counter.passes - passesBefore;
+            bins = loop.counter.bins;
+        }
+        const std::uint64_t sent = after.framesSent - before.framesSent;
+        MESSAGE(std::format(
+            "{}: {} of {} bins, FFT {}, {} steps: {:.2f} MB/s, {:.1f} frames/s, {:.1f} "
+            "passes/s; server coalesced {} passes and {} partials, {:.2f} ms a frame to encode",
+            label, bins, loop.remote->schedule().gridBinCount, loop.remote->schedule().fftSize,
+            loop.remote->schedule().stepCount,
+            static_cast<double>(after.bytesReceived - before.bytesReceived) / seconds / 1e6,
+            static_cast<double>(frames) / seconds, static_cast<double>(passes) / seconds,
+            after.passesCoalesced - before.passesCoalesced,
+            after.partialsCoalesced - before.partialsCoalesced,
+            sent == 0 ? 0.0
+                      : static_cast<double>(after.encodeNs - before.encodeNs) / 1e6 /
+                            static_cast<double>(sent)));
+        return frames;
+    };
 
-    MESSAGE(std::format(
-        "{} bins, FFT {}, {} steps: {:.1f} MB/s, {:.1f} frames/s, {:.1f} passes/s; "
-        "server coalesced {} passes and {} partials, sent {} frames",
-        loop.remote->schedule().gridBinCount, loop.remote->schedule().fftSize,
-        loop.remote->schedule().stepCount, static_cast<double>(link.bytesReceived) / seconds / 1e6,
-        static_cast<double>(frames) / seconds, static_cast<double>(passes) / seconds,
-        link.passesCoalesced, link.partialsCoalesced, link.framesSent));
-    CHECK(frames > 0);
+    CHECK(measure("full") > 0);
+    loop.remote->setLinkResolution(16'384);
+    REQUIRE(loop.tickUntil([&] { return loop.remote->linkResolution() == 16'384; }));
+    CHECK(measure("16k") > 0);
 }
 
 TEST_CASE("saved servers keep their tokens, privately") {
@@ -454,4 +517,201 @@ TEST_CASE("saved servers keep their tokens, privately") {
     CHECK(edited.entries().size() == 1);
     CHECK(ServerList::load(path.string() + ".missing").entries().empty());
     std::filesystem::remove(path);
+}
+
+TEST_CASE("a dropped server is tried again on a backing-off schedule") {
+    Reconnector reconnect;
+    CHECK_FALSE(reconnect.active());
+    CHECK_FALSE(reconnect.due(0));
+
+    const std::uint64_t start = 1'000'000'000'000;
+    reconnect.begin(RemoteEndpoint{.host = "pi.local"}, "pi", start);
+    CHECK(reconnect.active());
+    CHECK(reconnect.due(start));
+    CHECK(reconnect.attempt() == 1);
+    CHECK_FALSE(reconnect.due(start));
+
+    std::uint64_t now = start;
+    std::vector<std::uint64_t> waits;
+    for (int i = 0; i < 8; ++i) {
+        reconnect.failed(now);
+        const std::uint64_t next = reconnect.nextAtNs();
+        CHECK_FALSE(reconnect.due(next - 1));
+        CHECK(reconnect.due(next));
+        waits.push_back((next - now) / 1'000'000'000);
+        now = next;
+    }
+    CHECK(waits == std::vector<std::uint64_t>{1, 2, 4, 8, 15, 30, 30, 30});
+    CHECK(reconnect.attempt() == 9);
+
+    reconnect.succeeded();
+    CHECK_FALSE(reconnect.active());
+    CHECK_FALSE(reconnect.due(now + 60'000'000'000));
+
+    reconnect.begin(RemoteEndpoint{.host = "pi.local"}, "pi", now);
+    reconnect.cancel();
+    CHECK_FALSE(reconnect.due(now));
+}
+
+TEST_CASE("a link dropped mid-sweep keeps the setup, and the server keeps sweeping") {
+    Loopback loop;
+    loop.connect();
+    REQUIRE(loop.remote->setDeviceParameter("gain", SdrValue{std::int64_t{21}}).has_value());
+    REQUIRE(loop.remote->start().has_value());
+    REQUIRE(loop.tickUntil([&] { return loop.remote->running() && loop.local->running(); }));
+    loop.tickFor(200ms);
+
+    loop.remote->abandon();
+    REQUIRE(loop.tickUntil([&] { return !loop.remote->linkUp(); }));
+    const RemoteInstrument::LostState& lost = loop.remote->lostState();
+    CHECK(lost.running);
+    CHECK(std::ranges::any_of(lost.parameters, [](const auto& parameter) {
+        return parameter.first == "gain" && asInt(parameter.second) == 21;
+    }));
+    CHECK(loop.tickUntil([&] { return !loop.server->clientConnected(); }));
+    CHECK(loop.local->running());
+
+    // Back again, as the desktop's reconnect would: the radio never stopped.
+    std::uint64_t passesBefore = 0;
+    {
+        const std::lock_guard lock(loop.counter.mutex);
+        passesBefore = loop.counter.passes;
+    }
+    loop.remote.reset();
+    loop.connect();
+    CHECK(loop.remote->running());
+    CHECK(loop.tickUntil([&] {
+        const std::lock_guard lock(loop.counter.mutex);
+        return loop.counter.passes > passesBefore + 2;
+    }));
+}
+
+TEST_CASE("a benchmark asked for here runs on the server") {
+    Loopback loop;
+    loop.connect();
+
+    FftBenchmarkConfig config;
+    config.sizes = {64, 128};
+    config.threadCounts = {1};
+    config.secondsPerSample = 0.01;
+    config.minRuns = 4;
+    config.warmupRuns = 1;
+    REQUIRE(loop.remote->startBenchmark(config).has_value());
+    CHECK(loop.remote->benchmark().running);
+    CHECK_FALSE(loop.remote->startBenchmark(config).has_value());
+
+    REQUIRE(loop.tickUntil([&] { return loop.remote->benchmark().complete; }, 30000ms));
+    const BenchmarkStatus status = loop.remote->benchmark();
+    CHECK_FALSE(status.running);
+    const auto reference =
+        std::ranges::find(status.results, std::string("reference"), &FftBenchmarkEntry::backend);
+    REQUIRE(reference != status.results.end());
+    REQUIRE(reference->samples.size() == 2);
+    CHECK(reference->samples[0].size == 64);
+    CHECK(reference->samples[0].p50Seconds > 0.0);
+    CHECK(reference->samples[1].runs >= 4);
+}
+
+namespace {
+
+std::vector<char> contentsOf(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+} // namespace
+
+TEST_CASE("a recording made on the server comes over whole, and picks up where it stopped") {
+    Loopback loop;
+    loop.connect();
+    SweepPlan wide = Loopback::quickPlan();
+    wide.segments = {SweepSegment{.startHz = 100e6, .stopHz = 900e6}};
+    wide.rbwHz = 20e3;
+    REQUIRE(loop.remote->applySweepPlan(wide).has_value());
+    REQUIRE(loop.remote->start().has_value());
+
+    loop.remote->startRecording(65'536);
+    REQUIRE(loop.tickUntil([&] { return loop.remote->recordings().active; }));
+    CHECK(loop.remote->recordings().available);
+    REQUIRE(loop.tickUntil([&] { return loop.remote->recordings().bytes > 600'000; }, 20000ms));
+    loop.remote->stopRecording();
+    REQUIRE(loop.tickUntil([&] {
+        return !loop.remote->recordings().active && !loop.remote->recordings().files.empty();
+    }));
+
+    const RecordingFile file = loop.remote->recordings().files.front();
+    const std::filesystem::path original = loop.root() / "server-sessions" / file.name;
+    REQUIRE(std::filesystem::exists(original));
+    CHECK(file.bytes == std::filesystem::file_size(original));
+    CHECK(file.bytes > kChunkBytes);
+
+    const std::filesystem::path here = loop.root() / "desktop-sessions";
+
+    SUBCASE("in one go") {
+        REQUIRE(loop.remote->beginDownload(file.name, here).has_value());
+        REQUIRE(loop.tickUntil([&] { return loop.remote->downloads().front().done; }, 20000ms));
+        const RemoteInstrument::Download done = loop.remote->downloads().front();
+        CHECK(done.error.empty());
+        CHECK(done.received == file.bytes);
+        CHECK(contentsOf(done.path) == contentsOf(original));
+        CHECK_FALSE(std::filesystem::exists(here / (file.name + ".part")));
+
+        // A second copy lands beside the first.
+        REQUIRE(loop.remote->beginDownload(file.name, here).has_value());
+        REQUIRE(loop.tickUntil([&] { return loop.remote->downloads().front().done; }, 20000ms));
+        CHECK(loop.remote->downloads().front().path != done.path);
+    }
+
+    SUBCASE("from what an earlier attempt left") {
+        std::filesystem::create_directories(here);
+        const std::vector<char> whole = contentsOf(original);
+        {
+            std::ofstream part(here / (file.name + ".part"), std::ios::binary);
+            part.write(whole.data(), 1000);
+        }
+        REQUIRE(loop.remote->beginDownload(file.name, here).has_value());
+        CHECK(loop.remote->downloads().front().received == 1000);
+        REQUIRE(loop.tickUntil([&] { return loop.remote->downloads().front().done; }, 20000ms));
+        CHECK(contentsOf(loop.remote->downloads().front().path) == whole);
+    }
+
+    SUBCASE("deleted on the server") {
+        loop.remote->deleteRecording(file.name);
+        CHECK(loop.tickUntil([&] { return loop.remote->recordings().files.empty(); }));
+        CHECK_FALSE(std::filesystem::exists(original));
+    }
+}
+
+TEST_CASE("only a recording the server listed can be fetched or deleted") {
+    Loopback loop;
+    loop.connect();
+    std::filesystem::create_directories(loop.root() / "server-sessions");
+    {
+        std::ofstream secret(loop.root() / "secret.txt");
+        secret << "not yours";
+    }
+
+    loop.remote->deleteRecording("../secret.txt");
+    loop.remote->deleteRecording("..");
+    std::vector<InstrumentNotice> notices;
+    CHECK(loop.tickUntil([&] {
+        for (InstrumentNotice& notice : loop.remote->takeNotices()) {
+            notices.push_back(std::move(notice));
+        }
+        return notices.size() >= 2;
+    }));
+    CHECK(std::filesystem::exists(loop.root() / "secret.txt"));
+    CHECK_FALSE(loop.remote->beginDownload("../secret.txt", loop.root() / "here").has_value());
+
+    loop.remote->startRecording(4096);
+    REQUIRE(loop.tickUntil([&] { return loop.remote->recordings().active; }));
+    const std::string active = loop.remote->recordings().current;
+    REQUIRE_FALSE(active.empty());
+    REQUIRE(loop.tickUntil([&] {
+        const auto& files = loop.remote->recordings().files;
+        return std::ranges::find(files, active, &RecordingFile::name) != files.end();
+    }));
+    auto refused = loop.remote->beginDownload(active, loop.root() / "here");
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code() == ErrorCode::Unavailable);
 }

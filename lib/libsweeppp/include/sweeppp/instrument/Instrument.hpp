@@ -7,6 +7,7 @@
 #include "sweeppp/core/Telemetry.hpp"
 #include "sweeppp/correction/Corrections.hpp"
 #include "sweeppp/fft/FftBackendManager.hpp"
+#include "sweeppp/fft/FftBenchmark.hpp"
 #include "sweeppp/pipeline/Pipeline.hpp"
 #include "sweeppp/rf/Antenna.hpp"
 #include "sweeppp/rf/AntennaAssignments.hpp"
@@ -109,6 +110,19 @@ struct LinkStats {
     std::uint64_t passesCoalesced = 0;
     std::uint64_t partialsCoalesced = 0;
     std::uint64_t eventsDropped = 0;
+    /// Time the server spent turning frames into records, in all.
+    std::uint64_t encodeNs = 0;
+};
+
+/// An FFT benchmark on the machine the instrument computes on.
+struct BenchmarkStatus {
+    bool running = false;
+    bool complete = false;
+    std::size_t stepsDone = 0;
+    std::size_t stepsTotal = 0;
+    std::string currentStep;
+    double elapsedSeconds = 0.0;
+    std::vector<FftBenchmarkEntry> results;
 };
 
 /// Something the operator should be told, raised where toasts are not.
@@ -135,6 +149,9 @@ struct InstrumentPaths {
     std::vector<std::filesystem::path> antennaSearchPath;
     std::filesystem::path antennasDir;
     std::filesystem::path calibrationDir;
+    /// One calibration file for whichever radio is open, read and written in
+    /// place of the radio's own under `calibrationDir`. Empty uses those.
+    std::filesystem::path calibrationFile;
 
     /// From `Paths`, the application's own configuration.
     [[nodiscard]] static InstrumentPaths fromConfig();
@@ -170,9 +187,8 @@ public:
     /// What the window calls the radio: "HackRF One", or "HackRF One on pi".
     [[nodiscard]] virtual std::string displayLabel() const = 0;
 
-    /// Whether the transforms run in this process, which is where a
-    /// benchmark measures.
-    [[nodiscard]] virtual bool canBenchmark() const noexcept = 0;
+    /// The machine the transforms run on, by name; empty for this one.
+    [[nodiscard]] virtual std::string computeHost() const = 0;
 
     // ---- the radio -------------------------------------------------------
 
@@ -221,6 +237,12 @@ public:
     [[nodiscard]] virtual const PipelineConfig& pipelineConfig() const noexcept = 0;
 
     [[nodiscard]] virtual std::vector<FftBackendInfo> fftBackends() const = 0;
+
+    /// Times every available backend where the transforms run, on its own
+    /// thread there. Results come in through `benchmark()`.
+    virtual Status startBenchmark(const FftBenchmarkConfig& config) = 0;
+    virtual void cancelBenchmark() = 0;
+    [[nodiscard]] virtual BenchmarkStatus benchmark() const = 0;
     [[nodiscard]] virtual std::string fftBackendName() const = 0;
     virtual Status setFftBackend(std::string_view name) = 0;
 

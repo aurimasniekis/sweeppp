@@ -69,7 +69,6 @@ LocalInstrument::LocalInstrument(FrameBus& output, EventBus& events, Telemetry& 
         [this](const SpectrumFrame& frame, const SweepStep&) { observeStep(frame); });
     m_passSubscription = m_events.subscribe<SweepPassEvent>(
         [this](const SweepPassEvent&) { m_passesSeen.fetch_add(1, std::memory_order_relaxed); });
-    m_learnTapSubscription = m_output.subscribe(&m_learnTap);
 
     // Fixed-tune defaults.
     //
@@ -98,7 +97,18 @@ LocalInstrument::~LocalInstrument() {
     closeDevice();
     m_sweepEngine->setStepObserver({});
     m_events.unsubscribe(m_passSubscription);
-    m_output.unsubscribe(m_learnTapSubscription);
+    listenForLearning(false);
+}
+
+void LocalInstrument::listenForLearning(bool listen) {
+    // Only while a learn runs: the tap takes a lock for every frame, and on
+    // the output bus it would be one more consumer for nothing.
+    if (listen && m_learnTapSubscription == 0) {
+        m_learnTapSubscription = m_output.subscribe(&m_learnTap);
+    } else if (!listen && m_learnTapSubscription != 0) {
+        m_output.unsubscribe(m_learnTapSubscription);
+        m_learnTapSubscription = 0;
+    }
 }
 
 void LocalInstrument::notify(InstrumentNotice::Kind kind, std::string text) {
@@ -276,8 +286,17 @@ void LocalInstrument::sampleHealth() {
 
 // ---- running ----------------------------------------------------------------
 
+std::filesystem::path LocalInstrument::calibrationPath() const {
+    return m_paths.calibrationFile.empty()
+               ? CorrectionSet::pathFor(m_device->info(), m_paths.calibrationDir)
+               : m_paths.calibrationFile;
+}
+
 Status LocalInstrument::applyPipelineConfig(const PipelineConfig& config) {
     m_pipelineConfig = config;
+    if (config.targetFrameRate > 0.0) {
+        m_fixedFrameRate = config.targetFrameRate;
+    }
 
     if (!running()) {
         return m_pipeline->configure(*m_backend, config);
@@ -360,6 +379,24 @@ Status LocalInstrument::applySweepPlan(const SweepPlan& plan) {
     }
 
     return restart();
+}
+
+Status LocalInstrument::startBenchmark(const FftBenchmarkConfig& config) {
+    if (m_benchmark.running()) {
+        return fail(ErrorCode::Unavailable, "a benchmark is already running");
+    }
+    m_benchmark.start(config);
+    return ok();
+}
+
+BenchmarkStatus LocalInstrument::benchmark() const {
+    return BenchmarkStatus{.running = m_benchmark.running(),
+                           .complete = m_benchmark.complete(),
+                           .stepsDone = m_benchmark.stepsDone(),
+                           .stepsTotal = m_benchmark.stepsTotal(),
+                           .currentStep = m_benchmark.currentStep(),
+                           .elapsedSeconds = m_benchmark.elapsedSeconds(),
+                           .results = m_benchmark.results()};
 }
 
 std::vector<FftBackendInfo> LocalInstrument::fftBackends() const {
@@ -506,7 +543,7 @@ Status LocalInstrument::start() {
     } else {
         // Fixed tune: forwarded straight through, so the display cap applies
         // to the pipeline directly.
-        m_pipelineConfig.targetFrameRate = 60.0;
+        m_pipelineConfig.targetFrameRate = m_fixedFrameRate;
         m_pipelineSubscription = m_pipelineBus.subscribe(&m_displayForwarder);
     }
 
@@ -865,8 +902,7 @@ void LocalInstrument::loadCalibration() {
     m_floorStaleReason.clear();
 
     if (m_device) {
-        const std::filesystem::path path =
-            CorrectionSet::pathFor(m_device->info(), m_paths.calibrationDir);
+        const std::filesystem::path path = calibrationPath();
         std::error_code ec;
         if (std::filesystem::exists(path, ec)) {
             if (auto loaded = CorrectionSet::load(path)) {
@@ -943,6 +979,7 @@ Status LocalInstrument::startLearning() {
         run.passesHandled = m_passesSeen.load(std::memory_order_relaxed);
         run.learner.begin(fftSize, sampleRate, sweeping);
     }
+    listenForLearning(true);
     pushCorrectionSettings();
 
     notify(InstrumentNotice::Kind::Info,
@@ -1118,6 +1155,7 @@ void LocalInstrument::finishLearning(const std::vector<SpurEntry>& absoluteSpurs
         run = std::move(*m_learn);
         m_learn.reset();
     }
+    listenForLearning(false);
 
     CorrectionSet set;
     set.context = run.context;
@@ -1129,8 +1167,7 @@ void LocalInstrument::finishLearning(const std::vector<SpurEntry>& absoluteSpurs
 
     std::string savedAs;
     if (m_device) {
-        const std::filesystem::path path =
-            CorrectionSet::pathFor(m_device->info(), m_paths.calibrationDir);
+        const std::filesystem::path path = calibrationPath();
         std::error_code ec;
         std::filesystem::create_directories(path.parent_path(), ec);
         if (auto saved = set.save(path); !saved) {
@@ -1169,6 +1206,7 @@ void LocalInstrument::abortLearning() {
         saved = m_learn->savedSettings;
         m_learn.reset();
     }
+    listenForLearning(false);
     m_correctionSettings = saved;
     pushCorrectionSettings();
 
@@ -1260,8 +1298,7 @@ void LocalInstrument::clearAutoSpurs() {
 void LocalInstrument::clearCorrections() {
     abortLearning();
     if (m_device) {
-        const std::filesystem::path path =
-            CorrectionSet::pathFor(m_device->info(), m_paths.calibrationDir);
+        const std::filesystem::path path = calibrationPath();
         std::error_code ec;
         std::filesystem::remove(path, ec);
         if (ec) {

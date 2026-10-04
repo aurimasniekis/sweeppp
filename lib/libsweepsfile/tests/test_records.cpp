@@ -239,3 +239,47 @@ TEST_CASE("a plugin record's identity and body length are validated") {
     ByteReader in(out.data(), out.size());
     CHECK_FALSE(decodePluginData(in).has_value());
 }
+
+namespace {
+
+/// The byte-at-a-time CRC the file format was first written with, as the
+/// reference the faster one must match bit for bit.
+std::uint32_t referenceCrc32(const std::uint8_t* data, std::size_t bytes, std::uint32_t seed) {
+    std::uint32_t crc = ~seed;
+    for (std::size_t i = 0; i < bytes; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc & 1U) != 0U ? (0xEDB8'8320U ^ (crc >> 1U)) : (crc >> 1U);
+        }
+    }
+    return ~crc;
+}
+
+} // namespace
+
+TEST_CASE("the checksum matches the byte-at-a-time CRC at every length and alignment") {
+    // The standard check value for CRC-32/ISO-HDLC.
+    const std::string check = "123456789";
+    CHECK(crc32(check.data(), check.size()) == 0xCBF4'3926U);
+    CHECK(crc32(nullptr, 0) == 0U);
+
+    std::vector<std::uint8_t> data(4096 + 16);
+    std::uint32_t state = 0x1234'5678U;
+    for (std::uint8_t& byte : data) {
+        state = (state * 1'664'525U) + 1'013'904'223U;
+        byte = static_cast<std::uint8_t>(state >> 24U);
+    }
+
+    for (std::size_t offset = 0; offset < 8; ++offset) {
+        for (std::size_t length :
+             {0UL, 1UL, 7UL, 8UL, 9UL, 15UL, 16UL, 17UL, 63UL, 64UL, 1000UL, 4096UL}) {
+            const std::uint8_t* start = data.data() + offset;
+            CHECK(crc32(start, length) == referenceCrc32(start, length, 0));
+        }
+    }
+
+    // Chained through the seed, as a file writer folding in pieces would.
+    const std::uint32_t whole = crc32(data.data(), 1000);
+    const std::uint32_t first = crc32(data.data(), 333);
+    CHECK(crc32(data.data() + 333, 667, first) == whole);
+}

@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -29,6 +30,19 @@ struct ServerConfig {
     std::chrono::milliseconds handshakeTimeout = kHandshakeTimeout;
     std::chrono::milliseconds silenceTimeout = kSilenceTimeout;
     std::chrono::milliseconds refusalDelay = kRefusalDelay;
+
+    /// After a client drops without saying goodbye, how long the radio keeps
+    /// running for it to come back. Zero stops it at once, as a goodbye does.
+    std::chrono::milliseconds linger = kDefaultLinger;
+
+    /// Where recordings made on the server go; empty means it makes none.
+    std::filesystem::path sessionsDir;
+    /// Start recording as soon as the server starts, at `recordBins`.
+    bool recordAtStart = false;
+    std::uint32_t recordBins = 65'536;
+
+    /// Answer desktops looking for servers on the LAN (mDNS).
+    bool advertise = false;
 };
 
 /// Serves one `LocalInstrument` to one remote client at a time.
@@ -36,8 +50,10 @@ struct ServerConfig {
 /// Everything the instrument does happens on the server's control thread:
 /// commands, `tick()`, state. Frames leave from the output bus through a
 /// two-slot mailbox, so a slow link merges frames rather than slowing the
-/// engine down. A client that goes away leaves the radio stopped, its plan and
-/// parameters as they were.
+/// engine down. A client that says goodbye leaves the radio stopped, its plan
+/// and parameters as they were; one that drops leaves it running for
+/// `linger`, for the next client -- the same desktop, reconnecting -- to take
+/// over.
 class RemoteServer {
 public:
     /// `output`, `events` and `telemetry` are the ones `instrument` was built

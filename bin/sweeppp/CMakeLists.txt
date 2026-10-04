@@ -6,7 +6,6 @@ set(SWEEPPP_GUI_SOURCES
     src/AppSettings.cpp
     src/AppState.cpp
     src/ContributionOverlay.cpp
-    src/FftBenchmarkRunner.cpp
     src/MainWindow.cpp
     src/MainWindowPlots.cpp
     src/MainWindowPanels.cpp

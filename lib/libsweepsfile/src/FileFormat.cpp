@@ -12,20 +12,38 @@ namespace sweeps {
 using detail::fail;
 namespace {
 
-/// CRC32 (IEEE 802.3) table, built once at first use.
-const std::array<std::uint32_t, 256>& crcTable() {
-    static const std::array<std::uint32_t, 256> table = [] {
-        std::array<std::uint32_t, 256> generated{};
+/// CRC32 (IEEE 802.3) tables for slicing-by-8, built once at first use.
+///
+/// Table 0 is the classic byte-at-a-time table; table k advances a byte k
+/// further, so eight bytes are folded in with eight lookups and no carried
+/// dependency between them. Four to five times the byte loop, and the same
+/// answer bit for bit.
+const std::array<std::array<std::uint32_t, 256>, 8>& crcTables() {
+    static const std::array<std::array<std::uint32_t, 256>, 8> tables = [] {
+        std::array<std::array<std::uint32_t, 256>, 8> generated{};
         for (std::uint32_t i = 0; i < 256; ++i) {
             std::uint32_t value = i;
             for (int bit = 0; bit < 8; ++bit) {
                 value = (value & 1U) != 0U ? (0xEDB8'8320U ^ (value >> 1U)) : (value >> 1U);
             }
-            generated[i] = value;
+            generated[0][i] = value;
+        }
+        for (std::size_t k = 1; k < generated.size(); ++k) {
+            for (std::uint32_t i = 0; i < 256; ++i) {
+                const std::uint32_t previous = generated[k - 1][i];
+                generated[k][i] = (previous >> 8U) ^ generated[0][previous & 0xFFU];
+            }
         }
         return generated;
     }();
-    return table;
+    return tables;
+}
+
+/// Little-endian by construction rather than by load, so the result does not
+/// depend on the host's byte order.
+std::uint32_t loadLittle32(const std::uint8_t* p) noexcept {
+    return std::uint32_t{p[0]} | (std::uint32_t{p[1]} << 8U) | (std::uint32_t{p[2]} << 16U) |
+           (std::uint32_t{p[3]} << 24U);
 }
 
 } // namespace
@@ -449,12 +467,21 @@ Result<SessionEvent> decodeEvent(ByteReader& in) {
 }
 
 std::uint32_t crc32(const void* data, std::size_t bytes, std::uint32_t seed) noexcept {
-    const std::array<std::uint32_t, 256>& table = crcTable();
+    const auto& t = crcTables();
     const auto* input = static_cast<const std::uint8_t*>(data);
 
     std::uint32_t crc = ~seed;
-    for (std::size_t i = 0; i < bytes; ++i) {
-        crc = table[(crc ^ input[i]) & 0xFFU] ^ (crc >> 8U);
+    while (bytes >= 8) {
+        const std::uint32_t low = crc ^ loadLittle32(input);
+        const std::uint32_t high = loadLittle32(input + 4);
+        crc = t[7][low & 0xFFU] ^ t[6][(low >> 8U) & 0xFFU] ^ t[5][(low >> 16U) & 0xFFU] ^
+              t[4][low >> 24U] ^ t[3][high & 0xFFU] ^ t[2][(high >> 8U) & 0xFFU] ^
+              t[1][(high >> 16U) & 0xFFU] ^ t[0][high >> 24U];
+        input += 8;
+        bytes -= 8;
+    }
+    while (bytes-- > 0) {
+        crc = t[0][(crc ^ *input++) & 0xFFU] ^ (crc >> 8U);
     }
     return ~crc;
 }

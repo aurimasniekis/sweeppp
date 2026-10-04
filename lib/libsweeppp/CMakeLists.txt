@@ -11,6 +11,7 @@ set(SWEEPPP_SOURCES
 
     src/dsp/Convert.cpp
 
+    src/crypto/Noise.cpp
     src/crypto/Sha256.cpp
 
     src/correction/CorrectionLearner.cpp
@@ -18,6 +19,7 @@ set(SWEEPPP_SOURCES
 
     src/fft/FftBackendManager.cpp
     src/fft/FftBenchmark.cpp
+    src/fft/FftBenchmarkRunner.cpp
     src/fft/IFftBackend.cpp
     src/fft/Window.cpp
 
@@ -27,7 +29,9 @@ set(SWEEPPP_SOURCES
 
     src/instrument/LocalInstrument.cpp
 
+    src/net/SecureChannel.cpp
     src/net/Socket.cpp
+    src/net/Udp.cpp
 
     src/pipeline/AsyncFrameConsumer.cpp
     src/pipeline/FrameBus.cpp
@@ -42,7 +46,10 @@ set(SWEEPPP_SOURCES
 
     src/remote/ClockMap.cpp
     src/remote/FrameCodec.cpp
+    src/remote/Handshake.cpp
+    src/remote/Mdns.cpp
     src/remote/Messages.cpp
+    src/remote/Reconnector.cpp
     src/remote/RemoteInstrument.cpp
     src/remote/RemoteServer.cpp
     src/remote/ServerList.cpp
@@ -91,7 +98,7 @@ target_include_directories(sweeppp
 # rather than guessed.
 target_link_libraries(sweeppp
     PUBLIC  sweeps::sweepsfile tomlplusplus::tomlplusplus Threads::Threads
-    PRIVATE sweeppp_warnings ${CMAKE_DL_LIBS})
+    PRIVATE sweeppp_warnings sweeppp_monocypher ${CMAKE_DL_LIBS})
 
 # dbghelp is the crash handler's, and nothing else in the tree needs it:
 # turning a captured return address into a name is SymFromAddr's job, and the
@@ -102,7 +109,7 @@ endif()
 
 # Winsock for the remote link, and the system generator its nonces come from.
 if(WIN32)
-    target_link_libraries(sweeppp PRIVATE ws2_32 bcrypt)
+    target_link_libraries(sweeppp PRIVATE ws2_32 bcrypt iphlpapi)
 endif()
 
 target_compile_definitions(sweeppp PRIVATE

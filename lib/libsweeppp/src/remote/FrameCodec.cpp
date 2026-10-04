@@ -37,6 +37,115 @@ std::size_t blockCount(std::size_t bins) noexcept {
 
 } // namespace
 
+// ----------------------------------------------------------------- ChangedBins
+
+ChangedBins ChangedBins::of(const SpectrumFrame& frame) noexcept {
+    if (!frame.dirtyKnown) {
+        return unknown();
+    }
+    return ChangedBins{.first = frame.dirtyFirstBin, .end = frame.dirtyEndBin};
+}
+
+void ChangedBins::add(const ChangedBins& other) noexcept {
+    if (!known || !other.known) {
+        *this = unknown();
+        return;
+    }
+    if (other.empty()) {
+        return;
+    }
+    if (empty()) {
+        *this = other;
+        return;
+    }
+    first = std::min(first, other.first);
+    end = std::max(end, other.end);
+}
+
+namespace {
+
+std::size_t groupFor(std::size_t bins, std::size_t maxBins) noexcept {
+    return maxBins == 0 ? 1 : std::max<std::size_t>(1, (bins + maxBins - 1) / maxBins);
+}
+
+/// The strongest measured level of each group in [firstGroup, endGroup).
+void reduceGroups(const std::vector<float>& source, std::size_t group, std::size_t firstGroup,
+                  std::size_t endGroup, std::vector<float>& out) {
+    const std::size_t bins = source.size();
+    for (std::size_t index = firstGroup; index < endGroup; ++index) {
+        const std::size_t first = index * group;
+        const std::size_t last = std::min(first + group, bins);
+        float strongest = kUnmeasuredDbfs;
+        for (std::size_t bin = first; bin < last; ++bin) {
+            const float level = source[bin];
+            if (measured(level) && (!measured(strongest) || level > strongest)) {
+                strongest = level;
+            }
+        }
+        out[index] = strongest;
+    }
+}
+
+/// Everything but the levels.
+SpectrumFrame reducedShell(const SpectrumFrame& frame, std::size_t group) {
+    SpectrumFrame reduced;
+    reduced.sequence = frame.sequence;
+    reduced.hostTimeNs = frame.hostTimeNs;
+    reduced.wallTimeNs = frame.wallTimeNs;
+    reduced.deviceTimeNs = frame.deviceTimeNs;
+    reduced.sweepPass = frame.sweepPass;
+    reduced.sweepStep = frame.sweepStep;
+    reduced.passComplete = frame.passComplete;
+    reduced.startHz = frame.startHz;
+    reduced.binWidthHz = frame.binWidthHz * static_cast<double>(group);
+    reduced.config = frame.config;
+    reduced.averageCount = frame.averageCount;
+    reduced.clippedFraction = frame.clippedFraction;
+    return reduced;
+}
+
+void narrow(ChangedBins& changed, std::size_t group) noexcept {
+    if (changed.known && !changed.empty()) {
+        changed.first /= group;
+        changed.end = (changed.end + group - 1) / group;
+    }
+}
+
+} // namespace
+
+SpectrumFrame reduceFrame(const SpectrumFrame& frame, std::size_t maxBins, ChangedBins& changed) {
+    FrameReducer reducer;
+    return reducer.reduce(frame, maxBins, changed);
+}
+
+SpectrumFrame FrameReducer::reduce(const SpectrumFrame& frame, std::size_t maxBins,
+                                   ChangedBins& changed) {
+    const std::size_t bins = frame.binCount();
+    const std::size_t group = groupFor(bins, maxBins);
+    const std::size_t groups = (bins + group - 1) / group;
+
+    // A different grid, or nothing known about what moved: all of it again.
+    const bool sameGrid = bins == m_sourceBins && group == m_group && frame.startHz == m_startHz &&
+                          frame.binWidthHz == m_binWidthHz;
+    if (!sameGrid || !changed.known) {
+        m_levels.assign(groups, kUnmeasuredDbfs);
+        reduceGroups(frame.binsDbfs, group, 0, groups, m_levels);
+        m_sourceBins = bins;
+        m_group = group;
+        m_startHz = frame.startHz;
+        m_binWidthHz = frame.binWidthHz;
+    } else if (!changed.empty()) {
+        const std::size_t first = std::min(changed.first / group, groups);
+        const std::size_t end = std::min((changed.end + group - 1) / group, groups);
+        reduceGroups(frame.binsDbfs, group, first, end, m_levels);
+    }
+
+    SpectrumFrame reduced = reducedShell(frame, group);
+    reduced.binsDbfs = m_levels;
+    narrow(changed, group);
+    return reduced;
+}
+
 // ---------------------------------------------------------------- FrameEncoder
 
 void FrameEncoder::openSegment(const SpectrumFrame& frame, std::vector<std::byte>& out) {
@@ -69,7 +178,8 @@ void FrameEncoder::openSegment(const SpectrumFrame& frame, std::vector<std::byte
     ++m_stats.segments;
 }
 
-void FrameEncoder::encode(const SpectrumFrame& frame, std::vector<std::byte>& out) {
+void FrameEncoder::encode(const SpectrumFrame& frame, std::vector<std::byte>& out,
+                          ChangedBins changed) {
     const std::size_t bins = frame.binCount();
     if (bins == 0) {
         return;
@@ -86,6 +196,12 @@ void FrameEncoder::encode(const SpectrumFrame& frame, std::vector<std::byte>& ou
         const std::size_t count = std::min<std::size_t>(kTileBins, bins - first);
         const float* levels = frame.binsDbfs.data() + first;
 
+        // Outside what changed, what was sent still stands; only a block
+        // never sent has to be looked at.
+        if (m_sent[block] && changed.known &&
+            (first + count <= changed.first || first >= changed.end)) {
+            continue;
+        }
         if (m_sent[block] &&
             std::memcmp(levels, m_levels.data() + first, count * sizeof(float)) == 0) {
             continue;

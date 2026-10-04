@@ -65,9 +65,9 @@ toml++ and threads, and no FFT or radio library.
 | `pipeline/`   | Turns IQ blocks into spectrum frames and fans them out to consumers.                                                                                                                         | `Pipeline`, `PipelineConfig`, `FrameBus`, `IFrameConsumer`, `AsyncFrameConsumer`, `SpectrumFrame`                               |
 | `instrument/` | The radio, pipeline and sweep engine driven as one, behind an interface the GUI and the server share. Returns values only, so it can be implemented over a network.                          | `Instrument`, `LocalInstrument`, `DeviceDescriptor`, `InstrumentNotice`                                                         |
 | `history/`    | A thin layer over libsweepsfile: a threaded recorder and replay, and the mapping between bus events and Event records they share with the remote link.                                       | `session::SessionRecorder`, `SessionReplay`, `IFrameSource`, `toSessionEvent`, `publishSessionEvent`                            |
-| `net/`        | Blocking TCP sockets, POSIX and Winsock.                                                                                                                                                     | `TcpSocket`, `TcpListener`                                                                                                      |
-| `crypto/`     | SHA-256 and HMAC for the remote handshake, and the system random generator.                                                                                                                  | `Sha256`, `hmacSha256`, `fillRandom`                                                                                            |
-| `remote/`     | The remote instrument protocol, its server and its client.                                                                                                                                   | `RemoteServer`, `RemoteInstrument`, `FrameEncoder`/`FrameMirror`, `ClockMap`, `ServerList`                                      |
+| `net/`        | Blocking TCP and UDP sockets, POSIX and Winsock; the encrypted channel; the machine's interfaces.                                                                                            | `TcpSocket`, `TcpListener`, `SecureChannel`, `UdpSocket`                                                                        |
+| `crypto/`     | The remote link's Noise handshake and ciphers, SHA-256 and HMAC, and the system random generator.                                                                                            | `NoiseHandshake`, `CipherState`, `Sha256`, `fillRandom`                                                                         |
+| `remote/`     | The remote instrument protocol, its server and its client.                                                                                                                                   | `RemoteServer`, `RemoteInstrument`, `FrameEncoder`/`FrameMirror`, `ClockMap`, `ServerList`, `Reconnector`, `mdns::Browser`      |
 | `plugin/`     | The plugin host: search path, loading, manifests and dependencies, adapters from facets to host interfaces, events, contributors, UI dispatch. Also the headers plugins are written against. | `PluginManager`, `PluginAbi.h`, `Plugin.hpp`, `PluginSdr.hpp`, `PluginFft.hpp`, `PluginChrome.hpp`                              |
 | `profile/`    | One TOML-backed struct for the whole setup. `settings.toml` and named profiles are the same type.                                                                                            | `Profile`                                                                                                                       |
 | `ui/`         | UI state with no rendering in it.                                                                                                                                                            | `Theme`, `ColorMap`, `TraceStore`, `Marker`/`MarkerPresetStore`, `ToastCenter`, `ViewSettings`                                  |
@@ -157,15 +157,22 @@ sweep engine in this process. `RemoteInstrument` drives a `LocalInstrument` in
 `sweeppp-cli serve` on another computer, through `RemoteServer`, so both ends
 run the same orchestration.
 
-The connection is a `.sweeps` record stream (Appendix C of the
+A connection opens with an eight-byte preamble each way (`SWPPNZ02`), then
+`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2b` with the token's BLAKE2b hash as the
+pre-shared key (`crypto/Noise`, on Monocypher). A wrong token fails the first
+handshake message and the server closes without a word. After the handshake,
+`net::SecureChannel` carries everything in ChaCha20-Poly1305 frames of at most
+64 KiB, and inside it is a `.sweeps` record stream (Appendix C of the
 [format specification](../lib/libsweepsfile/sweeps-format-v1.md)):
 
 - spectra as Tile records, one per 1024-bin block that changed since the last
-  frame, at 0.5 dB steps, each line closed by a `frame` message;
+  frame, at 0.5 dB steps, each line closed by a `frame` message. The engine
+  marks which bins each frame changed, so the server compares only those; a
+  client may ask for frames reduced to fewer bins by max-hold;
 - bus events as Event records, and telemetry as Telemetry records at 4 Hz;
-- everything else as PluginData records under `org.sweeppp.remote`: the
-  handshake (HMAC-SHA256 of the token over both sides' nonces), commands,
-  acknowledgements, state sections and notices.
+- everything else as PluginData records under `org.sweeppp.remote`: commands,
+  acknowledgements, state sections, notices and the pieces of a recording
+  being downloaded.
 
 An edit lands in the client's copy at once, and the state sections the command
 touches are held there until a `state` message acknowledges it. The server
@@ -186,6 +193,20 @@ Server threads:
 Client threads: a reader that rebuilds frames and republishes events on this
 computer's clocks (`ClockMap`, from the fastest recent ping), and a writer for
 commands and a ping a second. The UI thread applies state in `tick()`.
+
+A client that drops without saying goodbye leaves the radio running for the
+server's linger time. The desktop keeps a snapshot of its setup and tries
+again on `Reconnector`'s schedule; the next client to arrive takes over the
+running radio.
+
+The server can record its own output at full resolution, and a client fetches
+a recording a 256 KiB piece at a time, four in flight, sent after everything
+else so the live view never waits on a file.
+
+Listening beyond loopback, the server answers mDNS questions for
+`_sweeppp._tcp.local` (`remote/Mdns`). The desktop asks from a port of its own
+for unicast answers and takes an answer's source address as the server's,
+which on a link-local network carries the interface scope it needs.
 
 ## Sweep planning
 
@@ -416,7 +437,7 @@ third-party GPL libraries are each linked only by their own plugin:
 | Binary or library       | Licence          | Links                                                                                                                                                               |
 |-------------------------|------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `libsweepsfile`         | MIT              | nothing                                                                                                                                                             |
-| `libsweeppp` (static)   | GPL-3.0-or-later | libsweepsfile, toml++ (MIT)                                                                                                                                         |
+| `libsweeppp` (static)   | GPL-3.0-or-later | libsweepsfile, toml++ (MIT), Monocypher (CC0-1.0 or BSD-2-Clause)                                                                                                   |
 | `sweeppp`               | GPL-3.0-or-later | libsweeppp, ImGui and ImPlot (MIT), GLFW (Zlib), nativefiledialog-extended (Zlib), stb (MIT), GTK 3 on Linux (LGPL), libcurl and nlohmann/json for the update check |
 | `sweeppp-cli`           | GPL-3.0-or-later | libsweeppp, the `sweeps` tool's core                                                                                                                                |
 | `sweeppp-server`        | GPL-3.0-or-later | libsweeppp, nlohmann/json                                                                                                                                           |

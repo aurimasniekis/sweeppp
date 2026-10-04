@@ -87,6 +87,14 @@ struct SpectrumFrame {
     /// confident wrong number.
     float clippedFraction = 0.0F;
 
+    /// The bins that differ from the frame published before this one, as
+    /// [dirtyFirstBin, dirtyEndBin), when the publisher knows. A sweep's
+    /// partial frame changes one step's worth of a wide grid, and a consumer
+    /// passing frames on can leave the rest alone.
+    bool dirtyKnown = false;
+    std::size_t dirtyFirstBin = 0;
+    std::size_t dirtyEndBin = 0;
+
     [[nodiscard]] std::size_t binCount() const noexcept { return binsDbfs.size(); }
     [[nodiscard]] double stopHz() const noexcept {
         return startHz + binWidthHz * static_cast<double>(binsDbfs.size());

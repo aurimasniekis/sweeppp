@@ -57,7 +57,8 @@ From left to right:
 - **RX port.** Only on radios with more than one input. Shows which connector
   and antenna are in use, and whether antenna routing is on.
 - **Via.** Only when connected to a server: its name, the round trip and the
-  data rate. Amber when the network can't keep up and passes are being merged.
+  data rate. Amber when the network can't keep up and passes are being merged;
+  lower **Network resolution** then.
 - **Save now.** Saves the recording so far to a `.sweeps` file. See
   [Recording](#recording).
 - **Snapshot.** Copies a picture of the spectrum and waterfall. See
@@ -81,9 +82,9 @@ where the time goes.
 
 ### Performance window
 
-- **Link:** only when connected to a server: round trip, data rate, and how
-  many frames the server merged because the network was slower. The sections
-  below it are measured on the server.
+- **Link:** only when connected to a server: round trip, data rate, how many
+  frames the server merged because the network was slower, and how long it
+  takes to encode each. The sections below it are measured on the server.
 - **Input:** how full the USB link and buffers are, sample rate, dropped
   samples, overruns and gaps. **Reset** clears the counters.
 - **Device:** temperatures, power and similar readings, for radios that
@@ -123,8 +124,11 @@ Sweep++ reopens the last radio you used the next time it starts.
 A radio on another computer is used the same way, through
 [`sweeppp-cli serve`](cli.md#serve) running there.
 
-- Under **Servers** in the device panel, click **Add server...**, enter a name,
-  the address (`host` or `host:port`) and the token, and click **Connect**.
+- Servers answering on the network are listed under **On this network**.
+  Click one, enter its token, and click **Connect**. This works over a direct
+  Ethernet cable as well as a LAN.
+- Otherwise, click **Add server...** and enter a name, the address (`host` or
+  `host:port`) and the token.
 - Click a saved server to connect. Right-click it to edit or forget it.
 - **Disconnect** returns to the radios on this computer.
 
@@ -132,11 +136,20 @@ While connected:
 
 - the radio is named "*radio* on *server*";
 - antennas, assignments and corrections are stored on the server;
-- **Bench** is off, since it measures this computer;
+- **Bench** measures the server, where the transforms run;
+- **Network resolution** in the Analysis panel sets how many bins cross the
+  network. Fewer keep a slow link live; each bin shown is the strongest of
+  those it covers. The choice is kept per server;
+- **Recordings on** *server*, in the device panel, records on the server at
+  full or reduced resolution, independent of the network. Click the download
+  button to copy a recording to this computer, then open it in the History
+  viewer;
 - a profile names the server by address; its token stays in `servers.toml`.
 
-If the connection drops, a message says why and Sweep++ returns to the radios
-on this computer.
+If the connection drops, Sweep++ returns to the radios on this computer and
+keeps trying the server, at longer intervals up to every 30 seconds. When it
+is back, the plan and settings are put back and the recording carries on in
+the same file. **Stop trying**, in the device panel, gives up.
 
 ## Setting the range
 

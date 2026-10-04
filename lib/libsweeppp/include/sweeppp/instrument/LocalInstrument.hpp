@@ -5,6 +5,7 @@
 
 #include "sweeppp/core/EventBus.hpp"
 #include "sweeppp/correction/CorrectionLearner.hpp"
+#include "sweeppp/fft/FftBenchmarkRunner.hpp"
 #include "sweeppp/fft/IFftBackend.hpp"
 #include "sweeppp/instrument/Instrument.hpp"
 #include "sweeppp/pipeline/FrameBus.hpp"
@@ -68,7 +69,7 @@ public:
     [[nodiscard]] std::string profileDriver() const override;
     [[nodiscard]] std::string profileId() const override;
     [[nodiscard]] std::string displayLabel() const override;
-    [[nodiscard]] bool canBenchmark() const noexcept override { return true; }
+    [[nodiscard]] std::string computeHost() const override { return {}; }
 
     [[nodiscard]] const DeviceDescriptor* device() const noexcept override;
     [[nodiscard]] std::optional<SdrValue> parameter(std::string_view key) const override;
@@ -100,6 +101,9 @@ public:
     }
 
     [[nodiscard]] std::vector<FftBackendInfo> fftBackends() const override;
+    Status startBenchmark(const FftBenchmarkConfig& config) override;
+    void cancelBenchmark() override { m_benchmark.cancel(); }
+    [[nodiscard]] BenchmarkStatus benchmark() const override;
     [[nodiscard]] std::string fftBackendName() const override;
     Status setFftBackend(std::string_view name) override;
 
@@ -196,6 +200,7 @@ private:
     };
 
     void notify(InstrumentNotice::Kind kind, std::string text);
+    void listenForLearning(bool listen);
 
     void adoptEffectivePlan();
     void reportUnroutedRanges();
@@ -208,6 +213,8 @@ private:
     void refreshSwitcherViews();
 
     [[nodiscard]] CalibrationContext currentContext() const;
+    /// Where the open radio's calibration is read from and written to.
+    [[nodiscard]] std::filesystem::path calibrationPath() const;
     [[nodiscard]] CorrectionSettings effectiveCorrectionSettings() const noexcept;
     void pushCorrectionSettings();
     void loadCalibration();
@@ -241,6 +248,9 @@ private:
     std::optional<DeviceDescriptor> m_descriptor;
 
     PipelineConfig m_pipelineConfig;
+    /// The cap a fixed tune publishes at. A sweep sets the pipeline's own to
+    /// none, so the last one asked for is kept here.
+    double m_fixedFrameRate = 60.0;
     SweepPlan m_sweepPlan;
     ScheduleSummary m_schedule;
     bool m_sweeping = false;
@@ -264,6 +274,8 @@ private:
     std::uint64_t m_lastSlowTickNs = 0;
 
     std::vector<InstrumentNotice> m_notices;
+
+    FftBenchmarkRunner m_benchmark;
 
     CorrectionSettings m_correctionSettings;
     std::optional<CorrectionSet> m_corrections;

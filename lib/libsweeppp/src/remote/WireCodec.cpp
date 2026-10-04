@@ -3,6 +3,7 @@
 
 #include "sweeppp/remote/WireCodec.hpp"
 
+#include <algorithm>
 #include <string>
 #include <type_traits>
 
@@ -505,6 +506,79 @@ SdrHealthReading decodeReading(const Metadata& in) {
                             .alarm = in.getBool("alarm")};
 }
 
+Value sizeArray(std::span<const std::size_t> items) {
+    std::vector<Value> elements;
+    elements.reserve(items.size());
+    for (const std::size_t item : items) {
+        elements.push_back(Value::ofInt(static_cast<std::int64_t>(item)));
+    }
+    return Value::ofArray(Value::Type::Int, std::move(elements));
+}
+
+/// Non-negative integers under `key`, at most `limit` of them.
+std::vector<std::size_t> sizeList(const Metadata& in, std::string_view key, std::size_t limit) {
+    std::vector<std::size_t> out;
+    const Value* value = in.find(key);
+    const std::vector<Value>* elements = value != nullptr ? value->asArray() : nullptr;
+    if (elements == nullptr || value->elementType() != Value::Type::Int) {
+        return out;
+    }
+    for (const Value& element : *elements) {
+        if (out.size() >= limit) {
+            break;
+        }
+        if (element.asInt() > 0) {
+            out.push_back(static_cast<std::size_t>(element.asInt()));
+        }
+    }
+    return out;
+}
+
+Metadata encodeBenchmarkSample(const FftBenchmarkSample& sample) {
+    Metadata out;
+    setU64(out, "size", sample.size);
+    setU64(out, "threads", sample.threads);
+    out.setFloat("planSeconds", sample.planSeconds);
+    out.setFloat("p50Seconds", sample.p50Seconds);
+    out.setFloat("p99Seconds", sample.p99Seconds);
+    out.setFloat("maxSeconds", sample.maxSeconds);
+    out.setFloat("throughputPerSecond", sample.throughputPerSecond);
+    out.setFloat("cpuCores", sample.cpuCores);
+    setU64(out, "runs", sample.runs);
+    out.setString("skipped", sample.skipped);
+    return out;
+}
+
+FftBenchmarkSample decodeBenchmarkSample(const Metadata& in) {
+    return FftBenchmarkSample{.size = getSize(in, "size"),
+                              .threads = getSize(in, "threads", 1),
+                              .planSeconds = in.getFloat("planSeconds"),
+                              .p50Seconds = in.getFloat("p50Seconds"),
+                              .p99Seconds = in.getFloat("p99Seconds"),
+                              .maxSeconds = in.getFloat("maxSeconds"),
+                              .throughputPerSecond = in.getFloat("throughputPerSecond"),
+                              .cpuCores = in.getFloat("cpuCores"),
+                              .runs = getSize(in, "runs"),
+                              .skipped = in.getString("skipped")};
+}
+
+Metadata encodeBenchmarkEntry(const FftBenchmarkEntry& entry) {
+    Metadata out;
+    out.setString("backend", entry.backend);
+    out.setString("displayName", entry.displayName);
+    out.set("samples",
+            hashArray(std::span<const FftBenchmarkSample>(entry.samples), encodeBenchmarkSample));
+    out.setString("error", entry.error);
+    return out;
+}
+
+FftBenchmarkEntry decodeBenchmarkEntry(const Metadata& in) {
+    return FftBenchmarkEntry{.backend = in.getString("backend"),
+                             .displayName = in.getString("displayName"),
+                             .samples = hashList(in, "samples", decodeBenchmarkSample),
+                             .error = in.getString("error")};
+}
+
 } // namespace
 
 const Metadata& hashAt(const Metadata& in, std::string_view key) {
@@ -904,6 +978,68 @@ ProcessStats decodeProcessStats(const Metadata& in) {
         .throttleReason = getEnum(in, "throttleReason", ThrottleReason::Stopped, 7),
         .sweepSpeedHzPerSec = in.getFloat("sweepSpeedHzPerSec"),
     };
+}
+
+// ---- the benchmark ----------------------------------------------------------------
+
+Metadata encodeBenchmarkConfig(const FftBenchmarkConfig& config) {
+    Metadata out;
+    out.set("sizes", sizeArray(config.sizes));
+    out.set("threadCounts", sizeArray(config.threadCounts));
+    setEnum(out, "quality", config.quality);
+    out.setFloat("secondsPerSample", config.secondsPerSample);
+    setU64(out, "minRuns", config.minRuns);
+    setU64(out, "maxRuns", config.maxRuns);
+    setU64(out, "warmupRuns", config.warmupRuns);
+    return out;
+}
+
+FftBenchmarkConfig decodeBenchmarkConfig(const Metadata& in) {
+    // Bounded, since a server runs what this says on its own cores: a size
+    // ladder and a thread list of sane length, and a minute a measurement at
+    // most.
+    constexpr std::size_t kMaxSizes = 64;
+    constexpr std::size_t kMaxThreadCounts = 8;
+    const FftBenchmarkConfig defaults = defaultFftBenchmarkConfig();
+    FftBenchmarkConfig config;
+    config.sizes = sizeList(in, "sizes", kMaxSizes);
+    if (config.sizes.empty()) {
+        config.sizes = defaults.sizes;
+    }
+    config.threadCounts = sizeList(in, "threadCounts", kMaxThreadCounts);
+    if (config.threadCounts.empty()) {
+        config.threadCounts = {1};
+    }
+    config.quality = getEnum(in, "quality", defaults.quality, 3);
+    config.secondsPerSample =
+        std::clamp(in.getFloat("secondsPerSample", defaults.secondsPerSample), 0.001, 60.0);
+    config.minRuns = getSize(in, "minRuns", defaults.minRuns);
+    config.maxRuns = std::max(getSize(in, "maxRuns", defaults.maxRuns), config.minRuns);
+    config.warmupRuns = getSize(in, "warmupRuns", defaults.warmupRuns);
+    return config;
+}
+
+Metadata encodeBenchmarkStatus(const BenchmarkStatus& status) {
+    Metadata out;
+    out.setBool("running", status.running);
+    out.setBool("complete", status.complete);
+    setU64(out, "stepsDone", status.stepsDone);
+    setU64(out, "stepsTotal", status.stepsTotal);
+    out.setString("currentStep", status.currentStep);
+    out.setFloat("elapsedSeconds", status.elapsedSeconds);
+    out.set("results",
+            hashArray(std::span<const FftBenchmarkEntry>(status.results), encodeBenchmarkEntry));
+    return out;
+}
+
+BenchmarkStatus decodeBenchmarkStatus(const Metadata& in) {
+    return BenchmarkStatus{.running = in.getBool("running"),
+                           .complete = in.getBool("complete"),
+                           .stepsDone = getSize(in, "stepsDone"),
+                           .stepsTotal = getSize(in, "stepsTotal"),
+                           .currentStep = in.getString("currentStep"),
+                           .elapsedSeconds = in.getFloat("elapsedSeconds"),
+                           .results = hashList(in, "results", decodeBenchmarkEntry)};
 }
 
 Metadata encodeNotice(const InstrumentNotice& notice) {

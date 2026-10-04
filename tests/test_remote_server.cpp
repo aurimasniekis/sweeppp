@@ -17,7 +17,9 @@
 #include <sweeppp/crypto/Sha256.hpp>
 #include <sweeppp/fft/FftBackendManager.hpp>
 #include <sweeppp/instrument/LocalInstrument.hpp>
+#include <sweeppp/net/SecureChannel.hpp>
 #include <sweeppp/net/Socket.hpp>
+#include <sweeppp/remote/Handshake.hpp>
 #include <sweeppp/remote/Messages.hpp>
 #include <sweeppp/remote/Protocol.hpp>
 #include <sweeppp/remote/RemoteServer.hpp>
@@ -41,28 +43,25 @@ std::span<const std::uint8_t> asBytes(const std::vector<std::byte>& bytes) {
     return {reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()};
 }
 
-/// The protocol by hand, with nothing of the real client in it: what a
-/// server must cope with is whatever arrives, not what our client sends.
+/// The protocol by hand above the channel, with nothing of the real client in
+/// it: what a server must cope with is whatever arrives, not what our client
+/// sends. Before `handshake()` it writes to the bare socket, which is how the
+/// tests poke the handshake itself.
 class RawClient {
 public:
     explicit RawClient(std::uint16_t port) {
         auto socket = net::TcpSocket::connect("127.0.0.1", port, 2000ms);
         REQUIRE(socket.has_value());
-        m_socket = std::move(*socket);
+        m_raw = std::move(*socket);
     }
 
-    void sendRaw(const std::vector<std::byte>& bytes) { (void)m_socket.sendAll(asBytes(bytes)); }
-
-    void sendHeader(sweeps::StreamHeader header = {}) {
-        std::vector<std::byte> bytes;
-        sweeps::encodeStreamHeader(bytes, header);
-        sendRaw(bytes);
-    }
+    /// Bytes on the bare socket, before any handshake.
+    void sendRaw(const std::vector<std::uint8_t>& bytes) { (void)m_raw.sendAll(bytes); }
 
     void send(std::string_view name, const sweeps::Metadata& body) {
         std::vector<std::byte> bytes;
         appendMessage(bytes, name, body, monotonicNs());
-        sendRaw(bytes);
+        (void)m_channel.sendAll(asBytes(bytes));
     }
 
     std::uint64_t command(std::string_view op, sweeps::Metadata args = {}) {
@@ -72,24 +71,31 @@ public:
         return seq;
     }
 
+    /// The channel, then the server's welcome or refusal. Nothing, with the
+    /// error kept, when the handshake itself fails.
+    std::optional<Message> handshake(std::string_view token = {},
+                                     std::uint32_t version = kProtocolVersion) {
+        auto opened = openClientChannel(std::move(m_raw), token,
+                                        Hello{.protocolVersion = version, .software = "test"},
+                                        Clock::now() + 3s);
+        if (!opened) {
+            m_handshakeError = opened.error();
+            return std::nullopt;
+        }
+        m_channel = std::move(*opened);
+        m_open = true;
+        return expectAny({msg::kWelcome, msg::kRefused});
+    }
+
+    [[nodiscard]] const Error& handshakeError() const noexcept { return m_handshakeError; }
+
     /// The next record, or nullopt when the connection ends or `timeout`
     /// passes.
     std::optional<sweeps::StreamRecord> next(std::chrono::milliseconds timeout = 5000ms) {
         const auto deadline = Clock::now() + timeout;
         std::vector<std::byte> buffer(std::size_t{64} * 1024);
         while (true) {
-            if (!m_headerRead) {
-                if (m_pending.size() >= sweeps::StreamHeader::kBytes) {
-                    auto header =
-                        sweeps::decodeStreamHeader(m_pending.data(), sweeps::StreamHeader::kBytes);
-                    REQUIRE(header.has_value());
-                    m_framer.feed(m_pending.data() + sweeps::StreamHeader::kBytes,
-                                  m_pending.size() - sweeps::StreamHeader::kBytes);
-                    m_pending.clear();
-                    m_headerRead = true;
-                }
-            }
-            if (m_headerRead) {
+            if (m_open) {
                 sweeps::StreamRecord record;
                 auto got = m_framer.next(record);
                 REQUIRE(got.has_value());
@@ -100,21 +106,19 @@ public:
             if (m_closed || Clock::now() >= deadline) {
                 return std::nullopt;
             }
-            auto readable = m_socket.waitReadable(50ms);
+            const std::span<std::uint8_t> into{reinterpret_cast<std::uint8_t*>(buffer.data()),
+                                               buffer.size()};
+            auto readable = m_open ? m_channel.waitReadable(50ms) : m_raw.waitReadable(50ms);
             if (!readable || !*readable) {
                 continue;
             }
-            auto received =
-                m_socket.receive({reinterpret_cast<std::uint8_t*>(buffer.data()), buffer.size()});
+            auto received = m_open ? m_channel.receive(into) : m_raw.receive(into);
             if (!received || *received == 0) {
                 m_closed = true;
                 continue;
             }
-            if (m_headerRead) {
+            if (m_open) {
                 m_framer.feed(buffer.data(), *received);
-            } else {
-                m_pending.insert(m_pending.end(), buffer.begin(),
-                                 buffer.begin() + static_cast<std::ptrdiff_t>(*received));
             }
         }
     }
@@ -122,6 +126,11 @@ public:
     /// The next control message called `name`, skipping everything else.
     std::optional<Message> expect(std::string_view name,
                                   std::chrono::milliseconds timeout = 5000ms) {
+        return expectAny({name}, timeout);
+    }
+
+    std::optional<Message> expectAny(std::initializer_list<std::string_view> names,
+                                     std::chrono::milliseconds timeout = 5000ms) {
         const auto deadline = Clock::now() + timeout;
         while (Clock::now() < deadline) {
             auto record = next(
@@ -136,7 +145,7 @@ public:
             auto message = decodeMessage(*record);
             REQUIRE(message.has_value());
             remember(*message);
-            if (message->name == name) {
+            if (std::ranges::find(names, message->name) != names.end()) {
                 return std::move(*message);
             }
         }
@@ -179,55 +188,19 @@ public:
         return m_closed;
     }
 
-    /// Header, hello, auth. The welcome's or refusal's message.
-    std::optional<Message> handshake(std::string_view token = {},
-                                     std::uint32_t version = kProtocolVersion) {
-        sendHeader();
-        send(msg::kHello, Hello{.protocolVersion = version, .software = "test"}.toMetadata());
-        auto challenge = expectAny({msg::kChallenge, msg::kRefused});
-        if (!challenge || challenge->name == msg::kRefused) {
-            return challenge;
-        }
-        const Challenge offered = Challenge::from(challenge->body);
-        Auth auth;
-        auth.clientNonce[0] = 42;
-        auth.mac = authMac(token, offered.serverNonce, auth.clientNonce);
-        send(msg::kAuth, auth.toMetadata());
-        return expectAny({msg::kWelcome, msg::kRefused});
+    void close() {
+        m_channel.close();
+        m_raw.close();
     }
 
-    std::optional<Message> expectAny(std::initializer_list<std::string_view> names,
-                                     std::chrono::milliseconds timeout = 5000ms) {
-        const auto deadline = Clock::now() + timeout;
-        while (Clock::now() < deadline) {
-            auto record = next(
-                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()));
-            if (!record) {
-                return std::nullopt;
-            }
-            observe(*record);
-            if (record->header.type != static_cast<std::uint16_t>(sweeps::RecordType::PluginData)) {
-                continue;
-            }
-            auto message = decodeMessage(*record);
-            REQUIRE(message.has_value());
-            remember(*message);
-            if (std::ranges::find(names, message->name) != names.end()) {
-                return std::move(*message);
-            }
-        }
-        return std::nullopt;
+    [[nodiscard]] const sweeps::Metadata& sections() const noexcept { return m_sections; }
+    [[nodiscard]] std::uint64_t ackSeq() const noexcept { return m_ackSeq; }
+    [[nodiscard]] const std::vector<Reply>& replies() const noexcept { return m_replies; }
+    [[nodiscard]] const std::vector<sweeps::SessionEvent>& events() const noexcept {
+        return m_events;
     }
-
-    void close() { m_socket.close(); }
-
-    /// Every state section received so far, latest first-come merged.
-    const sweeps::Metadata& sections() const noexcept { return m_sections; }
-    std::uint64_t ackSeq() const noexcept { return m_ackSeq; }
-    const std::vector<Reply>& replies() const noexcept { return m_replies; }
-    const std::vector<sweeps::SessionEvent>& events() const noexcept { return m_events; }
-    std::size_t tiles() const noexcept { return m_tiles; }
-    std::size_t telemetry() const noexcept { return m_telemetry; }
+    [[nodiscard]] std::size_t tiles() const noexcept { return m_tiles; }
+    [[nodiscard]] std::size_t telemetry() const noexcept { return m_telemetry; }
 
     /// Drains whatever arrives for `duration`, keeping score.
     void pump(std::chrono::milliseconds duration) {
@@ -280,10 +253,11 @@ private:
         }
     }
 
-    net::TcpSocket m_socket;
+    net::TcpSocket m_raw;
+    net::SecureChannel m_channel;
+    bool m_open = false;
+    Error m_handshakeError;
     sweeps::RecordFramer m_framer{kMaxServerRecordBytes};
-    std::vector<std::byte> m_pending;
-    bool m_headerRead = false;
     bool m_closed = false;
     std::uint64_t m_seq = 0;
 
@@ -436,21 +410,17 @@ TEST_CASE("a token is checked, and a wrong one refused") {
         CHECK(answer->name == msg::kWelcome);
     }
 
-    SUBCASE("a wrong one") {
+    SUBCASE("a wrong one ends the handshake, saying nothing") {
         RawClient client(fixture.port());
-        auto answer = client.handshake("battery staple");
-        REQUIRE(answer.has_value());
-        CHECK(answer->name == msg::kRefused);
-        CHECK(Refused::from(answer->body).reason == refusal::kAuth);
-        CHECK(client.closedWithin(2000ms));
+        CHECK_FALSE(client.handshake("battery staple").has_value());
+        CHECK(client.handshakeError().code() == ErrorCode::PermissionDenied);
         CHECK_FALSE(fixture.server->clientConnected());
     }
 
     SUBCASE("none at all") {
         RawClient client(fixture.port());
-        auto answer = client.handshake();
-        REQUIRE(answer.has_value());
-        CHECK(answer->name == msg::kRefused);
+        CHECK_FALSE(client.handshake().has_value());
+        CHECK(client.handshakeError().code() == ErrorCode::PermissionDenied);
     }
 }
 
@@ -489,17 +459,8 @@ TEST_CASE("a second client is turned away, but only once it has authenticated") 
 
     SUBCASE("unauthenticated, it learns nothing of the first") {
         RawClient second(fixture.port());
-        second.sendHeader();
-        second.send(msg::kHello, Hello{.protocolVersion = kProtocolVersion}.toMetadata());
-        auto reply = second.expectAny({msg::kChallenge, msg::kRefused});
-        REQUIRE(reply.has_value());
-        CHECK(reply->name == msg::kChallenge);
-
-        Auth wrong;
-        second.send(msg::kAuth, wrong.toMetadata());
-        auto refused = second.expect(msg::kRefused);
-        REQUIRE(refused.has_value());
-        CHECK(Refused::from(refused->body).reason == refusal::kAuth);
+        CHECK_FALSE(second.handshake("guess").has_value());
+        CHECK(second.handshakeError().code() == ErrorCode::PermissionDenied);
     }
 
     SUBCASE("authenticated, it is told the radio is busy") {
@@ -515,29 +476,42 @@ TEST_CASE("a second client is turned away, but only once it has authenticated") 
 TEST_CASE("what arrives before authentication is held to a few bytes and seconds") {
     ServerFixture fixture;
 
-    SUBCASE("a record too large for a hello") {
+    const std::vector<std::uint8_t> preamble(kPreamble.begin(), kPreamble.end());
+
+    SUBCASE("a handshake message too large for a hello") {
         RawClient client(fixture.port());
-        client.sendHeader();
-        sweeps::Metadata body;
-        body.setString("padding", std::string(std::size_t{kMaxPreAuthRecordBytes} * 2, 'x'));
-        client.send(msg::kHello, body);
+        std::vector<std::uint8_t> bytes = preamble;
+        bytes.push_back(0xFF);
+        bytes.push_back(0xFF);
+        bytes.resize(bytes.size() + 0xFFFF, 0x41);
+        client.sendRaw(bytes);
         CHECK(client.closedWithin(2000ms));
     }
 
-    SUBCASE("a preamble that is not a stream header") {
+    SUBCASE("a preamble that is not ours") {
         RawClient client(fixture.port());
-        client.sendRaw(std::vector<std::byte>(32, std::byte{'G'}));
+        client.sendRaw(std::vector<std::uint8_t>(32, 'G'));
         CHECK(client.closedWithin(2000ms));
     }
 
-    SUBCASE("a command before the handshake") {
+    SUBCASE("a client of the first protocol, which opened with a stream header") {
         RawClient client(fixture.port());
-        client.sendHeader();
-        client.command(op::kStart);
-        auto refused = client.expect(msg::kRefused);
-        REQUIRE(refused.has_value());
-        CHECK(Refused::from(refused->body).reason == refusal::kProtocol);
+        std::vector<std::byte> header;
+        sweeps::encodeStreamHeader(header, sweeps::StreamHeader{});
+        const auto* begin = reinterpret_cast<const std::uint8_t*>(header.data());
+        client.sendRaw({begin, begin + header.size()});
+        CHECK(client.closedWithin(2000ms));
         CHECK_FALSE(fixture.instrument->running());
+    }
+
+    SUBCASE("a handshake message that is noise") {
+        RawClient client(fixture.port());
+        std::vector<std::uint8_t> bytes = preamble;
+        bytes.push_back(64);
+        bytes.push_back(0);
+        bytes.resize(bytes.size() + 64, 0x5A);
+        client.sendRaw(bytes);
+        CHECK(client.closedWithin(3000ms));
     }
 
     SUBCASE("nothing at all") {
@@ -552,16 +526,18 @@ TEST_CASE("what arrives before authentication is held to a few bytes and seconds
     CHECK(welcome->name == msg::kWelcome);
 }
 
-TEST_CASE("a client that goes away leaves the radio stopped and the server free") {
+TEST_CASE("a client that says goodbye leaves the radio stopped and the server free") {
     ServerFixture fixture;
     {
         RawClient client(fixture.port());
         REQUIRE(client.handshake().has_value());
         client.command(op::kStart);
         REQUIRE(client.expect(msg::kFrame).has_value());
-        client.close();
+        client.send(msg::kBye, Bye{.reason = "closed"}.toMetadata());
+        CHECK(client.closedWithin(2000ms));
     }
     CHECK(ServerFixture::eventually([&] { return !fixture.server->clientConnected(); }));
+    CHECK(ServerFixture::eventually([&] { return !fixture.instrument->running(); }));
 
     RawClient next(fixture.port());
     auto welcome = next.handshake();
@@ -571,6 +547,40 @@ TEST_CASE("a client that goes away leaves the radio stopped and the server free"
     CHECK_FALSE(hashAt(next.sections(), section::kRun).getBool("running"));
     // The plan it was given survives the client.
     CHECK(decodePlan(hashAt(next.sections(), section::kPlan)).lowestHz() == doctest::Approx(100e6));
+}
+
+TEST_CASE("a client that drops leaves the radio running for a while, then stopped") {
+    ServerFixture fixture(ServerConfig{.linger = 500ms});
+    {
+        RawClient client(fixture.port());
+        REQUIRE(client.handshake().has_value());
+        client.command(op::kStart);
+        REQUIRE(client.expect(msg::kFrame).has_value());
+        client.close();
+    }
+    CHECK(ServerFixture::eventually([&] { return !fixture.server->clientConnected(); }));
+    CHECK(fixture.instrument->running());
+    CHECK(ServerFixture::eventually([&] { return !fixture.instrument->running(); }, 3000ms));
+}
+
+TEST_CASE("a client back within the linger takes over the running radio") {
+    ServerFixture fixture(ServerConfig{.linger = 10s});
+    {
+        RawClient client(fixture.port());
+        REQUIRE(client.handshake().has_value());
+        client.command(op::kStart);
+        REQUIRE(client.expect(msg::kFrame).has_value());
+        client.close();
+    }
+    CHECK(ServerFixture::eventually([&] { return !fixture.server->clientConnected(); }));
+
+    RawClient back(fixture.port());
+    REQUIRE(back.handshake().has_value());
+    REQUIRE(back.expect(msg::kState).has_value());
+    CHECK(hashAt(back.sections(), section::kRun).getBool("running"));
+    // Frames carry on with no start from the new client, from a fresh segment.
+    REQUIRE(back.expectRecord(sweeps::RecordType::SegmentOpen).has_value());
+    CHECK(back.expect(msg::kFrame).has_value());
 }
 
 TEST_CASE("a client that falls silent is dropped") {

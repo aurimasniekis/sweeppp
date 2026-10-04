@@ -74,7 +74,7 @@ void SessionRecorder::processFrame(const SpectrumFramePtr& frame) {
     // before the first frame taken under it.
     drainEvents();
 
-    if (!frame) {
+    if (!frame || (m_completePassesOnly.load() && !frame->passComplete)) {
         return;
     }
 
@@ -124,7 +124,7 @@ Status SessionRecorder::close() {
     // Dropping is the right behaviour for a live display consumer, but for a
     // recording it is a real loss -- so it is stated plainly rather than left
     // for the operator to infer from a short file.
-    if (const std::uint64_t dropped = m_eventsDropped.load(std::memory_order_relaxed);
+    if (const std::uint64_t dropped = m_pending->dropped.load(std::memory_order_relaxed);
         dropped > 0) {
         logWarn("session", "{}: {} events were dropped; replay will be missing them",
                 m_writer->path().filename().string(), dropped);
@@ -140,17 +140,21 @@ Status SessionRecorder::close() {
     return written;
 }
 
+void SessionRecorder::Pending::push(const SessionEvent& event) {
+    constexpr std::size_t kMaxPending = 8192;
+
+    const std::lock_guard lock(mutex);
+    if (events.size() >= kMaxPending) {
+        dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    events.push_back(event);
+}
+
 void SessionRecorder::recordEvent(const SessionEvent& event) {
     // Deliberately no writer access: it belongs to the recorder thread, and
     // this runs on whichever thread published the event.
-    constexpr std::size_t kMaxPending = 8192;
-
-    const std::lock_guard lock(m_eventMutex);
-    if (m_pendingEvents.size() >= kMaxPending) {
-        m_eventsDropped.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    m_pendingEvents.push_back(event);
+    m_pending->push(event);
 }
 
 void SessionRecorder::recordPluginData(std::string pluginId, std::string recordName,
@@ -160,25 +164,25 @@ void SessionRecorder::recordPluginData(std::string pluginId, std::string recordN
     // have stopped must not accumulate a plugin's output without limit.
     constexpr std::size_t kMaxPending = 4096;
 
-    const std::lock_guard lock(m_eventMutex);
-    if (m_pendingPluginData.size() >= kMaxPending) {
-        m_eventsDropped.fetch_add(1, std::memory_order_relaxed);
+    const std::lock_guard lock(m_pending->mutex);
+    if (m_pending->pluginData.size() >= kMaxPending) {
+        m_pending->dropped.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    m_pendingPluginData.push_back(PendingPluginData{.pluginId = std::move(pluginId),
-                                                    .recordName = std::move(recordName),
-                                                    .schemaVersion = schemaVersion,
-                                                    .monotonicNs = monotonicNs,
-                                                    .body = std::move(body)});
+    m_pending->pluginData.push_back(PendingPluginData{.pluginId = std::move(pluginId),
+                                                      .recordName = std::move(recordName),
+                                                      .schemaVersion = schemaVersion,
+                                                      .monotonicNs = monotonicNs,
+                                                      .body = std::move(body)});
 }
 
 void SessionRecorder::drainEvents() {
     std::vector<SessionEvent> events;
     std::vector<PendingPluginData> records;
     {
-        const std::lock_guard lock(m_eventMutex);
-        events.swap(m_pendingEvents);
-        records.swap(m_pendingPluginData);
+        const std::lock_guard lock(m_pending->mutex);
+        events.swap(m_pending->events);
+        records.swap(m_pending->pluginData);
     }
 
     for (const SessionEvent& event : events) {
@@ -206,8 +210,8 @@ void SessionRecorder::attachEvents(EventBus& bus) {
     // Field for field: replay reconstructs these events from the recording
     // alone. Calibration-affecting parameter changes matter especially -- the
     // noise floor shifts, and later analysis of these tiles must know it did.
-    const auto record = [this]<typename Event>(const Event& event) {
-        recordEvent(toSessionEvent(event, wallClockNs()));
+    const auto record = [pending = m_pending]<typename Event>(const Event& event) {
+        pending->push(toSessionEvent(event, wallClockNs()));
     };
     m_subscriptions.push_back(bus.subscribe<RetuneEvent>(record));
     m_subscriptions.push_back(bus.subscribe<ParameterChangedEvent>(record));

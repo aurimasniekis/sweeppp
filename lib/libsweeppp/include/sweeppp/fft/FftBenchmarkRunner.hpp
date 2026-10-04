@@ -3,16 +3,17 @@
 
 #pragma once
 
+#include "sweeppp/fft/FftBenchmark.hpp"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <string>
-#include <sweeppp/fft/FftBenchmark.hpp>
 #include <thread>
 #include <vector>
 
-namespace sweeppp::ui {
+namespace sweeppp {
 
 /// The FFT benchmark, off the UI thread.
 ///
@@ -78,4 +79,4 @@ private:
     std::thread m_thread;
 };
 
-} // namespace sweeppp::ui
+} // namespace sweeppp

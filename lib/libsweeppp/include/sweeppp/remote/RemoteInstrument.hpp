@@ -7,10 +7,12 @@
 #include "sweeppp/core/Result.hpp"
 #include "sweeppp/instrument/Instrument.hpp"
 #include "sweeppp/pipeline/FrameBus.hpp"
+#include "sweeppp/remote/Messages.hpp"
 #include "sweeppp/remote/Protocol.hpp"
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -77,6 +79,18 @@ public:
     /// Why the link went, when it went on its own.
     [[nodiscard]] const std::string& linkError() const noexcept { return m_linkError; }
 
+    /// What the instrument was doing when its link went on its own, for a
+    /// reconnect to put back: the settable parameters, and whether it ran.
+    struct LostState {
+        std::vector<std::pair<std::string, SdrValue>> parameters;
+        bool running = false;
+    };
+    [[nodiscard]] const LostState& lostState() const noexcept { return m_lost; }
+
+    /// Drops the connection without a goodbye, as a network failure would:
+    /// the next `tick()` finds the link gone. For tests of what follows.
+    void abandon();
+
     [[nodiscard]] const RemoteEndpoint& endpoint() const noexcept { return m_endpoint; }
 
     /// The server's name for itself, which is what the window calls it.
@@ -84,12 +98,45 @@ public:
 
     [[nodiscard]] LinkStats link() const noexcept { return m_link; }
 
+    /// How many bins frames are reduced to before they cross the network;
+    /// zero for whole. Set per connection, and lost with it.
+    void setLinkResolution(std::uint32_t maxBins);
+    [[nodiscard]] std::uint32_t linkResolution() const noexcept { return m_linkMaxBins; }
+
+    // ---- recordings made on the server ------------------------------------
+
+    [[nodiscard]] const ServerRecordings& recordings() const noexcept { return m_recordings; }
+
+    /// Records on the server, at up to `maxBins` a line, completed passes
+    /// only while sweeping.
+    void startRecording(std::uint32_t maxBins);
+    void stopRecording();
+    void deleteRecording(const std::string& name);
+
+    /// A recording coming over from the server.
+    struct Download {
+        std::string name;
+        std::filesystem::path path; ///< Where it lands once complete
+        std::uint64_t received = 0;
+        std::uint64_t totalBytes = 0;
+        bool done = false;
+        std::string error;
+    };
+
+    /// Fetches `name` into `directory`, a few pieces in flight at a time,
+    /// through `<name>.part` -- which a later download of the same name picks
+    /// up from, after a dropped link.
+    Status beginDownload(const std::string& name, const std::filesystem::path& directory);
+    /// Stops it and deletes what had arrived.
+    void cancelDownload(const std::string& name);
+    [[nodiscard]] std::vector<Download> downloads() const;
+
     // ---- Instrument ------------------------------------------------------
 
     [[nodiscard]] std::string profileDriver() const override { return "remote"; }
     [[nodiscard]] std::string profileId() const override { return m_endpoint.address(); }
     [[nodiscard]] std::string displayLabel() const override;
-    [[nodiscard]] bool canBenchmark() const noexcept override { return false; }
+    [[nodiscard]] std::string computeHost() const override { return m_serverName; }
 
     [[nodiscard]] const DeviceDescriptor* device() const noexcept override;
     [[nodiscard]] std::optional<SdrValue> parameter(std::string_view key) const override;
@@ -121,6 +168,9 @@ public:
     }
 
     [[nodiscard]] std::vector<FftBackendInfo> fftBackends() const override { return m_backends; }
+    Status startBenchmark(const FftBenchmarkConfig& config) override;
+    void cancelBenchmark() override;
+    [[nodiscard]] BenchmarkStatus benchmark() const override { return m_benchmark; }
     [[nodiscard]] std::string fftBackendName() const override { return m_backendName; }
     Status setFftBackend(std::string_view name) override;
 
@@ -170,7 +220,13 @@ private:
     RemoteInstrument(RemoteEndpoint endpoint, FrameBus& output, EventBus& events);
 
     /// Queues `op`, holding the sections it touches until it is answered.
-    void send(std::string_view op, sweeps::Metadata args);
+    /// Its sequence number, or zero when there is no link to send it on.
+    std::uint64_t send(std::string_view op, sweeps::Metadata args);
+
+    struct DownloadState;
+    void requestMoreOf(DownloadState& download);
+    void receiveChunk(const Chunk& chunk);
+    void failDownload(DownloadState& download, std::string why);
 
     void applyState(std::uint64_t ackSeq, const sweeps::Metadata& sections);
     void applySection(std::string_view name, const sweeps::Metadata& body);
@@ -182,6 +238,7 @@ private:
     std::unique_ptr<Link> m_linkThreads;
     std::string m_serverName;
     std::string m_linkError;
+    LostState m_lost;
     bool m_closed = false;
 
     std::uint64_t m_seq = 0;
@@ -215,10 +272,17 @@ private:
     std::vector<RfLegView> m_rfLegs;
     std::vector<std::pair<double, double>> m_coverage;
 
+    BenchmarkStatus m_benchmark;
+    ServerRecordings m_recordings;
+    std::vector<std::unique_ptr<DownloadState>> m_downloads;
+    /// Which download each outstanding fetch belongs to, so a refused one
+    /// fails the right download.
+    std::map<std::uint64_t, std::string> m_fetches;
     std::vector<SdrHealthReading> m_health;
     TelemetrySnapshot m_engineTelemetry;
     bool m_haveTelemetry = false;
     LinkStats m_link;
+    std::uint32_t m_linkMaxBins = 0;
     std::uint64_t m_rateWindowNs = 0;
     std::uint64_t m_rateWindowBytes = 0;
 

@@ -21,6 +21,8 @@
 #include <sweeppp/pipeline/FrameBus.hpp>
 #include <sweeppp/pipeline/Pipeline.hpp>
 #include <sweeppp/profile/Profile.hpp>
+#include <sweeppp/remote/Mdns.hpp>
+#include <sweeppp/remote/Reconnector.hpp>
 #include <sweeppp/remote/RemoteInstrument.hpp>
 #include <sweeppp/remote/ServerList.hpp>
 #include <sweeppp/rf/Antenna.hpp>
@@ -98,6 +100,15 @@ public:
     [[nodiscard]] const remote::RemoteInstrument* remoteInstrument() const noexcept {
         return m_remote.get();
     }
+    [[nodiscard]] remote::RemoteInstrument* remoteInstrument() noexcept { return m_remote.get(); }
+
+    /// Sets how many bins the server reduces frames to, and keeps the choice
+    /// with the saved server so the next connection uses it too.
+    void setLinkResolution(std::uint32_t maxBins);
+
+    /// Servers answering on the LAN. Asking starts looking, and looking stops
+    /// a while after nobody has asked: the chooser asks while it is open.
+    [[nodiscard]] std::vector<remote::mdns::DiscoveredServer> discoveredServers();
 
     /// Saved servers. Mutated in place by the UI; `saveServers()` keeps it.
     [[nodiscard]] remote::ServerList& servers() noexcept { return m_servers; }
@@ -127,13 +138,27 @@ public:
                          const std::string& label);
 
     /// Connects to a server, on the same worker. `label` is what the operator
-    /// calls it.
-    void beginConnectServer(const remote::RemoteEndpoint& endpoint, const std::string& label);
+    /// calls it. `reconnect` marks an attempt made on the operator's behalf
+    /// after a link dropped; any other connect is the operator changing their
+    /// mind, and stops those attempts.
+    void beginConnectServer(const remote::RemoteEndpoint& endpoint, const std::string& label,
+                            bool reconnect = false);
+
+    /// Trying a dropped server again, and what to say about it.
+    [[nodiscard]] bool reconnecting() const noexcept { return m_reconnect.active(); }
+    [[nodiscard]] std::string reconnectStatus() const;
+    void stopReconnecting();
 
     /// Adopts a finished open. Called once per frame on the UI thread.
     void pollDeviceStartup();
 
     [[nodiscard]] bool deviceStartupRunning() const noexcept { return m_startup.has_value(); }
+
+    /// Whether the startup is one the window waits on. A reconnect attempt
+    /// runs in the background: the operator was not the one who asked.
+    [[nodiscard]] bool deviceStartupShown() const noexcept {
+        return m_startup.has_value() && !m_startup->reconnect;
+    }
 
     /// What is happening, and what it involves -- the two lines of the panel
     /// that says so.
@@ -450,6 +475,15 @@ private:
     std::unique_ptr<remote::RemoteInstrument> m_remote;
     remote::ServerList m_servers;
 
+    /// After a link drops: when to try again, and what to put back -- the
+    /// setup at the moment it went, as a profile, and whether it was running.
+    remote::Reconnector m_reconnect;
+
+    std::unique_ptr<remote::mdns::Browser> m_browser;
+    std::uint64_t m_browserWantedNs = 0;
+    std::optional<Profile> m_reconnectProfile;
+    bool m_reconnectWasRunning = false;
+
     /// The instrument's start generation as last seen; a new one is a new run.
     std::uint64_t m_startGenerationSeen = 0;
 
@@ -531,6 +565,8 @@ private:
         std::string id;
         /// Or the server being connected to, instead of a radio.
         std::optional<remote::RemoteEndpoint> server;
+        /// An attempt to get back a server whose link dropped.
+        bool reconnect = false;
         /// What to call it on screen.
         std::string label;
         /// Whether the bus is probed first. Only startup needs that; an
@@ -562,6 +598,9 @@ private:
 
     /// Leaves the server, handing what it was doing to the local instrument.
     void dropRemote();
+
+    /// The link went on its own: keep what it was doing, and start trying.
+    void loseRemote();
 
     /// A server's address as an endpoint, with its token if it is saved.
     [[nodiscard]] remote::RemoteEndpoint endpointFor(const std::string& address) const;

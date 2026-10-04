@@ -3,12 +3,11 @@
 
 #include "remote/StreamIo.hpp"
 
-#include <algorithm>
 #include <array>
 
 namespace sweeppp::remote::io {
 
-Result<sweeps::StreamRecord> readRecord(net::TcpSocket& socket, sweeps::RecordFramer& framer,
+Result<sweeps::StreamRecord> readRecord(net::SecureChannel& channel, sweeps::RecordFramer& framer,
                                         Clock::time_point deadline,
                                         const std::atomic<bool>& stopping) {
     std::vector<std::byte> buffer(kReceiveChunk);
@@ -30,14 +29,14 @@ Result<sweeps::StreamRecord> readRecord(net::TcpSocket& socket, sweeps::RecordFr
         }
         const auto wait = std::min<std::chrono::milliseconds>(
             kReadSlice, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
-        auto readable = socket.waitReadable(wait);
+        auto readable = channel.waitReadable(wait);
         if (!readable) {
             return std::unexpected(std::move(readable).error());
         }
         if (!*readable) {
             continue;
         }
-        auto got = socket.receive({reinterpret_cast<std::uint8_t*>(buffer.data()), buffer.size()});
+        auto got = channel.receive({reinterpret_cast<std::uint8_t*>(buffer.data()), buffer.size()});
         if (!got) {
             return std::unexpected(std::move(got).error());
         }
@@ -48,44 +47,21 @@ Result<sweeps::StreamRecord> readRecord(net::TcpSocket& socket, sweeps::RecordFr
     }
 }
 
-Result<sweeps::StreamHeader> readStreamHeader(net::TcpSocket& socket, Clock::time_point deadline,
+Result<sweeps::StreamHeader> readStreamHeader(net::SecureChannel& channel,
+                                              Clock::time_point deadline,
                                               const std::atomic<bool>& stopping) {
-    std::array<std::byte, sweeps::StreamHeader::kBytes> header{};
-    std::size_t have = 0;
-    while (have < header.size()) {
-        if (stopping.load()) {
-            return fail<sweeps::StreamHeader>(ErrorCode::Cancelled, "cancelled");
-        }
-        const auto now = Clock::now();
-        if (now >= deadline) {
-            return fail<sweeps::StreamHeader>(ErrorCode::TimedOut, "no stream header in time");
-        }
-        const auto wait = std::min<std::chrono::milliseconds>(
-            kReadSlice, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
-        auto readable = socket.waitReadable(wait);
-        if (!readable) {
-            return std::unexpected(std::move(readable).error());
-        }
-        if (!*readable) {
-            continue;
-        }
-        auto got = socket.receive(
-            {reinterpret_cast<std::uint8_t*>(header.data()) + have, header.size() - have});
-        if (!got) {
-            return std::unexpected(std::move(got).error());
-        }
-        if (*got == 0) {
-            return fail<sweeps::StreamHeader>(ErrorCode::IoError, "the peer closed the connection");
-        }
-        have += *got;
+    std::array<std::uint8_t, sweeps::StreamHeader::kBytes> header{};
+    if (auto read = readExactly(channel, header, deadline, stopping); !read) {
+        return std::unexpected(std::move(read).error());
     }
-    return adopt(sweeps::decodeStreamHeader(header.data(), header.size()));
+    return adopt(sweeps::decodeStreamHeader(reinterpret_cast<const std::byte*>(header.data()),
+                                            header.size()));
 }
 
-Status sendStreamHeader(net::TcpSocket& socket) {
+Status sendStreamHeader(net::SecureChannel& channel) {
     std::vector<std::byte> header;
     sweeps::encodeStreamHeader(header, sweeps::StreamHeader{});
-    return socket.sendAll(asBytes(header));
+    return channel.sendAll(asBytes(header));
 }
 
 } // namespace sweeppp::remote::io

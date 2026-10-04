@@ -416,10 +416,8 @@ TEST_CASE("control messages frame, decode and keep their fields") {
         .seq = 41, .ok = false, .code = ErrorCode::OutOfRange, .message = "gain out of range"};
     appendMessage(bytes, msg::kReply, reply.toMetadata());
 
-    Challenge challenge{.protocolVersion = kProtocolVersion, .authRequired = true};
-    challenge.serverNonce[0] = 0xAB;
-    challenge.serverNonce[31] = 0xCD;
-    appendMessage(bytes, msg::kChallenge, challenge.toMetadata());
+    const Refused refused{.reason = std::string(refusal::kBusy), .message = "in use"};
+    appendMessage(bytes, msg::kRefused, refused.toMetadata());
 
     const std::vector<sweeps::StreamRecord> records = recordsOf(bytes);
     REQUIRE(records.size() == 3);
@@ -442,9 +440,9 @@ TEST_CASE("control messages frame, decode and keep their fields") {
 
     auto third = decodeMessage(records[2]);
     REQUIRE(third.has_value());
-    const Challenge challengeBack = Challenge::from(third->body);
-    CHECK(challengeBack.serverNonce == challenge.serverNonce);
-    CHECK(challengeBack.authRequired);
+    const Refused refusedBack = Refused::from(third->body);
+    CHECK(refusedBack.reason == refusal::kBusy);
+    CHECK(refusedBack.message == "in use");
 }
 
 TEST_CASE("a record for another plugin or another protocol version is refused") {
@@ -469,27 +467,12 @@ TEST_CASE("a record for another plugin or another protocol version is refused") 
     CHECK(decoded.error().code() == ErrorCode::Unsupported);
 }
 
-TEST_CASE("the auth MAC depends on the token and on both nonces") {
-    Nonce server{};
-    Nonce client{};
-    server[0] = 1;
-    client[0] = 2;
-    const auto mac = authMac("secret", server, client);
-    CHECK(mac == authMac("secret", server, client));
-    CHECK(mac != authMac("secreT", server, client));
-    CHECK(mac != authMac("secret", client, server));
-    Nonce other = client;
-    other[31] = 1;
-    CHECK(mac != authMac("secret", server, other));
-
-    const Auth auth{.clientNonce = client, .mac = mac};
-    const Auth back = Auth::from(wire(auth.toMetadata()));
-    CHECK(back.clientNonce == client);
-    CHECK(back.mac == mac);
-
-    Metadata shortMac;
-    shortMac.setBytes("mac", std::vector<std::byte>(5));
-    CHECK(Auth::from(shortMac).mac == crypto::Sha256Digest{});
+TEST_CASE("a hello says which protocol and which software") {
+    const Hello hello{.protocolVersion = kProtocolVersion, .software = "Sweep++ 0.2.0"};
+    const Hello back = Hello::from(wire(hello.toMetadata()));
+    CHECK(back.protocolVersion == kProtocolVersion);
+    CHECK(back.software == "Sweep++ 0.2.0");
+    CHECK(Hello::from(Metadata{}).protocolVersion == 0);
 }
 
 // ------------------------------------------------------------------ frames
@@ -872,4 +855,67 @@ TEST_CASE("bus events survive a trip through Event records") {
     bus.unsubscribe(a);
     bus.unsubscribe(b);
     bus.unsubscribe(c);
+}
+
+TEST_CASE("an encoder told what changed sends exactly what one comparing everything does") {
+    FrameEncoder told;
+    FrameEncoder blind;
+    std::vector<std::byte> withRange;
+    std::vector<std::byte> without;
+
+    SpectrumFrame frame = makeFrame(10'000, 0);
+    told.encode(frame, withRange, ChangedBins::unknown());
+    blind.encode(frame, without);
+
+    for (std::uint64_t i = 1; i < 40; ++i) {
+        frame.sequence = i;
+        frame.hostTimeNs += 1000;
+        const std::size_t first = (i * 731) % 9000;
+        const std::size_t end = first + 600;
+        for (std::size_t bin = first; bin < end; ++bin) {
+            frame.binsDbfs[bin] = -50.0F - static_cast<float>(i % 7);
+        }
+        told.encode(frame, withRange, ChangedBins{.first = first, .end = end});
+        blind.encode(frame, without);
+    }
+    CHECK(withRange == without);
+
+    ChangedBins merged;
+    CHECK(merged.empty());
+    merged.add(ChangedBins{.first = 10, .end = 20});
+    merged.add(ChangedBins{.first = 50, .end = 60});
+    CHECK(merged.first == 10);
+    CHECK(merged.end == 60);
+    merged.add(ChangedBins::unknown());
+    CHECK_FALSE(merged.known);
+    merged.add(ChangedBins{.first = 1, .end = 2});
+    CHECK_FALSE(merged.known);
+}
+
+TEST_CASE("a frame reduced for a slow link keeps its peaks and its gaps") {
+    SpectrumFrame frame = makeFrame(10, 3);
+    frame.binWidthHz = 1000.0;
+    frame.binsDbfs = {
+        -90, -20, -90, kUnmeasuredDbfs, kUnmeasuredDbfs, kUnmeasuredDbfs, -80, kUnmeasuredDbfs,
+        -70, -60};
+
+    ChangedBins changed{.first = 4, .end = 7};
+    const SpectrumFrame reduced = reduceFrame(frame, 4, changed);
+
+    // ceil(10 / 4) = 3 bins to a group, four groups, the last one short.
+    REQUIRE(reduced.binCount() == 4);
+    CHECK(reduced.binWidthHz == 3000.0);
+    CHECK(reduced.startHz == frame.startHz);
+    CHECK(reduced.binsDbfs[0] == -20.0F);
+    CHECK_FALSE(measured(reduced.binsDbfs[1]));
+    CHECK(reduced.binsDbfs[2] == -70.0F);
+    CHECK(reduced.binsDbfs[3] == -60.0F);
+    CHECK(reduced.sequence == frame.sequence);
+    CHECK(reduced.passComplete == frame.passComplete);
+    CHECK(changed.first == 1);
+    CHECK(changed.end == 3);
+
+    ChangedBins whole = ChangedBins::unknown();
+    CHECK(reduceFrame(frame, 100, whole).binCount() == 10);
+    CHECK_FALSE(whole.known);
 }

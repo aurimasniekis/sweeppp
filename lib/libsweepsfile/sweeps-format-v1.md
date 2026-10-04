@@ -1703,7 +1703,14 @@ define, typically a `PluginData` record after the line's tiles.
 sender's clocks; a receiver that compares them with its own must map between
 the two. `Telemetry` (§4.9) is sent periodically by the side producing data.
 
-### C.7. Ending a stream
+### C.7. Transport
+
+The stream is the bytes of this appendix, whatever carries them. An
+application MAY carry it inside an encrypted, authenticated channel, in which
+case the stream header and records are the channel's plaintext and nothing
+here changes.
+
+### C.8. Ending a stream
 
 `EndOfStream` (§4.8) says the sender is finished deliberately; the receiver
 SHOULD close the connection. A connection that simply ends is the stream's

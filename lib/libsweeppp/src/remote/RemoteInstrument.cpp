@@ -7,11 +7,11 @@
 #include "sweeppp/core/Clock.hpp"
 #include "sweeppp/core/Log.hpp"
 #include "sweeppp/core/Version.hpp"
-#include "sweeppp/crypto/Sha256.hpp"
 #include "sweeppp/history/EventMapping.hpp"
 #include "sweeppp/net/Socket.hpp"
 #include "sweeppp/remote/ClockMap.hpp"
 #include "sweeppp/remote/FrameCodec.hpp"
+#include "sweeppp/remote/Handshake.hpp"
 #include "sweeppp/remote/Messages.hpp"
 #include "sweeppp/remote/WireCodec.hpp"
 
@@ -19,6 +19,7 @@
 #include <charconv>
 #include <condition_variable>
 #include <format>
+#include <fstream>
 #include <mutex>
 #include <sweeps/Records.hpp>
 #include <thread>
@@ -44,10 +45,6 @@ std::vector<std::byte> messageBytes(std::string_view name, const Metadata& body)
 
 /// A refusal, as the error a caller can show.
 Error refusalError(const Refused& refused, const std::string& server) {
-    if (refused.reason == refusal::kAuth) {
-        return Error{ErrorCode::PermissionDenied,
-                     std::format("{} did not accept the token", server)};
-    }
     if (refused.reason == refusal::kBusy) {
         return Error{ErrorCode::Unavailable,
                      std::format("{} is in use by another desktop", server)};
@@ -120,7 +117,7 @@ Result<RemoteEndpoint> RemoteEndpoint::parse(std::string_view address) {
 /// owner goes through the inbox; everything the owner sends goes through the
 /// outbox.
 struct RemoteInstrument::Link {
-    Link(net::TcpSocket socket, sweeps::RecordFramer framer, FrameBus& output, EventBus& events)
+    Link(net::SecureChannel socket, sweeps::RecordFramer framer, FrameBus& output, EventBus& events)
         : socket(std::move(socket)), framer(std::move(framer)), output(output), events(events) {}
 
     void start() {
@@ -293,7 +290,9 @@ struct RemoteInstrument::Link {
                 std::unique_lock lock(outMutex);
                 outWake.wait_until(lock, nextPing,
                                    [this] { return closing || !outbox.empty() || !alive.load(); });
-                if (!alive.load() && !closing) {
+                // A link already gone says no goodbye: to the server, that is
+                // what tells a dropped client from one that left.
+                if (!alive.load()) {
                     return;
                 }
                 batch.swap(outbox);
@@ -322,7 +321,7 @@ struct RemoteInstrument::Link {
         }
     }
 
-    net::TcpSocket socket;
+    net::SecureChannel socket;
     sweeps::RecordFramer framer;
     FrameBus& output;
     EventBus& events;
@@ -350,6 +349,15 @@ struct RemoteInstrument::Link {
     std::thread writer;
 };
 
+/// A download under way: what the operator sees, and the file it is going to.
+struct RemoteInstrument::DownloadState {
+    Download view;
+    std::filesystem::path part;
+    std::ofstream stream;
+    std::uint64_t requested = 0;
+    std::size_t inFlight = 0;
+};
+
 // ---------------------------------------------------------------- connecting
 
 RemoteInstrument::RemoteInstrument(RemoteEndpoint endpoint, FrameBus& output, EventBus& events)
@@ -375,19 +383,21 @@ RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, Even
     (void)socket->setNoDelay(true);
     (void)socket->setKeepAlive(true);
 
-    if (auto sent = io::sendStreamHeader(*socket); !sent) {
-        return std::unexpected(std::move(sent).error());
+    auto opened =
+        openClientChannel(std::move(*socket), endpoint.token,
+                          Hello{.protocolVersion = kProtocolVersion,
+                                .software = std::format("{} {}", productName(), versionString())},
+                          deadline);
+    if (!opened) {
+        return fail<Instance>(opened.error().code(), "{}: {}", where, opened.error().message());
     }
-    if (auto header = io::readStreamHeader(*socket, deadline, never); !header) {
-        return fail<Instance>(header.error().code(), "{} is not a Sweep++ server: {}", where,
-                              header.error().message());
-    }
+    net::SecureChannel& channel = *opened;
 
     sweeps::RecordFramer framer(kMaxServerRecordBytes);
     std::optional<TelemetryReport> telemetry;
     const auto nextMessage = [&](std::initializer_list<std::string_view> names) -> Result<Message> {
         while (true) {
-            auto record = io::readRecord(*socket, framer, deadline, never);
+            auto record = io::readRecord(channel, framer, deadline, never);
             if (!record) {
                 return std::unexpected(std::move(record).error());
             }
@@ -409,43 +419,6 @@ RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, Even
             }
         }
     };
-    const auto sendMessage = [&](std::string_view name, const Metadata& body) {
-        return socket->sendAll(asBytes(messageBytes(name, body)));
-    };
-
-    if (auto sent = sendMessage(
-            msg::kHello, Hello{.protocolVersion = kProtocolVersion,
-                               .software = std::format("{} {}", productName(), versionString())}
-                             .toMetadata());
-        !sent) {
-        return std::unexpected(std::move(sent).error());
-    }
-
-    auto offered = nextMessage({msg::kChallenge, msg::kRefused});
-    if (!offered) {
-        return std::unexpected(std::move(offered).error());
-    }
-    if (offered->name == msg::kRefused) {
-        return std::unexpected(refusalError(Refused::from(offered->body), where));
-    }
-    const Challenge challenge = Challenge::from(offered->body);
-    if (challenge.protocolVersion != kProtocolVersion) {
-        return fail<Instance>(ErrorCode::Unsupported,
-                              "{} speaks protocol {}, this Sweep++ speaks {}", where,
-                              challenge.protocolVersion, kProtocolVersion);
-    }
-    if (challenge.authRequired && endpoint.token.empty()) {
-        return fail<Instance>(ErrorCode::PermissionDenied, "{} needs a token", where);
-    }
-
-    Auth auth;
-    if (auto filled = crypto::fillRandom(auth.clientNonce); !filled) {
-        return std::unexpected(std::move(filled).error());
-    }
-    auth.mac = authMac(endpoint.token, challenge.serverNonce, auth.clientNonce);
-    if (auto sent = sendMessage(msg::kAuth, auth.toMetadata()); !sent) {
-        return std::unexpected(std::move(sent).error());
-    }
 
     auto answer = nextMessage({msg::kWelcome, msg::kRefused});
     if (!answer) {
@@ -467,7 +440,7 @@ RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, Even
     instrument->applyState(first.ackSeq, first.sections);
 
     instrument->m_linkThreads =
-        std::make_unique<Link>(std::move(*socket), std::move(framer), output, events);
+        std::make_unique<Link>(std::move(channel), std::move(framer), output, events);
     if (telemetry) {
         const std::lock_guard lock(instrument->m_linkThreads->inMutex);
         instrument->m_linkThreads->telemetry = std::move(telemetry);
@@ -502,6 +475,11 @@ void RemoteInstrument::disconnect() {
                               .deviceId = m_device->info.id,
                               .reason = m_linkError.empty() ? "disconnected" : m_linkError});
     }
+    for (const auto& download : m_downloads) {
+        if (!download->view.done && download->view.error.empty()) {
+            failDownload(*download, "the link went; download it again to carry on");
+        }
+    }
     m_device.reset();
     m_values.clear();
     m_running = false;
@@ -514,8 +492,24 @@ bool RemoteInstrument::linkUp() const noexcept {
     return !m_closed && m_linkThreads != nullptr;
 }
 
+void RemoteInstrument::abandon() {
+    if (m_linkThreads && !m_closed) {
+        m_linkThreads->stopping.store(true);
+        m_linkThreads->socket.shutdown();
+    }
+}
+
 void RemoteInstrument::linkLost(std::string reason) {
     m_linkError = std::move(reason);
+    m_lost = LostState{.running = m_running};
+    if (m_device) {
+        for (const SdrParameter& parameter : m_device->parameters) {
+            if (const auto value = m_values.find(parameter.key);
+                !parameter.readOnly && value != m_values.end()) {
+                m_lost.parameters.emplace_back(parameter.key, value->second);
+            }
+        }
+    }
     logWarn("remote", "lost {}: {}", m_endpoint.address(), m_linkError);
     m_notices.push_back(InstrumentNotice{
         .kind = InstrumentNotice::Kind::Condition,
@@ -525,9 +519,9 @@ void RemoteInstrument::linkLost(std::string reason) {
 
 // ------------------------------------------------------------------ the state
 
-void RemoteInstrument::send(std::string_view op, Metadata args) {
+std::uint64_t RemoteInstrument::send(std::string_view op, Metadata args) {
     if (!linkUp()) {
-        return;
+        return 0;
     }
     const std::uint64_t seq = ++m_seq;
     for (const std::string_view name : sectionsTouchedBy(op)) {
@@ -536,6 +530,7 @@ void RemoteInstrument::send(std::string_view op, Metadata args) {
     m_linkThreads->push(messageBytes(
         msg::kCommand,
         Command{.seq = seq, .op = std::string(op), .args = std::move(args)}.toMetadata()));
+    return seq;
 }
 
 void RemoteInstrument::applyState(std::uint64_t ackSeq, const Metadata& sections) {
@@ -596,6 +591,12 @@ void RemoteInstrument::applySection(std::string_view name, const Metadata& body)
     } else if (name == section::kSwitchers) {
         m_switchers = decodeSwitcherViews(hashAt(body, "open"));
         m_availableSwitchers = decodeSwitcherInfos(hashAt(body, "available"));
+    } else if (name == section::kRecordings) {
+        m_recordings = ServerRecordings::from(body);
+    } else if (name == section::kBenchmark) {
+        m_benchmark = decodeBenchmarkStatus(body);
+    } else if (name == section::kLink) {
+        m_linkMaxBins = static_cast<std::uint32_t>(body.getInt("maxBins"));
     } else if (name == section::kRfPath) {
         m_rfLegs = decodeRfLegs(hashAt(body, "legs"));
         m_coverage = decodeRanges(hashAt(body, "coverage"));
@@ -621,10 +622,24 @@ void RemoteInstrument::tick(std::uint64_t nowNs) {
             applyState(state.ackSeq, state.sections);
         } else if (message.name == msg::kReply) {
             const Reply reply = Reply::from(message.body);
-            if (!reply.ok) {
+            const auto fetch = m_fetches.find(reply.seq);
+            if (fetch != m_fetches.end()) {
+                const std::string name = fetch->second;
+                m_fetches.erase(fetch);
+                if (!reply.ok) {
+                    for (const auto& download : m_downloads) {
+                        if (download->view.name == name && !download->view.done &&
+                            download->view.error.empty()) {
+                            failDownload(*download, reply.message);
+                        }
+                    }
+                }
+            } else if (!reply.ok) {
                 m_notices.push_back(
                     InstrumentNotice{.kind = InstrumentNotice::Kind::Error, .text = reply.message});
             }
+        } else if (message.name == msg::kChunk) {
+            receiveChunk(Chunk::from(message.body));
         } else if (message.name == msg::kNotice) {
             m_notices.push_back(decodeNotice(message.body));
         }
@@ -638,6 +653,7 @@ void RemoteInstrument::tick(std::uint64_t nowNs) {
         m_link.passesCoalesced = telemetry->link.passesCoalesced;
         m_link.partialsCoalesced = telemetry->link.partialsCoalesced;
         m_link.eventsDropped = telemetry->link.eventsDropped;
+        m_link.encodeNs = telemetry->link.encodeNs;
         m_haveTelemetry = true;
     }
 
@@ -858,6 +874,197 @@ const Antenna* RemoteInstrument::antennaOnPort(std::string_view portId) const {
 const SwitcherView* RemoteInstrument::switcher(std::string_view key) const {
     const auto match = std::ranges::find(m_switchers, key, &SwitcherView::key);
     return match != m_switchers.end() ? &*match : nullptr;
+}
+
+// ------------------------------------------------------------- recordings
+
+void RemoteInstrument::startRecording(std::uint32_t maxBins) {
+    Metadata args;
+    args.setInt("maxBins", maxBins);
+    send(op::kStartRecording, std::move(args));
+}
+
+void RemoteInstrument::stopRecording() {
+    send(op::kStopRecording, {});
+}
+
+void RemoteInstrument::deleteRecording(const std::string& name) {
+    Metadata args;
+    args.setString("name", name);
+    send(op::kDeleteRecording, std::move(args));
+}
+
+Status RemoteInstrument::beginDownload(const std::string& name,
+                                       const std::filesystem::path& directory) {
+    const auto file = std::ranges::find(m_recordings.files, name, &RecordingFile::name);
+    if (file == m_recordings.files.end()) {
+        return fail(ErrorCode::NotFound, "{} has no recording called '{}'", m_serverName, name);
+    }
+    if (m_recordings.active && m_recordings.current == name) {
+        return fail(ErrorCode::Unavailable, "'{}' is still being recorded; stop it first", name);
+    }
+    std::erase_if(m_downloads, [&name](const std::unique_ptr<DownloadState>& download) {
+        return download->view.name == name;
+    });
+
+    auto download = std::make_unique<DownloadState>();
+    download->view.name = name;
+    download->view.path = directory / name;
+    download->view.totalBytes = file->bytes;
+    download->part = directory / (name + ".part");
+
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    // What a dropped link left behind is the start of the file: carry on
+    // from it, unless it is somehow longer than the file now is.
+    std::uint64_t resumeAt = std::filesystem::exists(download->part, ec)
+                                 ? std::filesystem::file_size(download->part, ec)
+                                 : 0;
+    if (ec || resumeAt > file->bytes) {
+        resumeAt = 0;
+    }
+    download->stream.open(download->part,
+                          std::ios::binary | (resumeAt > 0 ? std::ios::app : std::ios::trunc));
+    if (!download->stream) {
+        return fail(ErrorCode::IoError, "cannot write {}", download->part.string());
+    }
+    download->view.received = resumeAt;
+    download->requested = resumeAt;
+
+    DownloadState& added = *m_downloads.emplace_back(std::move(download));
+    if (added.view.received >= added.view.totalBytes) {
+        receiveChunk(Chunk{
+            .name = name, .offset = added.view.received, .totalBytes = added.view.totalBytes});
+    } else {
+        requestMoreOf(added);
+    }
+    return ok();
+}
+
+void RemoteInstrument::requestMoreOf(DownloadState& download) {
+    while (download.inFlight < kMaxChunksInFlight &&
+           download.requested < download.view.totalBytes) {
+        Metadata args;
+        args.setString("name", download.view.name);
+        args.setInt("offset", static_cast<std::int64_t>(download.requested));
+        const std::uint64_t seq = send(op::kFetchRecording, std::move(args));
+        if (seq == 0) {
+            failDownload(download, "the link went");
+            return;
+        }
+        m_fetches.emplace(seq, download.view.name);
+        download.requested += kChunkBytes;
+        ++download.inFlight;
+    }
+}
+
+void RemoteInstrument::receiveChunk(const Chunk& chunk) {
+    const auto found = std::ranges::find_if(m_downloads, [&chunk](const auto& download) {
+        return download->view.name == chunk.name && !download->view.done &&
+               download->view.error.empty();
+    });
+    if (found == m_downloads.end()) {
+        return;
+    }
+    DownloadState& download = **found;
+    if (chunk.offset != download.view.received) {
+        failDownload(download, "pieces arrived out of order");
+        return;
+    }
+
+    download.stream.write(reinterpret_cast<const char*>(chunk.data.data()),
+                          static_cast<std::streamsize>(chunk.data.size()));
+    if (!download.stream) {
+        failDownload(download, std::format("cannot write {}", download.part.string()));
+        return;
+    }
+    download.view.received += chunk.data.size();
+    download.view.totalBytes = chunk.totalBytes;
+    download.inFlight = download.inFlight > 0 ? download.inFlight - 1 : 0;
+
+    if (download.view.received < download.view.totalBytes) {
+        if (chunk.data.empty()) {
+            failDownload(download, "the server sent nothing");
+            return;
+        }
+        requestMoreOf(download);
+        return;
+    }
+
+    download.stream.close();
+    // Never over a file already there: a second download of the same name
+    // lands beside the first.
+    std::filesystem::path target = download.view.path;
+    std::error_code ec;
+    for (int copy = 1; std::filesystem::exists(target, ec); ++copy) {
+        target = download.view.path.parent_path() /
+                 std::format("{}-{}{}", download.view.path.stem().string(), copy,
+                             download.view.path.extension().string());
+    }
+    std::filesystem::rename(download.part, target, ec);
+    if (ec) {
+        failDownload(download, std::format("cannot keep {}: {}", target.string(), ec.message()));
+        return;
+    }
+    download.view.path = target;
+    download.view.done = true;
+    m_notices.push_back(InstrumentNotice{
+        .kind = InstrumentNotice::Kind::Success,
+        .text = std::format("{} downloaded to {}", download.view.name, target.string())});
+}
+
+void RemoteInstrument::failDownload(DownloadState& download, std::string why) {
+    download.stream.close();
+    download.view.error = std::move(why);
+    m_notices.push_back(
+        InstrumentNotice{.kind = InstrumentNotice::Kind::Error,
+                         .text = std::format("Download of {} stopped: {}", download.view.name,
+                                             download.view.error)});
+}
+
+void RemoteInstrument::cancelDownload(const std::string& name) {
+    std::erase_if(m_downloads, [&name](const std::unique_ptr<DownloadState>& download) {
+        if (download->view.name != name) {
+            return false;
+        }
+        download->stream.close();
+        std::error_code ec;
+        if (!download->view.done) {
+            std::filesystem::remove(download->part, ec);
+        }
+        return true;
+    });
+}
+
+std::vector<RemoteInstrument::Download> RemoteInstrument::downloads() const {
+    std::vector<Download> views;
+    views.reserve(m_downloads.size());
+    for (const auto& download : m_downloads) {
+        views.push_back(download->view);
+    }
+    return views;
+}
+
+Status RemoteInstrument::startBenchmark(const FftBenchmarkConfig& config) {
+    if (m_benchmark.running) {
+        return fail(ErrorCode::Unavailable, "a benchmark is already running on {}", m_serverName);
+    }
+    m_benchmark = BenchmarkStatus{.running = true};
+    Metadata args;
+    args.setHash("config", encodeBenchmarkConfig(config));
+    send(op::kStartBenchmark, std::move(args));
+    return ok();
+}
+
+void RemoteInstrument::cancelBenchmark() {
+    send(op::kCancelBenchmark, {});
+}
+
+void RemoteInstrument::setLinkResolution(std::uint32_t maxBins) {
+    m_linkMaxBins = maxBins;
+    Metadata args;
+    args.setInt("maxBins", maxBins);
+    send(op::kSetLinkResolution, std::move(args));
 }
 
 void RemoteInstrument::rescanSwitchers() {

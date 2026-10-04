@@ -10,6 +10,7 @@ set(SWEEPPP_TEST_SOURCES
     test_golden.cpp
     test_instrument.cpp
     test_marker.cpp
+    test_mdns.cpp
     test_net.cpp
     test_panels.cpp
     test_pipeline.cpp

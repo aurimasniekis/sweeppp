@@ -77,6 +77,12 @@ using sweeps::Metadata;
 [[nodiscard]] Metadata encodeProcessStats(const ProcessStats& stats);
 [[nodiscard]] ProcessStats decodeProcessStats(const Metadata& in);
 
+[[nodiscard]] Metadata encodeBenchmarkConfig(const FftBenchmarkConfig& config);
+[[nodiscard]] FftBenchmarkConfig decodeBenchmarkConfig(const Metadata& in);
+
+[[nodiscard]] Metadata encodeBenchmarkStatus(const BenchmarkStatus& status);
+[[nodiscard]] BenchmarkStatus decodeBenchmarkStatus(const Metadata& in);
+
 [[nodiscard]] Metadata encodeNotice(const InstrumentNotice& notice);
 [[nodiscard]] InstrumentNotice decodeNotice(const Metadata& in);
 

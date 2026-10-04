@@ -36,6 +36,9 @@ ServerList ServerList::load(const std::filesystem::path& path) {
                 .host = toml_util::getString(*entry, "host", ""),
                 .port = static_cast<std::uint16_t>(port > 0 && port <= 65535 ? port : kDefaultPort),
                 .token = toml_util::getString(*entry, "token", "")}};
+        const std::int64_t maxBins = toml_util::getInt(*entry, "max_bins", 0);
+        server.maxBins =
+            maxBins > 0 && maxBins <= kMaxGridBins ? static_cast<std::uint32_t>(maxBins) : 0;
         if (server.endpoint.host.empty()) {
             continue;
         }
@@ -56,6 +59,9 @@ Status ServerList::save(const std::filesystem::path& path) const {
         row.insert_or_assign("port", static_cast<std::int64_t>(server.endpoint.port));
         if (!server.endpoint.token.empty()) {
             row.insert_or_assign("token", server.endpoint.token);
+        }
+        if (server.maxBins > 0) {
+            row.insert_or_assign("max_bins", static_cast<std::int64_t>(server.maxBins));
         }
         rows.push_back(std::move(row));
     }
@@ -78,6 +84,13 @@ Status ServerList::save(const std::filesystem::path& path) const {
 }
 
 const SavedServer* ServerList::find(std::string_view address) const {
+    const auto match = std::ranges::find_if(m_entries, [address](const SavedServer& server) {
+        return server.endpoint.address() == address;
+    });
+    return match != m_entries.end() ? &*match : nullptr;
+}
+
+SavedServer* ServerList::find(std::string_view address) {
     const auto match = std::ranges::find_if(m_entries, [address](const SavedServer& server) {
         return server.endpoint.address() == address;
     });

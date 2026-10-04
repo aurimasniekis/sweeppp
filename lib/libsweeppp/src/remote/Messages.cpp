@@ -17,26 +17,6 @@ namespace {
 using sweeps::Metadata;
 using sweeps::Value;
 
-template <std::size_t N>
-std::vector<std::byte> bytesOf(const std::array<std::uint8_t, N>& in) {
-    std::vector<std::byte> out(N);
-    std::ranges::transform(in, out.begin(), [](std::uint8_t b) { return std::byte{b}; });
-    return out;
-}
-
-/// Exactly N bytes under `key`, or zeros.
-template <std::size_t N>
-std::array<std::uint8_t, N> fixedBytes(const Metadata& in, std::string_view key) {
-    std::array<std::uint8_t, N> out{};
-    const Value* value = in.find(key);
-    const std::vector<std::byte>* bytes = value != nullptr ? value->asBytes() : nullptr;
-    if (bytes != nullptr && bytes->size() == N) {
-        std::ranges::transform(*bytes, out.begin(),
-                               [](std::byte b) { return std::to_integer<std::uint8_t>(b); });
-    }
-    return out;
-}
-
 void setU64(Metadata& out, std::string key, std::uint64_t value) {
     out.setInt(std::move(key), static_cast<std::int64_t>(value));
 }
@@ -102,6 +82,9 @@ std::span<const std::string_view> sectionsTouchedBy(std::string_view name) noexc
     static constexpr std::array kAntennaChange{kAntennas, kRfPath};
     static constexpr std::array kAssignmentChange{kAssignments, kRfPath, kPlan, kSchedule};
     static constexpr std::array kSwitcherChange{kSwitchers, kRfPath};
+    static constexpr std::array kLinkChange{kLink};
+    static constexpr std::array kBenchmarkChange{kBenchmark};
+    static constexpr std::array kRecordingChange{kRecordings};
 
     if (name == op::kStart || name == op::kStop || name == op::kRestart ||
         name == op::kSetSweeping) {
@@ -133,17 +116,16 @@ std::span<const std::string_view> sectionsTouchedBy(std::string_view name) noexc
     if (name == op::kRescanSwitchers) {
         return kSwitcherChange;
     }
+    if (name == op::kSetLinkResolution) {
+        return kLinkChange;
+    }
+    if (name == op::kStartBenchmark || name == op::kCancelBenchmark) {
+        return kBenchmarkChange;
+    }
+    if (name == op::kStartRecording || name == op::kStopRecording || name == op::kDeleteRecording) {
+        return kRecordingChange;
+    }
     return {};
-}
-
-crypto::Sha256Digest authMac(std::string_view token, const Nonce& serverNonce,
-                             const Nonce& clientNonce) {
-    std::vector<std::uint8_t> message;
-    message.reserve(kAuthContext.size() + serverNonce.size() + clientNonce.size());
-    message.insert(message.end(), kAuthContext.begin(), kAuthContext.end());
-    message.insert(message.end(), serverNonce.begin(), serverNonce.end());
-    message.insert(message.end(), clientNonce.begin(), clientNonce.end());
-    return crypto::hmacSha256(crypto::bytesOf(token), message);
 }
 
 // ---- the handshake -------------------------------------------------------------
@@ -158,34 +140,6 @@ Metadata Hello::toMetadata() const {
 Hello Hello::from(const Metadata& in) {
     return Hello{.protocolVersion = getU32(in, "protocolVersion"),
                  .software = in.getString("software")};
-}
-
-Metadata Challenge::toMetadata() const {
-    Metadata out;
-    out.setInt("protocolVersion", protocolVersion);
-    out.setBytes("serverNonce", bytesOf(serverNonce));
-    out.setBool("authRequired", authRequired);
-    out.setString("software", software);
-    return out;
-}
-
-Challenge Challenge::from(const Metadata& in) {
-    return Challenge{.protocolVersion = getU32(in, "protocolVersion"),
-                     .serverNonce = fixedBytes<kNonceBytes>(in, "serverNonce"),
-                     .authRequired = in.getBool("authRequired", true),
-                     .software = in.getString("software")};
-}
-
-Metadata Auth::toMetadata() const {
-    Metadata out;
-    out.setBytes("clientNonce", bytesOf(clientNonce));
-    out.setBytes("mac", bytesOf(mac));
-    return out;
-}
-
-Auth Auth::from(const Metadata& in) {
-    return Auth{.clientNonce = fixedBytes<kNonceBytes>(in, "clientNonce"),
-                .mac = fixedBytes<32>(in, "mac")};
 }
 
 Metadata Welcome::toMetadata() const {
@@ -319,6 +273,70 @@ Bye Bye::from(const Metadata& in) {
     return Bye{.reason = in.getString("reason")};
 }
 
+// ---- recordings on the server -------------------------------------------------------
+
+Metadata ServerRecordings::toMetadata() const {
+    std::vector<Value> rows;
+    rows.reserve(files.size());
+    for (const RecordingFile& file : files) {
+        Metadata row;
+        row.setString("name", file.name);
+        setU64(row, "bytes", file.bytes);
+        setU64(row, "modifiedWallNs", file.modifiedWallNs);
+        rows.push_back(Value::ofHash(std::move(row)));
+    }
+    Metadata out;
+    out.setBool("available", available);
+    out.setBool("active", active);
+    out.setString("current", current);
+    setU64(out, "lines", lines);
+    setU64(out, "bytes", bytes);
+    out.set("files", Value::ofArray(Value::Type::Hash, std::move(rows)));
+    return out;
+}
+
+ServerRecordings ServerRecordings::from(const Metadata& in) {
+    ServerRecordings recordings{.available = in.getBool("available"),
+                                .active = in.getBool("active"),
+                                .current = in.getString("current"),
+                                .lines = getU64(in, "lines"),
+                                .bytes = getU64(in, "bytes")};
+    const Value* files = in.find("files");
+    const std::vector<Value>* rows = files != nullptr ? files->asArray() : nullptr;
+    if (rows != nullptr) {
+        for (const Value& row : *rows) {
+            if (const Metadata* file = row.asHash()) {
+                recordings.files.push_back(
+                    RecordingFile{.name = file->getString("name"),
+                                  .bytes = getU64(*file, "bytes"),
+                                  .modifiedWallNs = getU64(*file, "modifiedWallNs")});
+            }
+        }
+    }
+    return recordings;
+}
+
+Metadata Chunk::toMetadata() const {
+    Metadata out;
+    out.setString("name", name);
+    setU64(out, "offset", offset);
+    setU64(out, "totalBytes", totalBytes);
+    out.setBytes("data", data);
+    return out;
+}
+
+Chunk Chunk::from(const Metadata& in) {
+    Chunk chunk{.name = in.getString("name"),
+                .offset = getU64(in, "offset"),
+                .totalBytes = getU64(in, "totalBytes")};
+    if (const Value* data = in.find("data")) {
+        if (const std::vector<std::byte>* bytes = data->asBytes()) {
+            chunk.data = *bytes;
+        }
+    }
+    return chunk;
+}
+
 // ---- telemetry --------------------------------------------------------------------
 
 void appendTelemetry(std::vector<std::byte>& out, const TelemetryReport& report,
@@ -328,6 +346,7 @@ void appendTelemetry(std::vector<std::byte>& out, const TelemetryReport& report,
     setU64(link, "passesCoalesced", report.link.passesCoalesced);
     setU64(link, "partialsCoalesced", report.link.partialsCoalesced);
     setU64(link, "eventsDropped", report.link.eventsDropped);
+    setU64(link, "encodeNs", report.link.encodeNs);
 
     Metadata body;
     setU64(body, "monotonicNs", monotonicNs);
@@ -357,6 +376,7 @@ Result<TelemetryReport> decodeTelemetry(const sweeps::StreamRecord& record) {
     report.link.passesCoalesced = getU64(link, "passesCoalesced");
     report.link.partialsCoalesced = getU64(link, "partialsCoalesced");
     report.link.eventsDropped = getU64(link, "eventsDropped");
+    report.link.encodeNs = getU64(link, "encodeNs");
     return report;
 }
 

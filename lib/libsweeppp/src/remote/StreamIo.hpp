@@ -4,8 +4,9 @@
 #pragma once
 
 #include "sweeppp/core/Result.hpp"
-#include "sweeppp/net/Socket.hpp"
+#include "sweeppp/net/SecureChannel.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -14,7 +15,8 @@
 #include <sweeps/Stream.hpp>
 #include <vector>
 
-/// Blocking reads of a record stream, for the handshakes on either end.
+/// Blocking reads with a deadline, for the handshakes on either end: over the
+/// bare socket before the channel exists, and over the channel after.
 namespace sweeppp::remote::io {
 
 using Clock = std::chrono::steady_clock;
@@ -28,18 +30,51 @@ inline constexpr std::chrono::milliseconds kReadSlice{200};
     return {reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()};
 }
 
-/// The next record, reading as needed until `deadline`. Gives up early when
-/// `stopping` is raised.
-[[nodiscard]] Result<sweeps::StreamRecord> readRecord(net::TcpSocket& socket,
+/// Exactly `out.size()` bytes from `stream` -- a `TcpSocket` or a
+/// `SecureChannel` -- by `deadline`. IoError when the peer closes first.
+template <typename Stream>
+[[nodiscard]] Status readExactly(Stream& stream, std::span<std::uint8_t> out,
+                                 Clock::time_point deadline, const std::atomic<bool>& stopping) {
+    std::size_t have = 0;
+    while (have < out.size()) {
+        if (stopping.load()) {
+            return fail(ErrorCode::Cancelled, "cancelled");
+        }
+        const auto now = Clock::now();
+        if (now >= deadline) {
+            return fail(ErrorCode::TimedOut, "nothing arrived in time");
+        }
+        const auto wait = std::min<std::chrono::milliseconds>(
+            kReadSlice, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
+        auto readable = stream.waitReadable(wait);
+        if (!readable) {
+            return std::unexpected(std::move(readable).error());
+        }
+        if (!*readable) {
+            continue;
+        }
+        auto got = stream.receive(out.subspan(have));
+        if (!got) {
+            return std::unexpected(std::move(got).error());
+        }
+        if (*got == 0) {
+            return fail(ErrorCode::IoError, "the peer closed the connection");
+        }
+        have += *got;
+    }
+    return ok();
+}
+
+/// The next record off the channel, reading as needed until `deadline`.
+[[nodiscard]] Result<sweeps::StreamRecord> readRecord(net::SecureChannel& channel,
                                                       sweeps::RecordFramer& framer,
                                                       Clock::time_point deadline,
                                                       const std::atomic<bool>& stopping);
 
-/// Exactly a stream header's worth, so nothing after it is consumed here.
-[[nodiscard]] Result<sweeps::StreamHeader> readStreamHeader(net::TcpSocket& socket,
+[[nodiscard]] Result<sweeps::StreamHeader> readStreamHeader(net::SecureChannel& channel,
                                                             Clock::time_point deadline,
                                                             const std::atomic<bool>& stopping);
 
-[[nodiscard]] Status sendStreamHeader(net::TcpSocket& socket);
+[[nodiscard]] Status sendStreamHeader(net::SecureChannel& channel);
 
 } // namespace sweeppp::remote::io

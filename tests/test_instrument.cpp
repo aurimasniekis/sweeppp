@@ -5,10 +5,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <doctest/doctest.h>
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <sweeppp/backends/sdr/SyntheticDevice.hpp>
 #include <sweeppp/core/Clock.hpp>
@@ -295,4 +297,50 @@ TEST_CASE("closing the radio clears what was known about it") {
     CHECK(fixture.instrument->device() == nullptr);
     CHECK(fixture.instrument->parameter("gain") == std::nullopt);
     CHECK(fixture.instrument->health().empty());
+}
+
+TEST_CASE("each sweep frame says which bins changed since the one before") {
+    InstrumentFixture fixture;
+    fixture.adoptSynthetic();
+    REQUIRE(fixture.instrument->applySweepPlan(InstrumentFixture::quickPlan()).has_value());
+
+    struct Recorder final : IFrameConsumer {
+        void onFrame(const SpectrumFramePtr& frame) noexcept override {
+            const std::lock_guard lock(mutex);
+            if (frames.size() < 200) {
+                frames.push_back(frame);
+            }
+        }
+        [[nodiscard]] std::string_view consumerName() const noexcept override { return "recorder"; }
+        std::mutex mutex;
+        std::vector<SpectrumFramePtr> frames;
+    } recorder;
+    const auto subscription = fixture.output.subscribe(&recorder);
+
+    REQUIRE(fixture.instrument->start().has_value());
+    REQUIRE(fixture.tickUntil([&] {
+        const std::lock_guard lock(recorder.mutex);
+        return recorder.frames.size() >= 200;
+    }));
+    fixture.instrument->stop();
+    fixture.output.unsubscribe(subscription);
+
+    const std::lock_guard lock(recorder.mutex);
+    CHECK_FALSE(recorder.frames.front()->dirtyKnown);
+    std::size_t narrowed = 0;
+    for (std::size_t i = 1; i < recorder.frames.size(); ++i) {
+        const SpectrumFrame& before = *recorder.frames[i - 1];
+        const SpectrumFrame& after = *recorder.frames[i];
+        if (!after.dirtyKnown || after.binCount() != before.binCount()) {
+            continue;
+        }
+        for (std::size_t bin = 0; bin < after.binCount(); ++bin) {
+            if (bin < after.dirtyFirstBin || bin >= after.dirtyEndBin) {
+                REQUIRE(std::memcmp(&after.binsDbfs[bin], &before.binsDbfs[bin], sizeof(float)) ==
+                        0);
+            }
+        }
+        narrowed += after.dirtyEndBin - after.dirtyFirstBin < after.binCount() ? 1 : 0;
+    }
+    CHECK(narrowed > 0);
 }

@@ -209,6 +209,7 @@ void AppState::beginOpenDevice(const std::string& driver, const std::string& id,
     // Clicking the radio that is already open is not a request to cycle it.
     // Reopening means releasing a working device and claiming it again, which
     // is seconds of waiting to arrive exactly where the operator already was.
+    m_reconnect.cancel();
     if (!m_remote && m_local->holds(driver, id)) {
         clearError();
         return;
@@ -222,10 +223,13 @@ void AppState::beginOpenDevice(const std::string& driver, const std::string& id,
     startDeviceWorker(std::move(startup));
 }
 
-void AppState::beginConnectServer(const remote::RemoteEndpoint& endpoint,
-                                  const std::string& label) {
+void AppState::beginConnectServer(const remote::RemoteEndpoint& endpoint, const std::string& label,
+                                  bool reconnect) {
     if (m_viewerMode || m_startup) {
         return;
+    }
+    if (!reconnect) {
+        m_reconnect.cancel();
     }
     if (m_remote && m_remote->profileId() == endpoint.address() && m_remote->linkUp()) {
         clearError();
@@ -236,7 +240,47 @@ void AppState::beginConnectServer(const remote::RemoteEndpoint& endpoint,
     startup.server = endpoint;
     startup.label = label.empty() ? endpoint.address() : label;
     startup.enumerate = false;
+    startup.reconnect = reconnect;
     startDeviceWorker(std::move(startup));
+}
+
+std::string AppState::reconnectStatus() const {
+    if (!m_reconnect.active()) {
+        return {};
+    }
+    if (m_reconnect.attempting() || m_reconnect.attempt() == 0) {
+        return std::format("Reconnecting to {} (attempt {})", m_reconnect.label(),
+                           std::max(m_reconnect.attempt(), 1));
+    }
+    const std::uint64_t now = monotonicNs();
+    const std::uint64_t waitNs = m_reconnect.nextAtNs() > now ? m_reconnect.nextAtNs() - now : 0;
+    return std::format("Lost {}; trying again in {:.0f} s (attempt {} failed)", m_reconnect.label(),
+                       std::ceil(nsToSeconds(waitNs)), m_reconnect.attempt());
+}
+
+void AppState::stopReconnecting() {
+    m_reconnect.cancel();
+    m_reconnectProfile.reset();
+    clearError();
+}
+
+void AppState::loseRemote() {
+    // Read before the link is torn down, which takes the radio's settings
+    // with it.
+    const remote::RemoteInstrument::LostState lost = m_remote->lostState();
+    Profile snapshot = currentProfile("reconnect", PluginState::Omit);
+    snapshot.deviceDriver = "remote";
+    snapshot.deviceId = m_remote->profileId();
+    snapshot.deviceLabel = m_remote->serverName();
+    snapshot.deviceParameters = lost.parameters;
+    const remote::RemoteEndpoint endpoint = m_remote->endpoint();
+    const std::string label = m_remote->serverName();
+
+    dropRemote();
+
+    m_reconnectProfile = std::move(snapshot);
+    m_reconnectWasRunning = lost.running;
+    m_reconnect.begin(endpoint, label, monotonicNs());
 }
 
 remote::RemoteEndpoint AppState::endpointFor(const std::string& address) const {
@@ -245,6 +289,30 @@ remote::RemoteEndpoint AppState::endpointFor(const std::string& address) const {
     }
     auto parsed = remote::RemoteEndpoint::parse(address);
     return parsed ? *parsed : remote::RemoteEndpoint{.host = address};
+}
+
+void AppState::setLinkResolution(std::uint32_t maxBins) {
+    if (!m_remote) {
+        return;
+    }
+    m_remote->setLinkResolution(maxBins);
+    if (remote::SavedServer* saved = m_servers.find(m_remote->profileId())) {
+        saved->maxBins = maxBins;
+        saveServers();
+    }
+}
+
+std::vector<remote::mdns::DiscoveredServer> AppState::discoveredServers() {
+    m_browserWantedNs = monotonicNs();
+    if (!m_browser) {
+        auto started = remote::mdns::Browser::start();
+        if (!started) {
+            logInfo("remote", "not looking for servers: {}", started.error().describe());
+            return {};
+        }
+        m_browser = std::move(*started);
+    }
+    return m_browser->servers();
 }
 
 void AppState::saveServers() {
@@ -270,8 +338,8 @@ void AppState::startDeviceWorker(DeviceStartup startup) {
 
     startup.future =
         std::async(std::launch::async, [this, driver = startup.driver, id = startup.id,
-                                        server = startup.server, enumerate = startup.enumerate,
-                                        opening = startup.opening] {
+                                        server = startup.server, reconnect = startup.reconnect,
+                                        enumerate = startup.enumerate, opening = startup.opening] {
             StartupResult result;
 
             // The manager holds its own lock and the registry was filled before
@@ -286,7 +354,11 @@ void AppState::startDeviceWorker(DeviceStartup startup) {
                 // The buses are members and outlive the worker: the future is
                 // waited for before any of them is destroyed.
                 opening->store(true, std::memory_order_relaxed);
-                auto connected = remote::RemoteInstrument::connect(*server, m_displayBus, m_events);
+                // Shorter when retrying: the operator did not ask for this
+                // one, and the toolbar waits on it.
+                auto connected = remote::RemoteInstrument::connect(
+                    *server, m_displayBus, m_events,
+                    reconnect ? std::chrono::seconds(3) : std::chrono::seconds(5));
                 if (connected) {
                     result.remote = std::move(*connected);
                 } else {
@@ -320,7 +392,21 @@ void AppState::pollDeviceStartup() {
     StartupResult result = m_startup->future.get();
     const std::string label = m_startup->label;
     const bool wantedDevice = !m_startup->driver.empty() || m_startup->server.has_value();
+    const bool reconnect = m_startup->reconnect;
     m_startup.reset();
+
+    if (reconnect && !result.remote) {
+        m_reconnect.failed(monotonicNs());
+        logInfo("remote", "reconnect failed: {}", result.error);
+        if (m_reconnect.active()) {
+            setError(reconnectStatus());
+        }
+        m_startupProfile.reset();
+        return;
+    }
+    if (reconnect) {
+        m_reconnect.succeeded();
+    }
 
     if (result.enumerated) {
         m_devices = std::move(result.devices);
@@ -330,6 +416,15 @@ void AppState::pollDeviceStartup() {
         if (result.remote) {
             m_remote = std::move(result.remote);
             m_remote->begin();
+            if (const remote::SavedServer* saved = m_servers.find(m_remote->profileId());
+                saved != nullptr && saved->maxBins > 0) {
+                m_remote->setLinkResolution(saved->maxBins);
+            }
+            // A server that kept the radio running through the drop still has
+            // this desktop's setup; putting it back would only restart it.
+            if (reconnect && m_remote->running()) {
+                m_startupProfile.reset();
+            }
         } else {
             m_local->adoptDevice(std::move(result.device));
         }
@@ -360,6 +455,14 @@ void AppState::pollDeviceStartup() {
     }
 
     m_startupProfile.reset();
+
+    if (reconnect && result.remote) {
+        if (m_reconnectWasRunning && !instrument().running()) {
+            (void)start();
+        }
+        m_reconnectProfile.reset();
+        m_toasts.success(std::format("Reconnected to {}", label), monotonicNs());
+    }
 }
 
 std::string AppState::deviceStartupLabel() const {
@@ -587,6 +690,7 @@ void AppState::beginRefreshDevices() {
 }
 
 void AppState::closeDevice() {
+    m_reconnect.cancel();
     if (m_remote) {
         dropRemote();
         return;
@@ -956,7 +1060,16 @@ void AppState::pumpFrames() {
     instrument().tick(now);
     deliverNotices();
     if (m_remote && !m_remote->linkUp()) {
-        dropRemote();
+        loseRemote();
+    }
+    // Not asked for in a while: the chooser is closed, so stop asking the
+    // network.
+    if (m_browser && now - m_browserWantedNs > 10'000'000'000ULL) {
+        m_browser.reset();
+    }
+    if (m_reconnect.active() && !m_startup && m_reconnect.due(now)) {
+        m_startupProfile = m_reconnectProfile;
+        beginConnectServer(m_reconnect.endpoint(), m_reconnect.label(), true);
     }
 
     // A restart the instrument made on its own -- a plan change while running,

@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Aurimas Niekis <aurimas@niekis.lt>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "FftBenchmarkRunner.hpp"
+#include "sweeppp/fft/FftBenchmarkRunner.hpp"
+
+#include "sweeppp/core/Clock.hpp"
+#include "sweeppp/fft/FftBackendManager.hpp"
 
 #include <format>
-#include <sweeppp/core/Clock.hpp>
-#include <sweeppp/fft/FftBackendManager.hpp>
 #include <utility>
 
-namespace sweeppp::ui {
+namespace sweeppp {
 
 FftBenchmarkRunner::~FftBenchmarkRunner() {
     // The worker touches this object's members, so it must not outlive it.
@@ -123,4 +124,4 @@ double FftBenchmarkRunner::elapsedSeconds() const noexcept {
     return nsToSeconds((finished != 0 ? finished : monotonicNs()) - started);
 }
 
-} // namespace sweeppp::ui
+} // namespace sweeppp

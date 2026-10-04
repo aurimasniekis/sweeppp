@@ -5,7 +5,6 @@
 
 #include "AppState.hpp"
 #include "ContributionOverlay.hpp"
-#include "FftBenchmarkRunner.hpp"
 #include "UpdateCheck.hpp"
 #include "ViewPanel.hpp"
 #include "render/HistoryView.hpp"
@@ -345,8 +344,9 @@ private:
     /// beside it, and a popover closes the moment attention moves.
     void drawAntennaEditor();
 
-    /// Opens the server window on a saved server, or on a new one.
-    void beginEditingServer(const remote::SavedServer* server);
+    /// Opens the server window on a saved server, or on a new one -- filled
+    /// in from `server` but saved as new when `isNew`.
+    void beginEditingServer(const remote::SavedServer* server, bool isNew = false);
     void drawServerEditor();
 
     /// The saved servers, for the device chooser. The one clicked, to be
@@ -363,6 +363,9 @@ private:
     /// radio from another, and a receive port is a first-class `ISdrDevice`
     /// concept exactly as `info()` and `healthReadings()` are.
     void drawDeviceAntennas();
+
+    /// What the server has recorded and is recording, with downloads.
+    void drawServerRecordings(remote::RemoteInstrument& remote);
 
     /// Which connector the radio is listening on right now, in the status bar.
     ///
@@ -607,6 +610,12 @@ private:
     /// which id the copy has to carry to shadow it.
     std::string m_editingAntennaOriginalId;
 
+    /// The resolution a recording on the server is started at, as an index
+    /// into the choices the section offers.
+    int m_serverRecordBins = 1;
+    /// The recording waiting on its delete prompt.
+    std::string m_recordingToDelete;
+
     bool m_showServerEditor = false;
     remote::SavedServer m_editingServer;
     /// As typed, which may not parse yet.
@@ -622,7 +631,6 @@ private:
     /// measured here rather than asserted in a document. Owned by the window
     /// and not by AppState: nothing outside the panel acts on the result, and
     /// the run must be abandoned when the window goes away.
-    FftBenchmarkRunner m_fftBenchmark;
 
     /// How long to spend per measurement: 0 quick, 1 normal, 2 thorough.
     int m_fftBenchDepth = 1;

@@ -99,6 +99,8 @@ set(SWEEPPP_PIN_NFD     "v1.2.1")
 # stb has no releases; a commit is the only thing there is to pin.
 set(SWEEPPP_PIN_STB     "2c980bb59875b0d32144a71867fbdebb2f77cd20")
 set(SWEEPPP_PIN_TOMLPP  "v3.4.0")
+# Monocypher, for the remote link's encryption. CC0 or BSD-2-Clause.
+set(SWEEPPP_PIN_MONOCYPHER "4.0.2")
 set(SWEEPPP_PIN_JSON    "v3.12.0")
 set(SWEEPPP_PIN_DOCTEST "v2.4.12")
 # RigExpert's Fobos SDR libraries, one per firmware. Both tags are upstream's
@@ -135,6 +137,22 @@ find_package(Threads REQUIRED)
 FetchContent_Declare(tomlplusplus
     URL https://github.com/marzer/tomlplusplus/archive/refs/tags/${SWEEPPP_PIN_TOMLPP}.tar.gz)
 FetchContent_MakeAvailable(tomlplusplus)
+
+# ---------------------------------------------------------------------------
+# Monocypher -- X25519, ChaCha20-Poly1305 and BLAKE2b for the remote link's
+# Noise handshake. One C file and one header, audited, with no build system
+# worth adding: the archive is populated and the file compiled here.
+# ---------------------------------------------------------------------------
+FetchContent_Declare(monocypher
+    URL https://github.com/LoupVaillant/Monocypher/archive/refs/tags/${SWEEPPP_PIN_MONOCYPHER}.tar.gz)
+FetchContent_MakeAvailable(monocypher)
+
+add_library(sweeppp_monocypher STATIC "${monocypher_SOURCE_DIR}/src/monocypher.c")
+target_include_directories(sweeppp_monocypher SYSTEM PUBLIC "${monocypher_SOURCE_DIR}/src")
+set_target_properties(sweeppp_monocypher PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(NOT MSVC)
+    target_compile_options(sweeppp_monocypher PRIVATE -w)
+endif()
 
 # ---------------------------------------------------------------------------
 # doctest

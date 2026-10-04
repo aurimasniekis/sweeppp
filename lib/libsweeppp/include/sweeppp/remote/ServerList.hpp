@@ -17,6 +17,8 @@ namespace sweeppp::remote {
 struct SavedServer {
     std::string name; ///< What the list calls it: "Roof Pi"
     RemoteEndpoint endpoint;
+    /// The network resolution chosen for it; zero for whole frames.
+    std::uint32_t maxBins = 0;
 };
 
 /// The servers this desktop knows, with their tokens.
@@ -36,6 +38,7 @@ public:
 
     /// By `RemoteEndpoint::address()`.
     [[nodiscard]] const SavedServer* find(std::string_view address) const;
+    [[nodiscard]] SavedServer* find(std::string_view address);
 
     /// Adds `server`, or replaces the one at the same address.
     void put(SavedServer server);

@@ -1145,6 +1145,9 @@ void MainWindow::drawLinkChip(const ChromeTheme& chrome) {
             std::format("{} passes and {} partial updates merged for a slow link",
                         link.passesCoalesced, link.partialsCoalesced)
                 .c_str());
+        if (behind) {
+            ImGui::TextUnformatted("A lower Network resolution, in Analysis, keeps up.");
+        }
         ImGui::PopStyleColor();
         ImGui::EndTooltip();
     }

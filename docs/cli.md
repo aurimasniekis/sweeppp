@@ -131,6 +131,10 @@ Options can be written as `--option value` or `--option=value`. A word with no
 | `--port <n>`          | `7332`      | Port. `0` picks a free one and prints it.                              |
 | `--token <secret>`    |             | Required on any address but loopback.                                  |
 | `--token-file <path>` |             | The token from a file. The `SWEEPPP_REMOTE_TOKEN` variable also works. |
+| `--new-token`         |             | Print a new random token and exit.                                     |
+| `--linger <time>`     | `30s`       | How long the radio keeps sweeping for a desktop that dropped.          |
+| `--record`            |             | Record from the start, into the config folder's `sessions/`.           |
+| `--no-advertise`      |             | Do not answer desktops looking for servers on the network.             |
 
 ### Radio settings
 
@@ -293,28 +297,26 @@ sweeping, corrections and antenna routing run here; the desktop receives the
 spectrum.
 
 ```sh
+sweeppp-cli serve --new-token > ~/.sweeppp-token
 sweeppp-cli serve --device hackrf --listen 0.0.0.0 --token-file ~/.sweeppp-token
 ```
 
+- The connection is encrypted, and the token is its key: both ends must have
+  it. Use `--new-token` rather than a word.
 - One desktop at a time; a second is refused until the first disconnects.
-- When the desktop disconnects, the radio stops. Its settings stay until
-  `serve` exits.
-- Antennas, assignments and corrections are kept in this computer's config
-  folder (`--config-dir` to change it).
+- When the desktop disconnects, the radio stops. When its connection drops
+  instead, the radio keeps sweeping for `--linger`, so a desktop that
+  reconnects carries on.
+- Antennas, assignments, corrections and recordings are kept in this
+  computer's config folder (`--config-dir` to change it).
 - `--fft-backend`, `--rx-port` and `--param` set how the radio starts.
 - Plugins that process the spectrum run on the desktop, not here.
+- Listening beyond loopback, the server answers desktops looking for servers
+  on the network (mDNS, `_sweeppp._tcp`), including over a direct cable.
 - Ctrl-C disconnects the desktop and exits.
 - A 70 MHz–6 GHz sweep at 61.44 MS/s and 5.6 kHz resolution sends about
-  1.7 MB per pass.
-
-The connection is not encrypted. Over an untrusted network, use SSH or
-WireGuard:
-
-```sh
-ssh -L 7332:127.0.0.1:7332 pi.local sweeppp-cli serve --device hackrf
-```
-
-Then add `127.0.0.1:7332` as a server in the desktop app.
+  1.7 MB per pass, or about 0.2 MB/s with the desktop's Network resolution at
+  16 384 bins.
 
 From a source checkout, `make serve` serves the synthetic radio on loopback.
 
