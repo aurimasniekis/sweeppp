@@ -785,6 +785,10 @@ private:
     /// thread picks it up. Nothing expensive happens on the publishing thread.
     mutable std::mutex m_frameMutex;
     SpectrumFramePtr m_pendingFrame;
+    /// Completed passes since the last pickup. Kept apart from the newest
+    /// frame: a sweep's next partial lands milliseconds after a pass, and
+    /// would otherwise replace it before the waterfall saw it.
+    std::vector<SpectrumFramePtr> m_pendingPasses;
     SpectrumFramePtr m_latestFrame;
     std::vector<WaterfallLine> m_pendingWaterfallLines;
 

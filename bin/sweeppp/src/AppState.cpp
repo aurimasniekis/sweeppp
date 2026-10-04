@@ -1335,6 +1335,11 @@ void AppState::onFrame(const SpectrumFramePtr& frame) noexcept {
     {
         const std::lock_guard lock(m_frameMutex);
         m_pendingFrame = frame;
+        // Bounded like the lines they become: a stalled UI drops passes
+        // rather than holding every grid.
+        if (frame->passComplete && m_pendingPasses.size() < 64) {
+            m_pendingPasses.push_back(frame);
+        }
     }
 
     // What a learn takes from this bus: at a fixed tune, every frame; while
@@ -1364,10 +1369,12 @@ void AppState::pumpFrames() {
     updateAutoSpurs();
 
     SpectrumFramePtr frame;
+    std::vector<SpectrumFramePtr> passes;
     {
         const std::lock_guard lock(m_frameMutex);
         frame = std::move(m_pendingFrame);
         m_pendingFrame.reset();
+        passes.swap(m_pendingPasses);
         if (frame) {
             m_latestFrame = frame;
         }
@@ -1395,19 +1402,27 @@ void AppState::pumpFrames() {
         // A row is a pass. That is what makes the time axis mean something on
         // a swept display -- and on a wide span it is genuinely slow, which is
         // the truth about how often that spectrum was actually measured.
-        const bool advanceWaterfall = !m_sweeping || frame->passComplete;
+        // At a fixed tune every frame is a row.
+        if (!m_sweeping) {
+            passes = {frame};
+        }
+    }
 
-        if (advanceWaterfall) {
-            const std::lock_guard lock(m_frameMutex);
+    // Every pass that completed since the last frame, in order, whatever
+    // partials arrived after it.
+    if (!passes.empty()) {
+        const std::lock_guard lock(m_frameMutex);
+        for (const SpectrumFramePtr& pass : passes) {
             // Bounded: if the UI stalls, old lines are dropped rather than
             // queued without limit.
-            if (m_pendingWaterfallLines.size() < 64) {
-                m_pendingWaterfallLines.push_back(WaterfallLine{
-                    .dbfs = frame->binsDbfs,
-                    .startHz = frame->startHz,
-                    .binWidthHz = frame->binWidthHz,
-                    .ns = frame->hostTimeNs != 0 ? frame->hostTimeNs : monotonicNs()});
+            if (m_pendingWaterfallLines.size() >= 64) {
+                break;
             }
+            m_pendingWaterfallLines.push_back(
+                WaterfallLine{.dbfs = pass->binsDbfs,
+                              .startHz = pass->startHz,
+                              .binWidthHz = pass->binWidthHz,
+                              .ns = pass->hostTimeNs != 0 ? pass->hostTimeNs : monotonicNs()});
         }
     }
 
