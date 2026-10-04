@@ -22,6 +22,31 @@
 
 namespace sweeppp {
 
+namespace detail {
+
+/// A learn in progress. Not nested in the instrument: there, `std::optional`
+/// asks whether it is default-constructible before its initialisers are parsed.
+struct LearnRun {
+    /// Sweep: one pass for the floor and the LO-offset spurs, then
+    /// several through them for whatever stands at a fixed frequency.
+    /// Fixed tune: one phase, everything absolute.
+    enum class Phase : std::uint8_t { LoOffsets, Absolute, Fixed };
+    Phase phase = Phase::LoOffsets;
+    CorrectionSettings savedSettings;
+    CalibrationContext context;
+    CorrectionLearner learner;
+    FloorShape floor;
+    std::vector<SpurEntry> loSpurs;
+    std::uint64_t passesHandled = 0;
+    /// The pass in progress when the LO-offset set went in; only a pass
+    /// completed after it was measured through the set throughout.
+    std::uint64_t installedAtPass = 0;
+    /// The stitched grid's own learner, one frame per completed pass.
+    CorrectionLearner gridLearner;
+};
+
+} // namespace detail
+
 /// The instrument in this process: a radio opened here, transformed here.
 ///
 /// The orchestration that used to live in the desktop's state object -- how a
@@ -180,24 +205,7 @@ private:
         FrameBus& m_target;
     };
 
-    struct LearnRun {
-        /// Sweep: one pass for the floor and the LO-offset spurs, then
-        /// several through them for whatever stands at a fixed frequency.
-        /// Fixed tune: one phase, everything absolute.
-        enum class Phase : std::uint8_t { LoOffsets, Absolute, Fixed };
-        Phase phase = Phase::LoOffsets;
-        CorrectionSettings savedSettings;
-        CalibrationContext context;
-        CorrectionLearner learner;
-        FloorShape floor;
-        std::vector<SpurEntry> loSpurs;
-        std::uint64_t passesHandled = 0;
-        /// The pass in progress when the LO-offset set went in; only a pass
-        /// completed after it was measured through the set throughout.
-        std::uint64_t installedAtPass = 0;
-        /// The stitched grid's own learner, one frame per completed pass.
-        CorrectionLearner gridLearner;
-    };
+    using LearnRun = detail::LearnRun;
 
     void notify(InstrumentNotice::Kind kind, std::string text);
     void listenForLearning(bool listen);
