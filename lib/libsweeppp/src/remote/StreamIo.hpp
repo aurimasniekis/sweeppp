@@ -4,7 +4,7 @@
 #pragma once
 
 #include "sweeppp/core/Result.hpp"
-#include "sweeppp/net/SecureChannel.hpp"
+#include "sweeppp/net/ByteStream.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -31,7 +31,7 @@ inline constexpr std::chrono::milliseconds kReadSlice{200};
 }
 
 /// Exactly `out.size()` bytes from `stream` -- a `TcpSocket` or a
-/// `SecureChannel` -- by `deadline`. IoError when the peer closes first.
+/// `ByteStream` -- by `deadline`. IoError when the peer closes first.
 template <typename Stream>
 [[nodiscard]] Status readExactly(Stream& stream, std::span<std::uint8_t> out,
                                  Clock::time_point deadline, const std::atomic<bool>& stopping) {
@@ -65,16 +65,16 @@ template <typename Stream>
     return ok();
 }
 
-/// The next record off the channel, reading as needed until `deadline`.
-[[nodiscard]] Result<sweeps::StreamRecord> readRecord(net::SecureChannel& channel,
+/// The next record off the stream, reading as needed until `deadline`.
+[[nodiscard]] Result<sweeps::StreamRecord> readRecord(net::ByteStream& channel,
                                                       sweeps::RecordFramer& framer,
                                                       Clock::time_point deadline,
                                                       const std::atomic<bool>& stopping);
 
-[[nodiscard]] Result<sweeps::StreamHeader> readStreamHeader(net::SecureChannel& channel,
+[[nodiscard]] Result<sweeps::StreamHeader> readStreamHeader(net::ByteStream& channel,
                                                             Clock::time_point deadline,
                                                             const std::atomic<bool>& stopping);
 
-[[nodiscard]] Status sendStreamHeader(net::SecureChannel& channel);
+[[nodiscard]] Status sendStreamHeader(net::ByteStream& channel);
 
 } // namespace sweeppp::remote::io

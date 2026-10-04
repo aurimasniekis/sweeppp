@@ -42,12 +42,21 @@ void appendMessage(std::vector<std::byte>& out, std::string_view name, const swe
 /// them until that arrives -- so an edit the server refused is put back.
 [[nodiscard]] std::span<const std::string_view> sectionsTouchedBy(std::string_view op) noexcept;
 
+/// Whether a client that does not control a shared server may still send
+/// `op`: what changes only its own connection, and taking control.
+[[nodiscard]] bool viewerMay(std::string_view op) noexcept;
+
 // ---- the handshake ---------------------------------------------------------------
 
 /// The client's half of the handshake's payload.
 struct Hello {
     std::uint32_t protocolVersion = 0;
     std::string software; ///< "Sweep++ 0.2.0"
+    std::string kind;     ///< One of `client::`
+    std::string name;     ///< "studio-mac", "Firefox on iPhone"
+    /// Random, kept by the client across runs: how a server knows the
+    /// desktop that dropped is the one coming back.
+    std::string clientId;
 
     [[nodiscard]] sweeps::Metadata toMetadata() const;
     [[nodiscard]] static Hello from(const sweeps::Metadata& in);
@@ -55,6 +64,7 @@ struct Hello {
 
 struct Welcome {
     std::string serverName; ///< The server's host name, for "HackRF One on pi"
+    bool shared = false;    ///< Whether other clients may watch alongside
 
     [[nodiscard]] sweeps::Metadata toMetadata() const;
     [[nodiscard]] static Welcome from(const sweeps::Metadata& in);
@@ -69,6 +79,31 @@ struct Refused {
 };
 
 // ---- control -----------------------------------------------------------------
+
+/// The `control` section: who may change things.
+struct ControlState {
+    bool shared = false;
+    bool you = false;  ///< This client controls
+    bool held = false; ///< Somebody does
+    std::string controller;
+    std::string controllerKind;
+
+    [[nodiscard]] sweeps::Metadata toMetadata() const;
+    [[nodiscard]] static ControlState from(const sweeps::Metadata& in);
+};
+
+/// One row of the `clients` section.
+struct ConnectedClient {
+    std::uint64_t id = 0; ///< The server's, for this connection
+    std::string name;
+    std::string kind;
+    std::string address;
+    bool controls = false;
+    bool you = false;
+};
+
+[[nodiscard]] sweeps::Metadata encodeClients(std::span<const ConnectedClient> clients);
+[[nodiscard]] std::vector<ConnectedClient> decodeClients(const sweeps::Metadata& in);
 
 struct Command {
     std::uint64_t seq = 0;

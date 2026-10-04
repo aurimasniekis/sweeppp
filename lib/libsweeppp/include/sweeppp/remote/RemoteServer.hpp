@@ -8,6 +8,7 @@
 #include "sweeppp/core/Telemetry.hpp"
 #include "sweeppp/instrument/LocalInstrument.hpp"
 #include "sweeppp/pipeline/FrameBus.hpp"
+#include "sweeppp/remote/Messages.hpp"
 #include "sweeppp/remote/Protocol.hpp"
 
 #include <chrono>
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace sweeppp::remote {
 
@@ -43,17 +45,26 @@ struct ServerConfig {
 
     /// Answer desktops looking for servers on the LAN (mDNS).
     bool advertise = false;
+
+    /// Let several clients connect at once: one controls, the rest watch.
+    /// Without it the server takes one client and turns the next away busy.
+    bool shared = false;
+    /// How many a shared server takes at once.
+    std::size_t maxClients = kDefaultMaxClients;
 };
 
-/// Serves one `LocalInstrument` to one remote client at a time.
+/// Serves one `LocalInstrument` to its clients.
 ///
 /// Everything the instrument does happens on the server's control thread:
 /// commands, `tick()`, state. Frames leave from the output bus through a
-/// two-slot mailbox, so a slow link merges frames rather than slowing the
-/// engine down. A client that says goodbye leaves the radio stopped, its plan
-/// and parameters as they were; one that drops leaves it running for
-/// `linger`, for the next client -- the same desktop, reconnecting -- to take
-/// over.
+/// two-slot mailbox per client, so a slow link merges frames rather than
+/// slowing the engine or the other clients down.
+///
+/// One client at a time controls the radio; on a shared server the others
+/// watch, and any of them may take control. When the last client says
+/// goodbye the radio stops, its plan and parameters as they were. A
+/// controller that drops leaves it running for `linger`, for the same
+/// desktop, reconnecting, to take control again.
 class RemoteServer {
 public:
     /// `output`, `events` and `telemetry` are the ones `instrument` was built
@@ -71,7 +82,8 @@ public:
     /// instrument belongs to the server: the caller must not touch it.
     Status start();
 
-    /// Says goodbye to the client, stops acquisition and joins every thread.
+    /// Says goodbye to every client, stops acquisition and joins every
+    /// thread.
     void stop();
 
     /// The bound port, once started.
@@ -79,8 +91,8 @@ public:
 
     [[nodiscard]] bool clientConnected() const;
 
-    /// The connected client's address; empty with none.
-    [[nodiscard]] std::string clientAddress() const;
+    /// Everyone connected, controller first.
+    [[nodiscard]] std::vector<ConnectedClient> clients() const;
 
 private:
     struct Impl;

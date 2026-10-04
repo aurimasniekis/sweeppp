@@ -5,6 +5,7 @@
 
 #include "sweeppp/core/Result.hpp"
 #include "sweeppp/crypto/Noise.hpp"
+#include "sweeppp/net/ByteStream.hpp"
 #include "sweeppp/net/Socket.hpp"
 
 #include <chrono>
@@ -26,7 +27,7 @@ namespace sweeppp::net {
 /// Like `TcpSocket`: one thread may receive while another sends, and any may
 /// `shutdown()`. A frame that fails authentication ends the stream: nothing
 /// after it can be trusted to be where it seems.
-class SecureChannel {
+class SecureChannel final : public ByteStream {
 public:
     /// The most plaintext one frame carries.
     static constexpr std::size_t kMaxFramePlaintext =
@@ -34,7 +35,7 @@ public:
 
     SecureChannel();
     SecureChannel(TcpSocket socket, crypto::CipherState send, crypto::CipherState receive);
-    ~SecureChannel();
+    ~SecureChannel() override;
 
     SecureChannel(const SecureChannel&) = delete;
     SecureChannel& operator=(const SecureChannel&) = delete;
@@ -43,19 +44,19 @@ public:
 
     [[nodiscard]] bool valid() const noexcept;
 
-    Status sendAll(std::span<const std::uint8_t> data);
+    Status sendAll(std::span<const std::uint8_t> data) override;
 
     /// Plaintext, at most `buffer.size()` bytes, waiting for a whole frame if
     /// need be; zero once the stream has ended.
-    [[nodiscard]] Result<std::size_t> receive(std::span<std::uint8_t> buffer);
+    [[nodiscard]] Result<std::size_t> receive(std::span<std::uint8_t> buffer) override;
 
     /// Whether `receive()` has something: plaintext already decrypted, or
     /// bytes on the socket.
-    [[nodiscard]] Result<bool> waitReadable(std::chrono::milliseconds timeout);
+    [[nodiscard]] Result<bool> waitReadable(std::chrono::milliseconds timeout) override;
 
-    void shutdown() noexcept;
-    void close() noexcept;
-    [[nodiscard]] std::string peerAddress() const;
+    void shutdown() noexcept override;
+    void close() noexcept override;
+    [[nodiscard]] std::string peerAddress() const override;
 
 private:
     struct State;

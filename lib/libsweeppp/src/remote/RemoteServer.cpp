@@ -77,13 +77,16 @@ bool supersedes(std::string_view op) {
 
 // ---------------------------------------------------------------- the session
 
-/// One authenticated client: its socket, the thread reading it, the thread
+/// One authenticated client: its stream, the thread reading it, the thread
 /// writing to it, and what is queued for the latter.
 class Session {
 public:
-    Session(net::SecureChannel socket, sweeps::RecordFramer framer,
-            std::chrono::milliseconds silenceTimeout)
-        : m_socket(std::move(socket)), m_framer(std::move(framer)), m_peer(m_socket.peerAddress()),
+    Session(std::uint64_t id, std::unique_ptr<net::ByteStream> socket, sweeps::RecordFramer framer,
+            const Hello& hello, std::chrono::milliseconds silenceTimeout)
+        : m_id(id), m_socket(std::move(socket)), m_framer(std::move(framer)),
+          m_peer(m_socket->peerAddress()),
+          m_kind(hello.kind.empty() ? std::string(client::kDesktop) : hello.kind),
+          m_name(hello.name.empty() ? m_peer : hello.name), m_clientId(hello.clientId),
           m_silenceTimeout(silenceTimeout) {}
 
     ~Session() { join(); }
@@ -107,12 +110,25 @@ public:
 
     /// Whether the client ended it, rather than the network.
     [[nodiscard]] bool saidGoodbye() const noexcept { return m_saidGoodbye.load(); }
+    [[nodiscard]] std::uint64_t id() const noexcept { return m_id; }
     [[nodiscard]] const std::string& peer() const noexcept { return m_peer; }
+    [[nodiscard]] const std::string& kind() const noexcept { return m_kind; }
+    [[nodiscard]] const std::string& name() const noexcept { return m_name; }
+    [[nodiscard]] const std::string& clientId() const noexcept { return m_clientId; }
+
+    /// What this client was last sent, which the next state is the
+    /// difference from. The control thread's alone.
+    struct Ledger {
+        std::map<std::string, std::vector<std::byte>, std::less<>> sent;
+        std::uint64_t lastAck = 0;
+        std::uint64_t lastSentAck = 0;
+    };
+    [[nodiscard]] Ledger& ledger() noexcept { return m_ledger; }
 
     /// Ends the session from outside: both threads wake and leave.
     void end() {
         m_alive.store(false);
-        m_socket.shutdown();
+        m_socket->shutdown();
         m_wake.notify_all();
     }
 
@@ -257,7 +273,7 @@ private:
                 }
             }
 
-            auto readable = m_socket.waitReadable(kReadSlice);
+            auto readable = m_socket->waitReadable(kReadSlice);
             if (!readable) {
                 return;
             }
@@ -270,7 +286,7 @@ private:
                 continue;
             }
             auto got =
-                m_socket.receive({reinterpret_cast<std::uint8_t*>(buffer.data()), buffer.size()});
+                m_socket->receive({reinterpret_cast<std::uint8_t*>(buffer.data()), buffer.size()});
             if (!got || *got == 0) {
                 return;
             }
@@ -394,21 +410,26 @@ private:
                                      nullptr, 0);
             }
 
-            if (!buffer.empty() && !m_socket.sendAll(asBytes(buffer))) {
+            if (!buffer.empty() && !m_socket->sendAll(asBytes(buffer))) {
                 end();
                 return;
             }
             if (finishing) {
-                m_socket.shutdown();
+                m_socket->shutdown();
                 return;
             }
         }
     }
 
-    net::SecureChannel m_socket;
+    std::uint64_t m_id;
+    std::unique_ptr<net::ByteStream> m_socket;
     sweeps::RecordFramer m_framer;
     std::string m_peer;
+    std::string m_kind;
+    std::string m_name;
+    std::string m_clientId;
     std::chrono::milliseconds m_silenceTimeout;
+    Ledger m_ledger;
     std::atomic<bool> m_alive{true};
     std::atomic<bool> m_saidGoodbye{false};
 
@@ -443,13 +464,16 @@ struct RemoteServer::Impl {
         : instrument(instrument), output(output), events(events), telemetry(telemetry),
           config(std::move(config)) {}
 
-    /// Hands every published frame to the session's mailbox.
+    using SessionPtr = std::shared_ptr<Session>;
+
+    /// Hands every published frame to each client's mailbox.
     class Sink final : public IFrameConsumer {
     public:
         explicit Sink(Impl& owner) : m_owner(owner) {}
         void onFrame(const SpectrumFramePtr& frame) noexcept override {
-            if (const std::shared_ptr<Session> current = m_owner.currentSession()) {
-                current->offerFrame(frame);
+            const std::lock_guard lock(m_owner.sessionMutex);
+            for (const SessionPtr& session : m_owner.sessions) {
+                session->offerFrame(frame);
             }
         }
         [[nodiscard]] std::string_view consumerName() const noexcept override {
@@ -466,41 +490,77 @@ struct RemoteServer::Impl {
     };
 
     struct Arrival {
-        net::SecureChannel socket;
+        std::unique_ptr<net::ByteStream> socket;
         sweeps::RecordFramer framer;
+        Hello hello;
+    };
+
+    /// A command and the client it came from, which is who is answered.
+    struct Queued {
+        SessionPtr from;
+        Command command;
+    };
+
+    /// A state section as last built, and its encoding to compare against.
+    struct Built {
+        Metadata body;
+        std::vector<std::byte> bytes;
     };
 
     // ---- shared state ---------------------------------------------------------
 
-    [[nodiscard]] std::shared_ptr<Session> currentSession() const {
+    [[nodiscard]] std::vector<SessionPtr> currentSessions() const {
         const std::lock_guard lock(sessionMutex);
-        return activeSession;
+        return sessions;
+    }
+
+    [[nodiscard]] std::size_t clientLimit() const noexcept {
+        return config.shared ? std::max<std::size_t>(config.maxClients, 1) : 1;
     }
 
     void forwardEvent(const session::SessionEvent& event, bool droppable) {
-        if (std::shared_ptr<Session> current = currentSession()) {
-            std::vector<std::byte> payload;
-            session::encodeEvent(payload, event);
-            std::vector<std::byte> record;
-            sweeps::appendRecord(record, static_cast<std::uint16_t>(sweeps::RecordType::Event),
-                                 payload.data(), payload.size());
-            current->pushEvent(std::move(record), droppable);
+        const std::lock_guard lock(sessionMutex);
+        if (sessions.empty()) {
+            return;
+        }
+        std::vector<std::byte> payload;
+        session::encodeEvent(payload, event);
+        std::vector<std::byte> record;
+        sweeps::appendRecord(record, static_cast<std::uint16_t>(sweeps::RecordType::Event),
+                             payload.data(), payload.size());
+        for (const SessionPtr& session : sessions) {
+            session->pushEvent(record, droppable);
         }
     }
 
-    bool enqueueCommand(Command command) {
+    bool enqueueCommand(SessionPtr from, Command command) {
+        if (!from) {
+            return true;
+        }
         {
             const std::lock_guard lock(controlMutex);
             if (commands.size() >= kMaxQueuedCommands) {
                 return false;
             }
-            commands.push_back(std::move(command));
+            commands.push_back(Queued{.from = std::move(from), .command = std::move(command)});
         }
         controlWake.notify_all();
         return true;
     }
 
     void wakeControl() { controlWake.notify_all(); }
+
+    /// A client through its handshake, for the control thread to admit or
+    /// turn away.
+    void arrive(std::unique_ptr<net::ByteStream> socket, const Hello& hello) {
+        {
+            const std::lock_guard lock(controlMutex);
+            arrivals.push_back(Arrival{.socket = std::move(socket),
+                                       .framer = sweeps::RecordFramer(kMaxClientRecordBytes),
+                                       .hello = hello});
+        }
+        controlWake.notify_all();
+    }
 
     // ---- the handshake ------------------------------------------------------------
 
@@ -536,13 +596,7 @@ struct RemoteServer::Impl {
             channel.shutdown();
             return;
         }
-
-        {
-            const std::lock_guard lock(controlMutex);
-            arrivals.push_back(Arrival{.socket = std::move(channel),
-                                       .framer = sweeps::RecordFramer(kMaxClientRecordBytes)});
-        }
-        controlWake.notify_all();
+        arrive(std::make_unique<net::SecureChannel>(std::move(channel)), accepted->hello);
     }
 
     void listenLoop() {
@@ -590,7 +644,7 @@ struct RemoteServer::Impl {
         auto lastTelemetry = Clock::time_point{};
         while (!stopping.load()) {
             std::vector<Arrival> arrived;
-            std::vector<Command> batch;
+            std::vector<Queued> batch;
             {
                 std::unique_lock lock(controlMutex);
                 controlWake.wait_for(lock, kControlInterval, [this] {
@@ -606,13 +660,17 @@ struct RemoteServer::Impl {
                 break;
             }
 
-            reapSession();
+            reapSessions();
             for (Arrival& arrival : arrived) {
                 admit(std::move(arrival));
             }
-            if (lingerUntil && Clock::now() >= *lingerUntil && !currentSession()) {
-                logInfo("remote", "nobody came back; acquisition stopped");
-                idle();
+            if (lingerUntil && Clock::now() >= *lingerUntil) {
+                lingerUntil.reset();
+                lingerClientId.clear();
+                if (currentSessions().empty()) {
+                    logInfo("remote", "nobody came back; acquisition stopped");
+                    idle();
+                }
             }
 
             const bool executed = execute(batch);
@@ -623,39 +681,55 @@ struct RemoteServer::Impl {
             const bool wasRunning = running;
             running = instrument.running();
 
-            std::shared_ptr<Session> current = currentSession();
+            const std::vector<SessionPtr> current = currentSessions();
             const std::vector<InstrumentNotice> notices = instrument.takeNotices();
-            if (!current) {
+            if (current.empty()) {
                 continue;
             }
             for (const InstrumentNotice& notice : notices) {
-                current->pushControl(messageBytes(msg::kNotice, encodeNotice(notice)));
+                const std::vector<std::byte> bytes =
+                    messageBytes(msg::kNotice, encodeNotice(notice));
+                for (const SessionPtr& session : current) {
+                    session->pushControl(bytes);
+                }
             }
             if (wasRunning && !running) {
-                current->closeSegment();
+                for (const SessionPtr& session : current) {
+                    session->closeSegment();
+                }
             }
 
             const auto now = Clock::now();
-            if (executed || now - lastState >= kStateInterval) {
-                sendState(*current, executed);
+            if (executed || stateDue || now - lastState >= kStateInterval) {
+                refreshSections(executed);
+                for (const SessionPtr& session : current) {
+                    sendState(*session, current);
+                }
                 lastState = now;
+                stateDue = false;
             }
             if (now - lastTelemetry >= kTelemetryInterval) {
-                sendTelemetry(*current);
+                const TelemetryReport report = telemetryReport();
+                for (const SessionPtr& session : current) {
+                    sendTelemetry(*session, report);
+                }
                 lastTelemetry = now;
             }
         }
 
-        if (std::shared_ptr<Session> current = currentSession()) {
-            current->finish(refusal::kShutdown);
+        for (const SessionPtr& session : currentSessions()) {
+            session->finish(refusal::kShutdown);
+        }
+        {
             const std::lock_guard lock(sessionMutex);
-            activeSession.reset();
+            sessions.clear();
         }
         instrument.stop();
         (void)stopRecording();
         {
             const std::lock_guard lock(controlMutex);
             arrivals.clear();
+            commands.clear();
         }
     }
 
@@ -735,7 +809,7 @@ struct RemoteServer::Impl {
         return ok();
     }
 
-    Status fetchRecording(const std::string& name, std::uint64_t offset) {
+    Status fetchRecording(Session& target, const std::string& name, std::uint64_t offset) {
         auto path = recordingPath(name);
         if (!path) {
             return std::unexpected(std::move(path).error());
@@ -755,8 +829,7 @@ struct RemoteServer::Impl {
         if (!in) {
             return fail(ErrorCode::IoError, "could not read '{}'", name);
         }
-        std::shared_ptr<Session> current = currentSession();
-        if (current && !current->pushBulk(messageBytes(msg::kChunk, chunk.toMetadata()))) {
+        if (!target.pushBulk(messageBytes(msg::kChunk, chunk.toMetadata()))) {
             return fail(ErrorCode::Unavailable, "too many pieces of '{}' asked for at once", name);
         }
         return ok();
@@ -805,44 +878,63 @@ struct RemoteServer::Impl {
         return state;
     }
 
+    // ---- clients and control -----------------------------------------------------
+
     void admit(Arrival arrival) {
-        if (currentSession()) {
-            const std::string peer = arrival.socket.peerAddress();
-            logInfo("remote", "{} turned away: {} is connected", peer, currentSession()->peer());
-            (void)arrival.socket.sendAll(asBytes(
-                messageBytes(msg::kRefused, Refused{.reason = std::string(refusal::kBusy),
-                                                    .message = "another client is connected"}
-                                                .toMetadata())));
-            arrival.socket.shutdown();
+        const std::size_t connected = currentSessions().size();
+        if (connected >= clientLimit()) {
+            const std::string peer = arrival.socket->peerAddress();
+            const bool exclusive = !config.shared;
+            logInfo("remote", "{} turned away: {}", peer,
+                    exclusive ? "another client is connected"
+                              : std::format("{} clients are connected", connected));
+            (void)arrival.socket->sendAll(asBytes(messageBytes(
+                msg::kRefused,
+                Refused{.reason = std::string(exclusive ? refusal::kBusy : refusal::kLimit),
+                        .message = exclusive ? std::string("another client is connected")
+                                             : std::format("this server takes {} clients at once",
+                                                           clientLimit())}
+                    .toMetadata())));
+            arrival.socket->shutdown();
             return;
         }
 
-        // Whoever arrives takes over a radio left running for a dropped
-        // client: the same desktop reconnecting, nearly always.
-        lingerUntil.reset();
-        if (advertiser) {
-            advertiser->setBusy(true);
+        auto fresh = std::make_shared<Session>(++lastSessionId, std::move(arrival.socket),
+                                               std::move(arrival.framer), arrival.hello,
+                                               config.silenceTimeout);
+        logInfo("remote", "{} ({}, {}) connected", fresh->name(), fresh->kind(), fresh->peer());
+
+        // Control that is free goes to whoever arrives -- except while a
+        // dropped controller's radio is being kept for it, when it waits for
+        // that client to come back. A server for one client has nobody else
+        // to wait for.
+        const bool returning = !lingerClientId.empty() && fresh->clientId() == lingerClientId;
+        if (returning || !lingerUntil) {
+            lingerUntil.reset();
+            lingerClientId.clear();
+        }
+        if (controllerId.load() == 0 && (!lingerUntil || !config.shared)) {
+            lingerUntil.reset();
+            lingerClientId.clear();
+            setController(fresh->id());
         }
 
-        auto fresh = std::make_shared<Session>(std::move(arrival.socket), std::move(arrival.framer),
-                                               config.silenceTimeout);
-        logInfo("remote", "{} connected", fresh->peer());
         fresh->pushControl(
-            messageBytes(msg::kWelcome, Welcome{.serverName = serverName}.toMetadata()));
-
-        sentSections.clear();
-        lastRevision = ~std::uint64_t{0};
-        lastAck = 0;
-        lastSentAck = 0;
-        sendState(*fresh, true);
-        sendTelemetry(*fresh);
-
+            messageBytes(msg::kWelcome,
+                         Welcome{.serverName = serverName, .shared = config.shared}.toMetadata()));
         {
             const std::lock_guard lock(sessionMutex);
-            activeSession = fresh;
+            sessions.push_back(fresh);
             sessionEnded = false;
         }
-        fresh->run([this](Command command) { return enqueueCommand(std::move(command)); },
+        refreshSections(false);
+        sendState(*fresh, currentSessions());
+        sendTelemetry(*fresh, telemetryReport());
+        stateDue = true;
+
+        const std::weak_ptr<Session> self = fresh;
+        fresh->run([this, self](
+                       Command command) { return enqueueCommand(self.lock(), std::move(command)); },
                    [this] {
                        {
                            const std::lock_guard lock(controlMutex);
@@ -852,90 +944,175 @@ struct RemoteServer::Impl {
                    });
     }
 
-    /// A session whose client went away: join it, and leave the radio idle.
-    void reapSession() {
-        std::shared_ptr<Session> ended;
+    /// Clients that went away: joined and dropped from the list. When none
+    /// is left, the radio stops, unless it is being kept for a controller
+    /// that dropped.
+    void reapSessions() {
+        std::vector<SessionPtr> ended;
         {
             const std::lock_guard lock(sessionMutex);
-            if (!activeSession || activeSession->alive()) {
-                return;
+            for (auto it = sessions.begin(); it != sessions.end();) {
+                if ((*it)->alive()) {
+                    ++it;
+                    continue;
+                }
+                ended.push_back(std::move(*it));
+                it = sessions.erase(it);
             }
-            ended = std::move(activeSession);
         }
         {
             const std::lock_guard lock(controlMutex);
             sessionEnded = false;
             // Queued by a client that is no longer there to be answered.
-            commands.clear();
+            std::erase_if(commands, [&ended](const Queued& queued) {
+                return std::ranges::find(ended, queued.from) != ended.end();
+            });
         }
-        ended->join();
-        if (advertiser) {
-            advertiser->setBusy(false);
-        }
-
-        // A goodbye is someone leaving; anything else may be a cable, and
-        // the desktop at the other end is already trying to come back.
-        if (!ended->saidGoodbye() && config.linger.count() > 0 && instrument.running()) {
-            lingerUntil = Clock::now() + config.linger;
-            logInfo("remote", "{} dropped; the radio keeps running for {} s", ended->peer(),
-                    std::chrono::duration_cast<std::chrono::seconds>(config.linger).count());
+        if (ended.empty()) {
             return;
         }
-        logInfo("remote", "{} gone; acquisition stopped", ended->peer());
-        idle();
+
+        for (const SessionPtr& gone : ended) {
+            gone->join();
+            stateDue = true;
+            if (gone->id() != controllerId.load()) {
+                logInfo("remote", "{} left", gone->name());
+                continue;
+            }
+            setController(0);
+            // A goodbye is someone leaving; anything else may be a cable, and
+            // the desktop at the other end is already trying to come back.
+            if (!gone->saidGoodbye() && config.linger.count() > 0 && instrument.running()) {
+                lingerUntil = Clock::now() + config.linger;
+                lingerClientId = gone->clientId();
+                logInfo("remote", "{} dropped; the radio keeps running for {:.1f} s", gone->name(),
+                        std::chrono::duration<double>(config.linger).count());
+            } else {
+                logInfo("remote", "{} gone", gone->name());
+            }
+            if (config.shared) {
+                notifyAll(InstrumentNotice::Kind::Info,
+                          std::format("{} left; nobody has control", gone->name()));
+            }
+        }
+
+        if (currentSessions().empty() && !lingerUntil) {
+            logInfo("remote", "nobody connected; acquisition stopped");
+            idle();
+        }
     }
 
     /// The radio stopped with nobody to watch it.
     void idle() {
         lingerUntil.reset();
+        lingerClientId.clear();
         instrument.cancelLearning();
         instrument.stop();
         running = false;
     }
 
+    void setController(std::uint64_t id) {
+        controllerId.store(id);
+        stateDue = true;
+        if (advertiser) {
+            advertiser->setBusy(id != 0);
+        }
+    }
+
+    void notifyAll(InstrumentNotice::Kind kind, std::string text) {
+        const std::vector<std::byte> bytes = messageBytes(
+            msg::kNotice, encodeNotice(InstrumentNotice{.kind = kind, .text = std::move(text)}));
+        for (const SessionPtr& session : currentSessions()) {
+            session->pushControl(bytes);
+        }
+    }
+
+    Status takeControl(const Session& from) {
+        const std::uint64_t previous = controllerId.load();
+        if (previous == from.id()) {
+            return ok();
+        }
+        setController(from.id());
+        lingerUntil.reset();
+        lingerClientId.clear();
+        logInfo("remote", "{} took control", from.name());
+        notifyAll(InstrumentNotice::Kind::Warning,
+                  std::format("{} ({}) took control", from.name(), from.kind()));
+        return ok();
+    }
+
+    Status releaseControl(const Session& from) {
+        if (controllerId.load() != from.id()) {
+            return ok();
+        }
+        setController(0);
+        notifyAll(InstrumentNotice::Kind::Info, std::format("{} released control", from.name()));
+        return ok();
+    }
+
+    [[nodiscard]] std::string controllerName() const {
+        const std::uint64_t id = controllerId.load();
+        for (const SessionPtr& session : currentSessions()) {
+            if (session->id() == id) {
+                return session->name();
+            }
+        }
+        return {};
+    }
+
     // ---- commands --------------------------------------------------------------------
 
-    /// Runs a batch in order, skipping any edit a later one in the same batch
-    /// replaces. True when anything ran.
-    bool execute(std::vector<Command>& batch) {
+    /// Runs a batch in order, skipping any edit a later one from the same
+    /// client in the same batch replaces. True when anything ran.
+    bool execute(std::vector<Queued>& batch) {
         if (batch.empty()) {
             return false;
         }
-        std::shared_ptr<Session> current = currentSession();
         for (std::size_t i = 0; i < batch.size(); ++i) {
-            const Command& command = batch[i];
-            const bool superseded = std::any_of(batch.begin() + static_cast<std::ptrdiff_t>(i) + 1,
-                                                batch.end(), [&](const Command& later) {
-                                                    if (later.op != command.op) {
-                                                        return false;
-                                                    }
-                                                    if (command.op == op::kSetParameter) {
-                                                        return later.args.getString("key") ==
-                                                               command.args.getString("key");
-                                                    }
-                                                    return supersedes(command.op);
-                                                });
+            Session& from = *batch[i].from;
+            const Command& command = batch[i].command;
+            const bool superseded = std::any_of(
+                batch.begin() + static_cast<std::ptrdiff_t>(i) + 1, batch.end(),
+                [&](const Queued& later) {
+                    if (later.from.get() != &from || later.command.op != command.op) {
+                        return false;
+                    }
+                    if (command.op == op::kSetParameter) {
+                        return later.command.args.getString("key") == command.args.getString("key");
+                    }
+                    return supersedes(command.op);
+                });
 
-            const Status status = superseded ? ok() : run(command);
-            lastAck = std::max(lastAck, command.seq);
+            Status status = ok();
+            if (from.id() != controllerId.load() && !viewerMay(command.op)) {
+                const std::string holder = controllerName();
+                status = fail(ErrorCode::PermissionDenied, "{}",
+                              holder.empty() ? std::string("Nobody has control; take it first")
+                                             : std::format("{} has control", holder));
+            } else if (!superseded) {
+                status = run(command, from);
+            }
+
+            Session::Ledger& ledger = from.ledger();
+            ledger.lastAck = std::max(ledger.lastAck, command.seq);
             // Sent again with the acknowledgement even if unchanged: the
             // client put its own edit there, and a refused one must be undone.
             for (const std::string_view touched : sectionsTouchedBy(command.op)) {
-                sentSections.erase(std::string(touched));
-            }
-            if (current) {
-                Reply reply{.seq = command.seq, .ok = status.has_value()};
-                if (!status) {
-                    reply.code = status.error().code();
-                    reply.message = status.error().message();
+                if (const auto found = ledger.sent.find(touched); found != ledger.sent.end()) {
+                    ledger.sent.erase(found);
                 }
-                current->pushControl(messageBytes(msg::kReply, reply.toMetadata()));
             }
+            Reply reply{.seq = command.seq, .ok = status.has_value()};
+            if (!status) {
+                reply.code = status.error().code();
+                reply.message = status.error().message();
+            }
+            from.pushControl(messageBytes(msg::kReply, reply.toMetadata()));
         }
         return true;
     }
 
-    Status run(const Command& command) {
+    Status run(const Command& command, Session& from) {
         const Metadata& args = command.args;
         const std::string& name = command.op;
 
@@ -1021,7 +1198,7 @@ struct RemoteServer::Impl {
             return deleteRecording(args.getString("name"));
         }
         if (name == op::kFetchRecording) {
-            return fetchRecording(args.getString("name"),
+            return fetchRecording(from, args.getString("name"),
                                   static_cast<std::uint64_t>(args.getInt("offset")));
         }
         if (name == op::kStartBenchmark) {
@@ -1037,35 +1214,36 @@ struct RemoteServer::Impl {
                 return fail(ErrorCode::OutOfRange, "{} bins is outside {}..{}", bins, kMinLinkBins,
                             kMaxGridBins);
             }
-            if (std::shared_ptr<Session> current = currentSession()) {
-                current->setMaxBins(static_cast<std::uint32_t>(bins));
-            }
+            from.setMaxBins(static_cast<std::uint32_t>(bins));
             return ok();
+        }
+        if (name == op::kTakeControl) {
+            return takeControl(from);
+        }
+        if (name == op::kReleaseControl) {
+            return releaseControl(from);
         }
         return fail(ErrorCode::Unsupported, "this server does not know '{}'", name);
     }
 
     // ---- state and telemetry -----------------------------------------------------------
 
-    /// Every section that differs from what this client last received. The
-    /// bench sections are rebuilt only when the instrument's revision moved or
-    /// a command ran; the rest are cheap enough to compare every time.
-    void sendState(Session& target, bool afterCommand) {
-        Metadata sections;
-        const auto offer = [&](std::string_view name, Metadata body) {
-            std::vector<std::byte> bytes;
-            body.encode(bytes);
-            auto& last = sentSections[std::string(name)];
-            if (last == bytes) {
-                return;
-            }
-            last = std::move(bytes);
-            sections.setHash(std::string(name), std::move(body));
+    /// The sections every client is sent alike. The bench sections are
+    /// rebuilt only when the instrument's revision moved or a command ran; the
+    /// rest are cheap enough to build every time.
+    void refreshSections(bool afterCommand) {
+        const auto put = [this](std::string_view name, Metadata body) {
+            Built& built = sectionCache[std::string(name)];
+            built.bytes.clear();
+            body.encode(built.bytes);
+            built.body = std::move(body);
         };
 
         const DeviceDescriptor* device = instrument.device();
-        const bool benchChanged = afterCommand || instrument.revision() != lastRevision;
+        const bool benchChanged =
+            afterCommand || !haveBench || instrument.revision() != lastRevision;
         if (benchChanged) {
+            haveBench = true;
             lastRevision = instrument.revision();
 
             Metadata deviceSection;
@@ -1077,19 +1255,19 @@ struct RemoteServer::Impl {
             deviceSection.setString("profileDriver", instrument.profileDriver());
             deviceSection.setString("profileId", instrument.profileId());
             deviceSection.setString("displayLabel", instrument.displayLabel());
-            offer(section::kDevice, std::move(deviceSection));
+            put(section::kDevice, std::move(deviceSection));
 
             Metadata backends = encodeBackends(instrument.fftBackends());
             backends.setString("current", instrument.fftBackendName());
-            offer(section::kBackends, std::move(backends));
+            put(section::kBackends, std::move(backends));
 
-            offer(section::kAntennas, encodeAntennas(instrument.antennas().entries()));
-            offer(section::kAssignments, encodeAssignments(instrument.antennaAssignments()));
+            put(section::kAntennas, encodeAntennas(instrument.antennas().entries()));
+            put(section::kAssignments, encodeAssignments(instrument.antennaAssignments()));
 
             Metadata switchers;
             switchers.setHash("open", encodeSwitcherViews(instrument.openSwitchers()));
             switchers.setHash("available", encodeSwitcherInfos(instrument.availableSwitchers()));
-            offer(section::kSwitchers, std::move(switchers));
+            put(section::kSwitchers, std::move(switchers));
         }
 
         Metadata values;
@@ -1103,57 +1281,108 @@ struct RemoteServer::Impl {
         }
         values.setHash("parameters", std::move(parameters));
         values.setString("selectedRxPort", instrument.selectedRxPort());
-        offer(section::kValues, std::move(values));
+        put(section::kValues, std::move(values));
 
         Metadata run;
         run.setBool("running", instrument.running());
         run.setBool("sweeping", instrument.sweeping());
         run.setInt("startGeneration", static_cast<std::int64_t>(instrument.startGeneration()));
         run.setHash("engine", encodeEngineStats(instrument.engineStats()));
-        offer(section::kRun, std::move(run));
+        put(section::kRun, std::move(run));
 
-        offer(section::kPlan, encodePlan(instrument.sweepPlan()));
-        offer(section::kSchedule, encodeSchedule(instrument.schedule()));
-        offer(section::kPipeline, encodePipeline(instrument.pipelineConfig()));
+        put(section::kPlan, encodePlan(instrument.sweepPlan()));
+        put(section::kSchedule, encodeSchedule(instrument.schedule()));
+        put(section::kPipeline, encodePipeline(instrument.pipelineConfig()));
 
         Metadata corrections;
         corrections.setHash("settings", encodeCorrectionSettings(instrument.correctionSettings()));
         corrections.setHash("summary", encodeCorrectionSummary(instrument.correctionSummary()));
-        offer(section::kCorrections, std::move(corrections));
+        put(section::kCorrections, std::move(corrections));
 
         Metadata learning;
         learning.setBool("active", instrument.learning());
         learning.setString("label", instrument.learningLabel());
-        offer(section::kLearning, std::move(learning));
+        put(section::kLearning, std::move(learning));
 
         Metadata rfPath;
         rfPath.setHash("legs", encodeRfLegs(instrument.rfPath()));
         rfPath.setHash("coverage", encodeRanges(instrument.antennaCoverage()));
-        offer(section::kRfPath, std::move(rfPath));
+        put(section::kRfPath, std::move(rfPath));
+
+        put(section::kBenchmark, encodeBenchmarkStatus(instrument.benchmark()));
+        put(section::kRecordings, recordingsState().toMetadata());
+    }
+
+    /// Every section that differs from what this client last received: the
+    /// shared ones as last built, then its own.
+    void sendState(Session& target, const std::vector<SessionPtr>& everyone) {
+        Session::Ledger& ledger = target.ledger();
+        Metadata sections;
+        const auto offer = [&](std::string_view name, const Metadata& body,
+                               const std::vector<std::byte>& bytes) {
+            const auto last = ledger.sent.find(name);
+            if (last != ledger.sent.end() && last->second == bytes) {
+                return;
+            }
+            ledger.sent.insert_or_assign(std::string(name), bytes);
+            sections.setHash(std::string(name), body);
+        };
+        for (const auto& [name, built] : sectionCache) {
+            offer(name, built.body, built.bytes);
+        }
+
+        const auto own = [&](std::string_view name, const Metadata& body) {
+            std::vector<std::byte> bytes;
+            body.encode(bytes);
+            offer(name, body, bytes);
+        };
 
         Metadata link;
         link.setInt("maxBins", target.maxBins());
-        offer(section::kLink, std::move(link));
+        own(section::kLink, link);
 
-        offer(section::kBenchmark, encodeBenchmarkStatus(instrument.benchmark()));
-        offer(section::kRecordings, recordingsState().toMetadata());
+        const std::uint64_t controller = controllerId.load();
+        ControlState control{
+            .shared = config.shared, .you = target.id() == controller, .held = controller != 0};
+        std::vector<ConnectedClient> clients;
+        clients.reserve(everyone.size());
+        for (const SessionPtr& session : everyone) {
+            const bool controls = session->id() == controller;
+            if (controls) {
+                control.controller = session->name();
+                control.controllerKind = session->kind();
+            }
+            clients.push_back(ConnectedClient{.id = session->id(),
+                                              .name = session->name(),
+                                              .kind = session->kind(),
+                                              .address = session->peer(),
+                                              .controls = controls,
+                                              .you = session.get() == &target});
+        }
+        own(section::kControl, control.toMetadata());
+        own(section::kClients, encodeClients(clients));
 
         // An acknowledgement goes out even when nothing changed: the client
         // is holding its own copy of what it edited until it arrives.
-        if (sections.empty() && lastAck == lastSentAck) {
+        if (sections.empty() && ledger.lastAck == ledger.lastSentAck) {
             return;
         }
-        lastSentAck = lastAck;
+        ledger.lastSentAck = ledger.lastAck;
         target.pushControl(messageBytes(
-            msg::kState, State{.ackSeq = lastAck, .sections = std::move(sections)}.toMetadata()));
+            msg::kState,
+            State{.ackSeq = ledger.lastAck, .sections = std::move(sections)}.toMetadata()));
     }
 
-    void sendTelemetry(Session& target) {
+    [[nodiscard]] TelemetryReport telemetryReport() {
         const TelemetrySnapshot& snapshot = telemetry.sample();
         TelemetryReport report;
         report.stream = snapshot.stream;
         report.process = snapshot.process;
         report.health = instrument.health();
+        return report;
+    }
+
+    static void sendTelemetry(Session& target, TelemetryReport report) {
         report.link = target.link();
         std::vector<std::byte> bytes;
         appendTelemetry(bytes, report, monotonicNs());
@@ -1184,19 +1413,25 @@ struct RemoteServer::Impl {
     std::mutex controlMutex;
     std::condition_variable controlWake;
     std::vector<Arrival> arrivals;
-    std::deque<Command> commands;
+    std::deque<Queued> commands;
     bool sessionEnded = false;
 
     mutable std::mutex sessionMutex;
-    std::shared_ptr<Session> activeSession;
+    std::vector<SessionPtr> sessions;
+    /// The session that controls the radio; zero for none. Written by the
+    /// control thread, read by `clients()`.
+    std::atomic<std::uint64_t> controllerId{0};
 
     // The control thread's alone.
-    std::map<std::string, std::vector<std::byte>> sentSections;
+    std::uint64_t lastSessionId = 0;
+    std::map<std::string, Built, std::less<>> sectionCache;
+    bool haveBench = false;
     std::uint64_t lastRevision = 0;
-    std::uint64_t lastAck = 0;
-    std::uint64_t lastSentAck = 0;
+    bool stateDue = false;
     bool running = false;
     std::optional<Clock::time_point> lingerUntil;
+    /// Whose radio is being kept running: they get control back.
+    std::string lingerClientId;
 
     std::unique_ptr<mdns::Advertiser> advertiser;
     std::unique_ptr<session::SessionRecorder> recorder;
@@ -1270,7 +1505,8 @@ Status RemoteServer::start() {
                                                  .host = host,
                                                  .port = impl.listener.port(),
                                                  .device = impl.instrument.displayLabel(),
-                                                 .authRequired = !impl.config.token.empty()});
+                                                 .authRequired = !impl.config.token.empty(),
+                                                 .shared = impl.config.shared});
         if (advertiser) {
             impl.advertiser = std::move(*advertiser);
         } else {
@@ -1281,8 +1517,9 @@ Status RemoteServer::start() {
     impl.controlThread = std::thread([&impl] { impl.controlLoop(); });
     impl.listenThread = std::thread([&impl] { impl.listenLoop(); });
     impl.started = true;
-    logInfo("remote", "serving on {}:{}{}", impl.config.listenAddress, impl.listener.port(),
-            impl.config.token.empty() ? " (no token)" : "");
+    logInfo("remote", "serving on {}:{}{}{}", impl.config.listenAddress, impl.listener.port(),
+            impl.config.token.empty() ? " (no token)" : "",
+            impl.config.shared ? std::format(", shared by up to {}", impl.clientLimit()) : "");
     return ok();
 }
 
@@ -1315,13 +1552,22 @@ std::uint16_t RemoteServer::port() const noexcept {
 }
 
 bool RemoteServer::clientConnected() const {
-    const std::shared_ptr<Session> current = m_impl->currentSession();
-    return current && current->alive();
+    return std::ranges::any_of(m_impl->currentSessions(),
+                               [](const Impl::SessionPtr& session) { return session->alive(); });
 }
 
-std::string RemoteServer::clientAddress() const {
-    const std::shared_ptr<Session> current = m_impl->currentSession();
-    return current ? current->peer() : std::string{};
+std::vector<ConnectedClient> RemoteServer::clients() const {
+    const std::uint64_t controller = m_impl->controllerId.load();
+    std::vector<ConnectedClient> clients;
+    for (const Impl::SessionPtr& session : m_impl->currentSessions()) {
+        clients.push_back(ConnectedClient{.id = session->id(),
+                                          .name = session->name(),
+                                          .kind = session->kind(),
+                                          .address = session->peer(),
+                                          .controls = session->id() == controller});
+    }
+    std::ranges::stable_partition(clients, &ConnectedClient::controls);
+    return clients;
 }
 
 } // namespace sweeppp::remote

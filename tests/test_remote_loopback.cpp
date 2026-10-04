@@ -56,7 +56,7 @@ struct FrameCounter final : IFrameConsumer {
 /// buses to connect a remote instrument to.
 class Loopback {
 public:
-    Loopback()
+    explicit Loopback(bool shared = false)
         : m_root(std::filesystem::temp_directory_path() /
                  std::format("sweeppp-loopback-{}", monotonicNs())) {
         registerReferenceFftBackend();
@@ -75,7 +75,8 @@ public:
                                            ServerConfig{.port = 0,
                                                         .token = "secret",
                                                         .serverName = "bench",
-                                                        .sessionsDir = m_root / "server-sessions"});
+                                                        .sessionsDir = m_root / "server-sessions",
+                                                        .shared = shared});
         REQUIRE(server->start().has_value());
         counterSubscription = output.subscribe(&counter);
     }
@@ -714,4 +715,59 @@ TEST_CASE("only a recording the server listed can be fetched or deleted") {
     auto refused = loop.remote->beginDownload(active, loop.root() / "here");
     REQUIRE_FALSE(refused.has_value());
     CHECK(refused.error().code() == ErrorCode::Unavailable);
+}
+
+TEST_CASE("a second desktop on a shared server watches until it takes control") {
+    Loopback loop(true);
+    loop.connect();
+    REQUIRE(loop.tickUntil([&] { return loop.remote->clients().size() == 1; }));
+    CHECK(loop.remote->shared());
+    CHECK(loop.remote->canControl());
+
+    FrameBus otherOutput;
+    EventBus otherEvents;
+    FrameCounter otherFrames;
+    const auto subscription = otherOutput.subscribe(&otherFrames);
+    auto connected = RemoteInstrument::connect(loop.endpoint(), otherOutput, otherEvents, 3000ms,
+                                               ClientIdentity{.name = "laptop"});
+    REQUIRE(connected.has_value());
+    std::unique_ptr<RemoteInstrument> other = std::move(*connected);
+    other->begin();
+    CHECK_FALSE(other->canControl());
+    CHECK(other->control().held);
+
+    const auto tickBoth = [&](const std::function<bool()>& done) {
+        return loop.tickUntil([&] {
+            other->tick(monotonicNs());
+            return done();
+        });
+    };
+
+    // Refused here, before anything is sent or shown.
+    auto refused = other->start();
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code() == ErrorCode::PermissionDenied);
+    CHECK_FALSE(other->running());
+
+    REQUIRE(loop.remote->start().has_value());
+    CHECK(tickBoth([&] {
+        const std::lock_guard lock(otherFrames.mutex);
+        return otherFrames.passes >= 2;
+    }));
+    CHECK(tickBoth([&] { return other->running() && loop.remote->clients().size() == 2; }));
+
+    REQUIRE(other->takeControl().has_value());
+    CHECK(other->canControl());
+    CHECK(tickBoth([&] { return !loop.remote->canControl(); }));
+    CHECK(loop.remote->control().controller == "laptop");
+    CHECK(std::ranges::any_of(loop.remote->takeNotices(), [](const InstrumentNotice& notice) {
+        return notice.text.find("laptop") != std::string::npos;
+    }));
+
+    other->stop();
+    CHECK(tickBoth([&] { return !loop.local->running(); }));
+    CHECK(tickBoth([&] { return !loop.remote->running(); }));
+
+    other.reset();
+    otherOutput.unsubscribe(subscription);
 }

@@ -85,6 +85,7 @@ std::span<const std::string_view> sectionsTouchedBy(std::string_view name) noexc
     static constexpr std::array kLinkChange{kLink};
     static constexpr std::array kBenchmarkChange{kBenchmark};
     static constexpr std::array kRecordingChange{kRecordings};
+    static constexpr std::array kControlChange{kControl, kClients};
 
     if (name == op::kStart || name == op::kStop || name == op::kRestart ||
         name == op::kSetSweeping) {
@@ -125,7 +126,15 @@ std::span<const std::string_view> sectionsTouchedBy(std::string_view name) noexc
     if (name == op::kStartRecording || name == op::kStopRecording || name == op::kDeleteRecording) {
         return kRecordingChange;
     }
+    if (name == op::kTakeControl || name == op::kReleaseControl) {
+        return kControlChange;
+    }
     return {};
+}
+
+bool viewerMay(std::string_view name) noexcept {
+    return name == op::kSetLinkResolution || name == op::kFetchRecording ||
+           name == op::kTakeControl || name == op::kReleaseControl;
 }
 
 // ---- the handshake -------------------------------------------------------------
@@ -134,22 +143,29 @@ Metadata Hello::toMetadata() const {
     Metadata out;
     out.setInt("protocolVersion", protocolVersion);
     out.setString("software", software);
+    out.setString("kind", kind);
+    out.setString("name", name);
+    out.setString("clientId", clientId);
     return out;
 }
 
 Hello Hello::from(const Metadata& in) {
     return Hello{.protocolVersion = getU32(in, "protocolVersion"),
-                 .software = in.getString("software")};
+                 .software = in.getString("software"),
+                 .kind = in.getString("kind"),
+                 .name = in.getString("name"),
+                 .clientId = in.getString("clientId")};
 }
 
 Metadata Welcome::toMetadata() const {
     Metadata out;
     out.setString("serverName", serverName);
+    out.setBool("shared", shared);
     return out;
 }
 
 Welcome Welcome::from(const Metadata& in) {
-    return Welcome{.serverName = in.getString("serverName")};
+    return Welcome{.serverName = in.getString("serverName"), .shared = in.getBool("shared")};
 }
 
 Metadata Refused::toMetadata() const {
@@ -164,6 +180,62 @@ Refused Refused::from(const Metadata& in) {
 }
 
 // ---- control ---------------------------------------------------------------------
+
+Metadata ControlState::toMetadata() const {
+    Metadata out;
+    out.setBool("shared", shared);
+    out.setBool("you", you);
+    out.setBool("held", held);
+    out.setString("controller", controller);
+    out.setString("controllerKind", controllerKind);
+    return out;
+}
+
+ControlState ControlState::from(const Metadata& in) {
+    return ControlState{.shared = in.getBool("shared"),
+                        .you = in.getBool("you"),
+                        .held = in.getBool("held"),
+                        .controller = in.getString("controller"),
+                        .controllerKind = in.getString("controllerKind")};
+}
+
+Metadata encodeClients(std::span<const ConnectedClient> clients) {
+    std::vector<Value> rows;
+    rows.reserve(clients.size());
+    for (const ConnectedClient& client : clients) {
+        Metadata row;
+        setU64(row, "id", client.id);
+        row.setString("name", client.name);
+        row.setString("kind", client.kind);
+        row.setString("address", client.address);
+        row.setBool("controls", client.controls);
+        row.setBool("you", client.you);
+        rows.push_back(Value::ofHash(std::move(row)));
+    }
+    Metadata out;
+    out.set("list", Value::ofArray(Value::Type::Hash, std::move(rows)));
+    return out;
+}
+
+std::vector<ConnectedClient> decodeClients(const Metadata& in) {
+    std::vector<ConnectedClient> clients;
+    const Value* list = in.find("list");
+    const std::vector<Value>* rows = list != nullptr ? list->asArray() : nullptr;
+    if (rows == nullptr) {
+        return clients;
+    }
+    for (const Value& row : *rows) {
+        if (const Metadata* client = row.asHash()) {
+            clients.push_back(ConnectedClient{.id = getU64(*client, "id"),
+                                              .name = client->getString("name"),
+                                              .kind = client->getString("kind"),
+                                              .address = client->getString("address"),
+                                              .controls = client->getBool("controls"),
+                                              .you = client->getBool("you")});
+        }
+    }
+    return clients;
+}
 
 Metadata Command::toMetadata() const {
     Metadata out;

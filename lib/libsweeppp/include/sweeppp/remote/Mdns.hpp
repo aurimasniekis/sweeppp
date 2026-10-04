@@ -34,7 +34,8 @@ struct Advert {
     std::uint16_t port = 0;
     std::string device; ///< "HackRF One"
     bool authRequired = false;
-    bool busy = false;
+    bool busy = false;   ///< Somebody controls it
+    bool shared = false; ///< Others may watch while somebody does
     std::vector<std::string> ipv4;
     std::vector<std::string> ipv6;
 };
@@ -47,6 +48,7 @@ struct Found {
     std::string device;
     bool authRequired = false;
     bool busy = false;
+    bool shared = false;
     std::uint32_t protocolVersion = 0;
 };
 
@@ -84,7 +86,7 @@ public:
     Advertiser(Advertiser&&) = delete;
     Advertiser& operator=(Advertiser&&) = delete;
 
-    /// Whether a desktop holds the server, as the next answer says.
+    /// Whether a client controls the server, as the next answer says.
     void setBusy(bool busy) noexcept { m_busy.store(busy); }
 
 private:

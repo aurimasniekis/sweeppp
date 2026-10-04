@@ -294,6 +294,17 @@ Result<Options> parseArguments(int argc, char** argv) {
             options.lingerSeconds = *value;
         } else if (argument == "--no-advertise") {
             options.noAdvertise = true;
+        } else if (argument == "--shared") {
+            options.shared = true;
+        } else if (argument == "--max-clients") {
+            auto value = intValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            if (*value < 1 || *value > 64) {
+                return fail<Options>(ErrorCode::InvalidArgument, "--max-clients takes 1 to 64");
+            }
+            options.maxClients = static_cast<std::uint32_t>(*value);
         } else if (argument == "--record") {
             options.record = true;
         } else if (argument == "--new-token") {
@@ -406,6 +417,9 @@ SERVE
                            sessions/; desktops can download what is recorded
   --no-advertise           do not answer desktops looking for servers (mDNS);
                            only a non-loopback listener answers at all
+  --shared                 several clients at once: one controls, the rest
+                           watch, and any can take control
+  --max-clients <n>        with --shared (default: 8)
 
 EXTRACT
   --from <time>            offset from session start

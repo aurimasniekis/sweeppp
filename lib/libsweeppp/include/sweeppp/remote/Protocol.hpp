@@ -38,6 +38,9 @@ inline constexpr std::uint32_t kMinLinkBins = 1024;
 
 inline constexpr std::size_t kMaxQueuedCommands = 256;
 
+/// How many clients a shared server takes at once unless told otherwise.
+inline constexpr std::size_t kDefaultMaxClients = 8;
+
 /// One piece of a recording being downloaded, and how many a client may have
 /// asked for and not yet received.
 inline constexpr std::uint32_t kChunkBytes = 256U * 1024U;
@@ -77,6 +80,12 @@ inline constexpr std::string_view kProtocol = "protocol";
 inline constexpr std::string_view kShutdown = "shutdown";
 } // namespace refusal
 
+/// What kind of program a client is, as its hello says.
+namespace client {
+inline constexpr std::string_view kDesktop = "desktop";
+inline constexpr std::string_view kWeb = "web";
+} // namespace client
+
 /// The commands a client may send, by `op`.
 namespace op {
 inline constexpr std::string_view kStart = "start";
@@ -107,6 +116,10 @@ inline constexpr std::string_view kStopRecording = "stopRecording";
 inline constexpr std::string_view kDeleteRecording = "deleteRecording";
 /// Answered with a `chunk` of the file rather than in a state section.
 inline constexpr std::string_view kFetchRecording = "fetchRecording";
+/// On a shared server: become the one client whose commands change anything,
+/// from whoever has it now. Immediate; the other is told.
+inline constexpr std::string_view kTakeControl = "takeControl";
+inline constexpr std::string_view kReleaseControl = "releaseControl";
 } // namespace op
 
 /// The parts of an instrument's state a `state` message carries, each a hash
@@ -128,6 +141,10 @@ inline constexpr std::string_view kRfPath = "rfPath";
 inline constexpr std::string_view kLink = "link";
 inline constexpr std::string_view kBenchmark = "benchmark";
 inline constexpr std::string_view kRecordings = "recordings";
+/// Who controls the radio, and whether it is this client.
+inline constexpr std::string_view kControl = "control";
+/// Everyone connected, controller and viewers.
+inline constexpr std::string_view kClients = "clients";
 } // namespace section
 
 } // namespace sweeppp::remote

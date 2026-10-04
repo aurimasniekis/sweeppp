@@ -605,6 +605,10 @@ private:
     /// A server's address as an endpoint, with its token if it is saved.
     [[nodiscard]] remote::RemoteEndpoint endpointFor(const std::string& address) const;
 
+    /// This machine as a server is told of it; makes and keeps its id the
+    /// first time.
+    [[nodiscard]] remote::ClientIdentity clientIdentity();
+
     /// Hands what the instrument raised to the toasts and the latched error.
     void deliverNotices();
 

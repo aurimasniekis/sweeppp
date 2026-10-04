@@ -310,7 +310,8 @@ std::vector<std::uint8_t> encodeAnswer(const Advert& advert, std::uint16_t id, b
         for (const std::string& entry :
              {txtEntry("v", std::to_string(kProtocolVersion)), txtEntry("device", advert.device),
               txtEntry("auth", advert.authRequired ? "1" : "0"),
-              txtEntry("busy", advert.busy ? "1" : "0")}) {
+              txtEntry("busy", advert.busy ? "1" : "0"),
+              txtEntry("shared", advert.shared ? "1" : "0")}) {
             out.bytes(std::array{static_cast<std::uint8_t>(entry.size())});
             out.bytes({reinterpret_cast<const std::uint8_t*>(entry.data()), entry.size()});
         }
@@ -415,6 +416,8 @@ Result<std::vector<Found>> parseAnswer(std::span<const std::uint8_t> packet) {
                     server.authRequired = value == "1";
                 } else if (key == "busy") {
                     server.busy = value == "1";
+                } else if (key == "shared") {
+                    server.shared = value == "1";
                 } else if (key == "v") {
                     std::from_chars(value.data(), value.data() + value.size(),
                                     server.protocolVersion);

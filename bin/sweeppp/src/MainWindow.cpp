@@ -537,6 +537,7 @@ void MainWindow::draw() {
     ImGui::BeginDisabled(m_state.deviceStartupRunning());
     drawToolbar();
     ImGui::EndDisabled();
+    drawControlBanner();
 
     // Stacked children have ItemSpacing.y inserted between them, so the body
     // must give that back as well as the status bar's own height. Without it
@@ -837,6 +838,7 @@ void MainWindow::drawToolbar() {
                                  ImGui::GetCursorPosX() + ImGui::GetStyle().ItemSpacing.x));
 
         const bool running = m_state.running();
+        ImGui::BeginDisabled(!m_state.instrument().canControl());
         ImGui::PushStyleColor(ImGuiCol_Button, toImVec4(running ? chrome.stop : chrome.start));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                               toImVec4((running ? chrome.stop : chrome.start).withAlpha(0.85F)));
@@ -854,6 +856,7 @@ void MainWindow::drawToolbar() {
             }
         }
         ImGui::PopStyleColor(2);
+        ImGui::EndDisabled();
     }
 
     ImGui::PopStyleVar(); // framePadding
@@ -1104,6 +1107,39 @@ void MainWindow::drawRxPortChip(const ChromeTheme& chrome) {
     ImGui::SameLine(0.0F, 24.0F);
 }
 
+void MainWindow::drawControlBanner() {
+    const remote::RemoteInstrument* remote = m_state.remoteInstrument();
+    if (remote == nullptr || !remote->linkUp() || remote->canControl()) {
+        return;
+    }
+    const ChromeTheme& chrome = m_state.theme().chrome();
+    const remote::ControlState& control = remote->control();
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, toImVec4(chrome.warning.withAlpha(0.18F)));
+    ImGui::BeginChild("##controlbanner",
+                      ImVec2(0, ImGui::GetFrameHeight() + (bar::padding() * 2.0F)),
+                      ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    ImGui::SetCursorPos(ImVec2(bar::scaled(10.0F), bar::padding()));
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(control.held ? std::format("Watching — {} ({}) has control",
+                                                      control.controller, control.controllerKind)
+                                              .c_str()
+                                        : "Watching — nobody has control");
+    ImGui::SameLine(0.0F, 16.0F);
+    if (ImGui::Button("Take control")) {
+        if (auto taken = m_state.instrument().takeControl(); !taken) {
+            toast(ToastSeverity::Error, taken.error().describe());
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Change the radio from here. %s goes on watching.",
+                          control.held ? control.controller.c_str() : "Whoever has it");
+    }
+    ImGui::EndChild();
+}
+
 void MainWindow::drawLinkChip(const ChromeTheme& chrome) {
     const remote::RemoteInstrument* remote = m_state.remoteInstrument();
     if (remote == nullptr) {
@@ -1126,8 +1162,9 @@ void MainWindow::drawLinkChip(const ChromeTheme& chrome) {
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(behind ? chrome.warning : chrome.text));
-    ImGui::TextUnformatted(std::format("{} · {:.0f} ms · {:.1f} MB/s", remote->serverName(),
-                                       link.roundTripMs, link.bytesPerSec / 1e6)
+    ImGui::TextUnformatted(std::format("{}{} · {:.0f} ms · {:.1f} MB/s", remote->serverName(),
+                                       remote->canControl() ? "" : " · watching", link.roundTripMs,
+                                       link.bytesPerSec / 1e6)
                                .c_str());
     ImGui::PopStyleColor();
 

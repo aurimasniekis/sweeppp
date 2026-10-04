@@ -1070,14 +1070,20 @@ void MainWindow::drawSourceSection() {
     }
 
     ImGui::Spacing();
+    ImGui::BeginDisabled(!m_state.instrument().canControl());
     drawDeviceParameters();
 
     ImGui::Spacing();
     drawDeviceAntennas();
+    ImGui::EndDisabled();
 
     if (remote::RemoteInstrument* server = m_state.remoteInstrument()) {
         ImGui::Spacing();
         drawServerRecordings(*server);
+        if (server->shared()) {
+            ImGui::Spacing();
+            drawServerClients(*server);
+        }
     }
 
     ImGui::Spacing();
@@ -1100,6 +1106,8 @@ void MainWindow::drawServerRecordings(remote::RemoteInstrument& remote) {
         fieldCaption("This server has nowhere to record to.", 0.0F);
         return;
     }
+    // Downloading is anyone's; recording and deleting are the controller's.
+    const bool watching = !remote.canControl();
 
     // Recorded there at a resolution of its own, completed passes only while
     // sweeping: independent of how much the network can carry.
@@ -1118,9 +1126,11 @@ void MainWindow::drawServerRecordings(remote::RemoteInstrument& remote) {
         fieldCaption(
             std::format("{} lines, {}", recordings.lines, toml_util::formatBytes(recordings.bytes)),
             0.0F);
+        ImGui::BeginDisabled(watching);
         if (ImGui::Button("Stop recording", ImVec2(-1, 0))) {
             remote.stopRecording();
         }
+        ImGui::EndDisabled();
     } else {
         m_serverRecordBins =
             std::clamp(m_serverRecordBins, 0, static_cast<int>(kChoices.size()) - 1);
@@ -1136,9 +1146,11 @@ void MainWindow::drawServerRecordings(remote::RemoteInstrument& remote) {
             }
             ImGui::EndCombo();
         }
+        ImGui::BeginDisabled(watching);
         if (ImGui::Button("Record on server", ImVec2(-1, 0))) {
             remote.startRecording(kChoices[static_cast<std::size_t>(m_serverRecordBins)].bins);
         }
+        ImGui::EndDisabled();
     }
 
     const std::vector<remote::RemoteInstrument::Download> downloads = remote.downloads();
@@ -1189,7 +1201,7 @@ void MainWindow::drawServerRecordings(remote::RemoteInstrument& remote) {
         }
 
         ImGui::SameLine();
-        ImGui::BeginDisabled(inFlight);
+        ImGui::BeginDisabled(inFlight || watching);
         if (iconButton("##delete", icon::kDelete, "-", action)) {
             m_recordingToDelete = file.name;
             ImGui::OpenPopup("##deleterecording");
@@ -1233,6 +1245,24 @@ void MainWindow::drawServerRecordings(remote::RemoteInstrument& remote) {
     }
     if (recordings.files.empty()) {
         fieldCaption("Nothing recorded yet.", 0.0F);
+    }
+}
+
+void MainWindow::drawServerClients(const remote::RemoteInstrument& remote) {
+    ImGui::SeparatorText(std::format("Connected to {}", remote.serverName()).c_str());
+    if (beginReadout("##clients")) {
+        for (const remote::ConnectedClient& client : remote.clients()) {
+            const std::string who =
+                std::format("{}{}", client.name, client.you ? " (this desktop)" : "");
+            readoutRow(who.c_str(), client.controls ? "in control" : "watching");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s at %s", client.kind.c_str(), client.address.c_str());
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (remote.canControl()) {
+        fieldCaption("Anyone connected can take control.", 0.0F);
     }
 }
 
@@ -1315,8 +1345,10 @@ std::optional<remote::SavedServer> MainWindow::drawServerList() {
             ImDrawList* draw = ImGui::GetWindowDrawList();
             draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F),
                           packed(m_state.theme().chrome().text), server.found.instance.c_str());
-            const std::string detail =
-                std::format("{}{}", server.found.device, server.found.busy ? "  in use" : "");
+            const char* state = !server.found.busy    ? ""
+                                : server.found.shared ? "  in use, can watch"
+                                                      : "  in use";
+            const std::string detail = std::format("{}{}", server.found.device, state);
             draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F + ImGui::GetTextLineHeight()),
                           packed(m_state.theme().chrome().textDim), detail.c_str());
             ImGui::EndGroup();
@@ -1946,6 +1978,7 @@ void MainWindow::drawDeviceParameters() {
 
 void MainWindow::drawRangeSection() {
     ImGui::Indent(6.0F);
+    ImGui::BeginDisabled(!m_state.instrument().canControl());
 
     SweepPlan plan = m_state.sweepPlan();
     bool changed = false;
@@ -2185,11 +2218,14 @@ void MainWindow::drawRangeSection() {
         }
     }
 
+    ImGui::EndDisabled();
     ImGui::Unindent(6.0F);
 }
 
 void MainWindow::drawAnalysisSection() {
     ImGui::Indent(6.0F);
+    // Everything here but Network resolution, which is this connection's own.
+    ImGui::BeginDisabled(!m_state.instrument().canControl());
 
     SweepPlan plan = m_state.sweepPlan();
     PipelineConfig config = m_state.instrument().pipelineConfig();
@@ -2601,6 +2637,7 @@ void MainWindow::drawAnalysisSection() {
     }
 
     drawCorrectionsBlock(sweeping);
+    ImGui::EndDisabled();
 
     // How finely the spectrum crosses the network, which is a property of the
     // link rather than of the analysis: the server measures at full resolution
@@ -4403,6 +4440,7 @@ void MainWindow::beginEditingAntenna(const Antenna* antenna) {
 
 void MainWindow::drawAntennasSection() {
     const AntennaLibrary& library = m_state.instrument().antennas();
+    ImGui::BeginDisabled(!m_state.instrument().canControl());
 
     fieldCaption("Assign these to connectors in the device panel.", 0.0F);
 
@@ -4477,6 +4515,7 @@ void MainWindow::drawAntennasSection() {
             std::format("Stored in {}", (Paths::instance().antennasDir() / "custom.toml").string()),
             0.0F);
     }
+    ImGui::EndDisabled();
 }
 
 void MainWindow::drawAntennaEditor() {
@@ -4834,7 +4873,8 @@ void MainWindow::drawFftBenchmarkWindow() {
     const std::size_t steps = fftBenchmarkStepCount(config, availableBackends);
 
     ImGui::Spacing();
-    ImGui::BeginDisabled(running);
+    const bool watching = !m_state.instrument().canControl();
+    ImGui::BeginDisabled(running || watching);
     if (ImGui::Button(running ? "Running..." : "Run benchmark")) {
         if (auto started = m_state.instrument().startBenchmark(config); !started) {
             toast(ToastSeverity::Error, started.error().describe());
@@ -4844,9 +4884,11 @@ void MainWindow::drawFftBenchmarkWindow() {
 
     if (running) {
         ImGui::SameLine();
+        ImGui::BeginDisabled(watching);
         if (ImGui::Button("Cancel")) {
             m_state.instrument().cancelBenchmark();
         }
+        ImGui::EndDisabled();
     }
 
     ImGui::SameLine();

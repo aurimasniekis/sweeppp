@@ -24,6 +24,7 @@ mdns::Advert sampleAdvert() {
                         .device = "HackRF One",
                         .authRequired = true,
                         .busy = false,
+                        .shared = true,
                         .ipv4 = {"192.168.1.20", "169.254.3.7"},
                         .ipv6 = {"fe80::1"}};
 }
@@ -42,6 +43,7 @@ TEST_CASE("an answer describes the server it was made for") {
     CHECK(server.device == "HackRF One");
     CHECK(server.authRequired);
     CHECK_FALSE(server.busy);
+    CHECK(server.shared);
     CHECK(server.protocolVersion == kProtocolVersion);
 }
 

@@ -74,9 +74,14 @@ public:
     /// The channel, then the server's welcome or refusal. Nothing, with the
     /// error kept, when the handshake itself fails.
     std::optional<Message> handshake(std::string_view token = {},
-                                     std::uint32_t version = kProtocolVersion) {
+                                     std::uint32_t version = kProtocolVersion,
+                                     std::string name = "test", std::string clientId = {}) {
         auto opened = openClientChannel(std::move(m_raw), token,
-                                        Hello{.protocolVersion = version, .software = "test"},
+                                        Hello{.protocolVersion = version,
+                                              .software = "test",
+                                              .kind = std::string(client::kDesktop),
+                                              .name = std::move(name),
+                                              .clientId = std::move(clientId)},
                                         Clock::now() + 3s);
         if (!opened) {
             m_handshakeError = opened.error();
@@ -199,6 +204,15 @@ public:
     [[nodiscard]] const std::vector<sweeps::SessionEvent>& events() const noexcept {
         return m_events;
     }
+    [[nodiscard]] const std::vector<InstrumentNotice>& notices() const noexcept {
+        return m_notices;
+    }
+    [[nodiscard]] ControlState control() const {
+        return ControlState::from(hashAt(m_sections, section::kControl));
+    }
+    [[nodiscard]] std::vector<ConnectedClient> clients() const {
+        return decodeClients(hashAt(m_sections, section::kClients));
+    }
     [[nodiscard]] std::size_t tiles() const noexcept { return m_tiles; }
     [[nodiscard]] std::size_t telemetry() const noexcept { return m_telemetry; }
 
@@ -250,6 +264,8 @@ private:
             }
         } else if (message.name == msg::kReply) {
             m_replies.push_back(Reply::from(message.body));
+        } else if (message.name == msg::kNotice) {
+            m_notices.push_back(decodeNotice(message.body));
         }
     }
 
@@ -264,6 +280,7 @@ private:
     sweeps::Metadata m_sections;
     std::uint64_t m_ackSeq = 0;
     std::vector<Reply> m_replies;
+    std::vector<InstrumentNotice> m_notices;
     std::vector<sweeps::SessionEvent> m_events;
     std::size_t m_tiles = 0;
     std::size_t m_telemetry = 0;
@@ -683,4 +700,193 @@ TEST_CASE("bench edits made remotely land in the server's own directory") {
         decodeAntennas(hashAt(client.sections(), section::kAntennas));
     CHECK(std::ranges::any_of(library,
                               [](const Antenna& a) { return a.id == "yagi" && !a.builtin; }));
+}
+
+// ---- shared servers -------------------------------------------------------------
+
+namespace {
+
+std::optional<Reply> replyTo(const RawClient& client, std::uint64_t seq) {
+    const auto found = std::ranges::find(client.replies(), seq, &Reply::seq);
+    return found != client.replies().end() ? std::optional<Reply>(*found) : std::nullopt;
+}
+
+} // namespace
+
+TEST_CASE("a shared server lets a second client watch, but not change anything") {
+    ServerFixture fixture(ServerConfig{.shared = true});
+    RawClient desk(fixture.port());
+    auto welcome = desk.handshake({}, kProtocolVersion, "desk");
+    REQUIRE(welcome.has_value());
+    CHECK(Welcome::from(welcome->body).shared);
+    REQUIRE(desk.expect(msg::kState).has_value());
+    CHECK(desk.control().you);
+    CHECK(desk.control().shared);
+
+    RawClient watcher(fixture.port());
+    auto second = watcher.handshake({}, kProtocolVersion, "watcher");
+    REQUIRE(second.has_value());
+    REQUIRE(second->name == msg::kWelcome);
+    REQUIRE(watcher.expect(msg::kState).has_value());
+    CHECK_FALSE(watcher.control().you);
+    CHECK(watcher.control().held);
+    CHECK(watcher.control().controller == "desk");
+    CHECK(watcher.control().controllerKind == client::kDesktop);
+
+    // Its edit is refused, and what it touched is sent back as it was.
+    const SweepPlan before = decodePlan(hashAt(watcher.sections(), section::kPlan));
+    SweepPlan wanted = ServerFixture::quickPlan();
+    wanted.segments = {SweepSegment{.startHz = 400e6, .stopHz = 440e6}};
+    sweeps::Metadata args;
+    args.setHash("plan", encodePlan(wanted));
+    const std::uint64_t refused = watcher.command(op::kApplySweepPlan, args);
+    // What only changes its own connection is still its to ask for.
+    sweeps::Metadata link;
+    link.setInt("maxBins", 4096);
+    const std::uint64_t linkSeq = watcher.command(op::kSetLinkResolution, link);
+    watcher.pump(400ms);
+    REQUIRE(replyTo(watcher, refused).has_value());
+    CHECK_FALSE(replyTo(watcher, refused)->ok);
+    CHECK(replyTo(watcher, refused)->code == ErrorCode::PermissionDenied);
+    CHECK(replyTo(watcher, refused)->message.find("desk") != std::string::npos);
+    CHECK(watcher.ackSeq() >= refused);
+    CHECK(fixture.instrument->sweepPlan().lowestHz() == doctest::Approx(before.lowestHz()));
+    REQUIRE(replyTo(watcher, linkSeq).has_value());
+    CHECK(replyTo(watcher, linkSeq)->ok);
+    CHECK(hashAt(watcher.sections(), section::kLink).getInt("maxBins") == 4096);
+
+    // Both see each other, and both get the radio's frames.
+    const std::vector<ConnectedClient> seen = watcher.clients();
+    REQUIRE(seen.size() == 2);
+    CHECK(std::ranges::any_of(
+        seen, [](const ConnectedClient& c) { return c.name == "desk" && c.controls && !c.you; }));
+    CHECK(std::ranges::any_of(seen, [](const ConnectedClient& c) {
+        return c.name == "watcher" && !c.controls && c.you;
+    }));
+    CHECK(fixture.server->clients().size() == 2);
+    CHECK(fixture.server->clients().front().name == "desk");
+
+    desk.command(op::kStart);
+    CHECK(desk.expect(msg::kFrame).has_value());
+    CHECK(watcher.expect(msg::kFrame).has_value());
+}
+
+TEST_CASE("any client of a shared server can take control from the one that has it") {
+    ServerFixture fixture(ServerConfig{.shared = true});
+    RawClient desk(fixture.port());
+    REQUIRE(desk.handshake({}, kProtocolVersion, "desk").has_value());
+    REQUIRE(ServerFixture::eventually([&] { return fixture.server->clients().size() == 1; }));
+    RawClient phone(fixture.port());
+    REQUIRE(phone.handshake({}, kProtocolVersion, "phone").has_value());
+
+    const std::uint64_t take = phone.command(op::kTakeControl);
+    phone.pump(300ms);
+    desk.pump(300ms);
+    REQUIRE(replyTo(phone, take).has_value());
+    CHECK(replyTo(phone, take)->ok);
+    CHECK(phone.control().you);
+    CHECK_FALSE(desk.control().you);
+    CHECK(desk.control().controller == "phone");
+    const auto told = [](const RawClient& client) {
+        return std::ranges::any_of(client.notices(), [](const InstrumentNotice& notice) {
+            return notice.text.find("phone (desktop) took control") != std::string::npos;
+        });
+    };
+    CHECK(told(desk));
+    CHECK(told(phone));
+
+    // The new controller's edits run; the old one's are refused.
+    sweeps::Metadata gain;
+    gain.setString("key", "gain");
+    gain.set("value", encodeValue(SdrValue{std::int64_t{30}}));
+    const std::uint64_t mine = phone.command(op::kSetParameter, gain);
+    const std::uint64_t theirs = desk.command(op::kStart);
+    phone.pump(300ms);
+    desk.pump(300ms);
+    CHECK(replyTo(phone, mine)->ok);
+    CHECK_FALSE(replyTo(desk, theirs)->ok);
+    CHECK_FALSE(fixture.instrument->running());
+
+    // And back again.
+    desk.command(op::kTakeControl);
+    desk.pump(300ms);
+    phone.pump(300ms);
+    CHECK(desk.control().you);
+    CHECK_FALSE(phone.control().you);
+
+    // Released, nobody has it until somebody takes it.
+    desk.command(op::kReleaseControl);
+    desk.pump(300ms);
+    phone.pump(100ms);
+    CHECK_FALSE(desk.control().held);
+    CHECK_FALSE(phone.control().held);
+    const std::uint64_t orphan = phone.command(op::kStart);
+    phone.pump(300ms);
+    CHECK_FALSE(replyTo(phone, orphan)->ok);
+}
+
+TEST_CASE("when the controller drops, viewers keep watching and control is free") {
+    ServerFixture fixture(ServerConfig{.linger = 300ms, .shared = true});
+    RawClient desk(fixture.port());
+    REQUIRE(desk.handshake({}, kProtocolVersion, "desk").has_value());
+    REQUIRE(ServerFixture::eventually([&] { return fixture.server->clients().size() == 1; }));
+    RawClient watcher(fixture.port());
+    REQUIRE(watcher.handshake({}, kProtocolVersion, "watcher").has_value());
+    desk.command(op::kStart);
+    REQUIRE(desk.expect(msg::kFrame).has_value());
+
+    desk.close();
+    REQUIRE(ServerFixture::eventually([&] { return fixture.server->clients().size() == 1; }));
+    watcher.pump(800ms);
+    CHECK_FALSE(watcher.control().held);
+    CHECK(watcher.clients().size() == 1);
+    // Well past the linger, the radio still runs for the one watching.
+    CHECK(fixture.instrument->running());
+    CHECK(watcher.expect(msg::kFrame).has_value());
+
+    // Once the last one leaves, it stops.
+    watcher.send(msg::kBye, Bye{.reason = "closed"}.toMetadata());
+    CHECK(watcher.closedWithin(5000ms));
+    CHECK(ServerFixture::eventually([&] { return !fixture.instrument->running(); }));
+}
+
+TEST_CASE("a dropped controller's radio waits for that client, not the next") {
+    ServerFixture fixture(ServerConfig{.linger = 10s, .shared = true});
+    {
+        RawClient desk(fixture.port());
+        REQUIRE(desk.handshake({}, kProtocolVersion, "desk", "desk-id").has_value());
+        desk.command(op::kStart);
+        REQUIRE(desk.expect(msg::kFrame).has_value());
+        desk.close();
+    }
+    REQUIRE(ServerFixture::eventually([&] { return !fixture.server->clientConnected(); }));
+    CHECK(fixture.instrument->running());
+
+    RawClient other(fixture.port());
+    REQUIRE(other.handshake({}, kProtocolVersion, "other", "other-id").has_value());
+    REQUIRE(other.expect(msg::kState).has_value());
+    CHECK_FALSE(other.control().you);
+    CHECK_FALSE(other.control().held);
+
+    RawClient back(fixture.port());
+    REQUIRE(back.handshake({}, kProtocolVersion, "desk", "desk-id").has_value());
+    REQUIRE(back.expect(msg::kState).has_value());
+    CHECK(back.control().you);
+    CHECK(hashAt(back.sections(), section::kRun).getBool("running"));
+}
+
+TEST_CASE("a shared server takes as many clients as it is told, and no more") {
+    ServerFixture fixture(ServerConfig{.shared = true, .maxClients = 2});
+    RawClient first(fixture.port());
+    REQUIRE(first.handshake({}, kProtocolVersion, "one")->name == msg::kWelcome);
+    RawClient second(fixture.port());
+    REQUIRE(second.handshake({}, kProtocolVersion, "two")->name == msg::kWelcome);
+    REQUIRE(ServerFixture::eventually([&] { return fixture.server->clients().size() == 2; }));
+
+    RawClient third(fixture.port());
+    auto answer = third.handshake({}, kProtocolVersion, "three");
+    REQUIRE(answer.has_value());
+    CHECK(answer->name == msg::kRefused);
+    CHECK(Refused::from(answer->body).reason == refusal::kLimit);
+    CHECK(fixture.server->clients().size() == 2);
 }

@@ -101,6 +101,9 @@ struct Options {
     bool record = false;
     /// Stay out of desktops' "On this network" lists.
     bool noAdvertise = false;
+    /// Several clients at once, one in control.
+    bool shared = false;
+    std::uint32_t maxClients = 8;
 
     /// extract
     double fromSeconds = 0.0;

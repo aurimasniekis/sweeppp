@@ -7,7 +7,7 @@
 
 namespace sweeppp::remote::io {
 
-Result<sweeps::StreamRecord> readRecord(net::SecureChannel& channel, sweeps::RecordFramer& framer,
+Result<sweeps::StreamRecord> readRecord(net::ByteStream& channel, sweeps::RecordFramer& framer,
                                         Clock::time_point deadline,
                                         const std::atomic<bool>& stopping) {
     std::vector<std::byte> buffer(kReceiveChunk);
@@ -47,8 +47,7 @@ Result<sweeps::StreamRecord> readRecord(net::SecureChannel& channel, sweeps::Rec
     }
 }
 
-Result<sweeps::StreamHeader> readStreamHeader(net::SecureChannel& channel,
-                                              Clock::time_point deadline,
+Result<sweeps::StreamHeader> readStreamHeader(net::ByteStream& channel, Clock::time_point deadline,
                                               const std::atomic<bool>& stopping) {
     std::array<std::uint8_t, sweeps::StreamHeader::kBytes> header{};
     if (auto read = readExactly(channel, header, deadline, stopping); !read) {
@@ -58,7 +57,7 @@ Result<sweeps::StreamHeader> readStreamHeader(net::SecureChannel& channel,
                                             header.size()));
 }
 
-Status sendStreamHeader(net::SecureChannel& channel) {
+Status sendStreamHeader(net::ByteStream& channel) {
     std::vector<std::byte> header;
     sweeps::encodeStreamHeader(header, sweeps::StreamHeader{});
     return channel.sendAll(asBytes(header));

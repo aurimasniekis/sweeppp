@@ -4,6 +4,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string>
 #include <sweeppp/core/Result.hpp>
 
 namespace sweeppp::ui {
@@ -43,6 +44,10 @@ struct AppSettings {
 
     /// Whether to ask GitHub about newer releases at start-up.
     bool checkForUpdates = true;
+
+    /// Random, made the first time this machine connects to a server: how a
+    /// server knows a reconnecting desktop as the one that dropped.
+    std::string clientId;
 
     /// Reads the file, or returns the defaults. A missing file is the normal
     /// first-run case and not an error; a malformed one is logged and then

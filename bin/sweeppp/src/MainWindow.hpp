@@ -95,6 +95,8 @@ private:
 public:
 private:
     void drawToolbar();
+    /// Under the toolbar while watching a radio another client controls.
+    void drawControlBanner();
 
     /// The panel launchers, and the popups they open.
     ///
@@ -366,6 +368,8 @@ private:
 
     /// What the server has recorded and is recording, with downloads.
     void drawServerRecordings(remote::RemoteInstrument& remote);
+    /// Who else is connected to a shared server.
+    void drawServerClients(const remote::RemoteInstrument& remote);
 
     /// Which connector the radio is listening on right now, in the status bar.
     ///

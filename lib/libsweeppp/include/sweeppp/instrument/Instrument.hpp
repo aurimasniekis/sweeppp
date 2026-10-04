@@ -190,6 +190,15 @@ public:
     /// The machine the transforms run on, by name; empty for this one.
     [[nodiscard]] virtual std::string computeHost() const = 0;
 
+    // ---- control ---------------------------------------------------------
+
+    /// Whether this process may change anything: always, for a radio of its
+    /// own; for one shared with others, only while it holds control.
+    [[nodiscard]] virtual bool canControl() const noexcept { return true; }
+
+    /// Takes control from whoever has it.
+    virtual Status takeControl() { return ok(); }
+
     // ---- the radio -------------------------------------------------------
 
     /// Null when no radio is open.

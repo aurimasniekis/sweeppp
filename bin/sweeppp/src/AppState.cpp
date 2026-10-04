@@ -8,6 +8,7 @@
 #include "Icons.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -18,6 +19,8 @@
 #include <sweeppp/core/Clock.hpp>
 #include <sweeppp/core/Log.hpp>
 #include <sweeppp/core/Paths.hpp>
+#include <sweeppp/crypto/Sha256.hpp>
+#include <sweeppp/net/Socket.hpp>
 #include <sweeppp/plugin/PluginHost.hpp>
 
 namespace sweeppp::ui {
@@ -336,10 +339,12 @@ void AppState::startDeviceWorker(DeviceStartup startup) {
     startup.startedNs = monotonicNs();
     startup.opening = std::make_shared<std::atomic_bool>(!startup.enumerate);
 
-    startup.future =
-        std::async(std::launch::async, [this, driver = startup.driver, id = startup.id,
-                                        server = startup.server, reconnect = startup.reconnect,
-                                        enumerate = startup.enumerate, opening = startup.opening] {
+    const remote::ClientIdentity identity =
+        startup.server ? clientIdentity() : remote::ClientIdentity{};
+    startup.future = std::async(
+        std::launch::async, [this, driver = startup.driver, id = startup.id,
+                             server = startup.server, reconnect = startup.reconnect,
+                             enumerate = startup.enumerate, opening = startup.opening, identity] {
             StartupResult result;
 
             // The manager holds its own lock and the registry was filled before
@@ -358,7 +363,7 @@ void AppState::startDeviceWorker(DeviceStartup startup) {
                 // one, and the toolbar waits on it.
                 auto connected = remote::RemoteInstrument::connect(
                     *server, m_displayBus, m_events,
-                    reconnect ? std::chrono::seconds(3) : std::chrono::seconds(5));
+                    reconnect ? std::chrono::seconds(3) : std::chrono::seconds(5), identity);
                 if (connected) {
                     result.remote = std::move(*connected);
                 } else {
@@ -430,7 +435,8 @@ void AppState::pollDeviceStartup() {
         }
         clearError();
 
-        if (m_startupProfile) {
+        // Watching a radio somebody else controls: their setup, not this one.
+        if (m_startupProfile && instrument().canControl()) {
             for (const auto& [key, value] : m_startupProfile->deviceParameters) {
                 if (auto applied = instrument().setDeviceParameter(key, value); !applied) {
                     logWarn("profile", "{}: {}", key, applied.error().describe());
@@ -457,7 +463,7 @@ void AppState::pollDeviceStartup() {
     m_startupProfile.reset();
 
     if (reconnect && result.remote) {
-        if (m_reconnectWasRunning && !instrument().running()) {
+        if (m_reconnectWasRunning && !instrument().running() && instrument().canControl()) {
             (void)start();
         }
         m_reconnectProfile.reset();
@@ -1238,6 +1244,19 @@ void AppState::adoptAppSettings(AppSettings settings) {
 
 Status AppState::saveAppSettings() const {
     return m_appSettings.save(Paths::instance().configDir() / "app.toml");
+}
+
+remote::ClientIdentity AppState::clientIdentity() {
+    if (m_appSettings.clientId.empty()) {
+        std::array<std::uint8_t, 16> random{};
+        if (crypto::fillRandom(random)) {
+            m_appSettings.clientId = crypto::toHex(random);
+            if (auto saved = saveAppSettings(); !saved) {
+                logWarn("app", "{}", saved.error().describe());
+            }
+        }
+    }
+    return remote::ClientIdentity{.name = net::hostName(), .clientId = m_appSettings.clientId};
 }
 
 void AppState::applyThemeToImGui() {

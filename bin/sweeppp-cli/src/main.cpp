@@ -1318,7 +1318,9 @@ int runServe(const Options& options) {
                              .sessionsDir = Paths::instance().sessionsDir(),
                              .recordAtStart = options.record,
                              .advertise = !options.noAdvertise &&
-                                          !net::isLoopbackAddress(options.listenAddress)});
+                                          !net::isLoopbackAddress(options.listenAddress),
+                             .shared = options.shared,
+                             .maxClients = options.maxClients});
     if (auto started = server.start(); !started) {
         std::println(stderr, "sweeppp-cli: {}", started.error().describe());
         return 1;
@@ -1330,16 +1332,31 @@ int runServe(const Options& options) {
 
     std::signal(SIGINT, handleInterrupt);
     std::signal(SIGTERM, handleInterrupt);
-    std::string lastClient;
+    std::vector<remote::ConnectedClient> lastClients;
     while (!g_interrupted.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        const std::string client = server.clientAddress();
-        if (!options.quiet && client != lastClient) {
-            std::println(stderr, "{}",
-                         client.empty() ? std::format("{} disconnected", lastClient)
-                                        : std::format("{} connected", client));
-            lastClient = client;
+        if (options.quiet) {
+            continue;
         }
+        const std::vector<remote::ConnectedClient> clients = server.clients();
+        const auto known = [](const std::vector<remote::ConnectedClient>& list, std::uint64_t id) {
+            return std::ranges::find(list, id, &remote::ConnectedClient::id);
+        };
+        for (const remote::ConnectedClient& client : clients) {
+            const auto before = known(lastClients, client.id);
+            if (before == lastClients.end()) {
+                std::println(stderr, "{} ({}, {}) connected{}", client.name, client.kind,
+                             client.address, client.controls ? ", in control" : "");
+            } else if (client.controls && !before->controls) {
+                std::println(stderr, "{} has control", client.name);
+            }
+        }
+        for (const remote::ConnectedClient& client : lastClients) {
+            if (known(clients, client.id) == clients.end()) {
+                std::println(stderr, "{} disconnected", client.name);
+            }
+        }
+        lastClients = clients;
     }
 
     std::println(stderr, "\nstopping");

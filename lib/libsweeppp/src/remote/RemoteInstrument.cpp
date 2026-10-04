@@ -49,6 +49,10 @@ Error refusalError(const Refused& refused, const std::string& server) {
         return Error{ErrorCode::Unavailable,
                      std::format("{} is in use by another desktop", server)};
     }
+    if (refused.reason == refusal::kLimit) {
+        return Error{ErrorCode::Unavailable,
+                     std::format("{} has as many clients as it takes", server)};
+    }
     if (refused.reason == refusal::kVersion) {
         return Error{ErrorCode::Unsupported, std::format("{}: {}", server, refused.message)};
     }
@@ -370,7 +374,7 @@ RemoteInstrument::~RemoteInstrument() {
 
 Result<std::unique_ptr<RemoteInstrument>>
 RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, EventBus& events,
-                          std::chrono::milliseconds timeout) {
+                          std::chrono::milliseconds timeout, const ClientIdentity& identity) {
     using Instance = std::unique_ptr<RemoteInstrument>;
     const std::string where = endpoint.address();
     const std::atomic<bool> never{false};
@@ -386,7 +390,10 @@ RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, Even
     auto opened =
         openClientChannel(std::move(*socket), endpoint.token,
                           Hello{.protocolVersion = kProtocolVersion,
-                                .software = std::format("{} {}", productName(), versionString())},
+                                .software = std::format("{} {}", productName(), versionString()),
+                                .kind = std::string(client::kDesktop),
+                                .name = identity.name.empty() ? net::hostName() : identity.name,
+                                .clientId = identity.clientId},
                           deadline);
     if (!opened) {
         return fail<Instance>(opened.error().code(), "{}: {}", where, opened.error().message());
@@ -431,6 +438,7 @@ RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, Even
     Instance instrument(new RemoteInstrument(endpoint, output, events));
     const Welcome welcome = Welcome::from(answer->body);
     instrument->m_serverName = welcome.serverName.empty() ? endpoint.host : welcome.serverName;
+    instrument->m_controlState.shared = welcome.shared;
 
     auto state = nextMessage({msg::kState});
     if (!state) {
@@ -519,6 +527,16 @@ void RemoteInstrument::linkLost(std::string reason) {
 
 // ------------------------------------------------------------------ the state
 
+Status RemoteInstrument::mayChange() const {
+    if (canControl()) {
+        return ok();
+    }
+    return fail(ErrorCode::PermissionDenied, "{}; take control to change this",
+                m_controlState.controller.empty()
+                    ? std::string("Nobody has control")
+                    : std::format("{} has control", m_controlState.controller));
+}
+
 std::uint64_t RemoteInstrument::send(std::string_view op, Metadata args) {
     if (!linkUp()) {
         return 0;
@@ -600,6 +618,10 @@ void RemoteInstrument::applySection(std::string_view name, const Metadata& body)
     } else if (name == section::kRfPath) {
         m_rfLegs = decodeRfLegs(hashAt(body, "legs"));
         m_coverage = decodeRanges(hashAt(body, "coverage"));
+    } else if (name == section::kControl) {
+        m_controlState = ControlState::from(body);
+    } else if (name == section::kClients) {
+        m_clients = decodeClients(body);
     }
 }
 
@@ -689,6 +711,9 @@ const TelemetrySnapshot* RemoteInstrument::engineTelemetry() const noexcept {
 }
 
 void RemoteInstrument::resetTelemetry() {
+    if (!canControl()) {
+        return;
+    }
     send(op::kResetTelemetry, {});
 }
 
@@ -712,6 +737,9 @@ std::optional<SdrValue> RemoteInstrument::parameter(std::string_view key) const 
 }
 
 Status RemoteInstrument::setDeviceParameter(const std::string& key, const SdrValue& value) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     if (!m_device) {
         return fail(ErrorCode::NotFound, "no device is open");
     }
@@ -736,6 +764,9 @@ bool RemoteInstrument::parameterNeedsStop(const SdrParameter& parameter) const n
 // ------------------------------------------------------------------ running
 
 Status RemoteInstrument::start() {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     if (!m_device) {
         return fail(ErrorCode::NotFound, "no device is open");
     }
@@ -745,16 +776,25 @@ Status RemoteInstrument::start() {
 }
 
 void RemoteInstrument::stop() {
+    if (!canControl()) {
+        return;
+    }
     m_running = false;
     send(op::kStop, {});
 }
 
 Status RemoteInstrument::restart() {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     send(op::kRestart, {});
     return ok();
 }
 
 Status RemoteInstrument::setSweeping(bool enabled) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     m_sweeping = enabled;
     Metadata args;
     args.setBool("enabled", enabled);
@@ -763,6 +803,9 @@ Status RemoteInstrument::setSweeping(bool enabled) {
 }
 
 Status RemoteInstrument::applySweepPlan(const SweepPlan& plan) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     m_plan = plan;
     Metadata args;
     args.setHash("plan", encodePlan(plan));
@@ -771,6 +814,9 @@ Status RemoteInstrument::applySweepPlan(const SweepPlan& plan) {
 }
 
 Status RemoteInstrument::sweepRange(const SweepPlan& plan) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     m_plan = plan;
     m_sweeping = true;
     Metadata args;
@@ -780,6 +826,9 @@ Status RemoteInstrument::sweepRange(const SweepPlan& plan) {
 }
 
 Status RemoteInstrument::applyPipelineConfig(const PipelineConfig& config) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     m_pipeline = config;
     Metadata args;
     args.setHash("config", encodePipeline(config));
@@ -788,6 +837,9 @@ Status RemoteInstrument::applyPipelineConfig(const PipelineConfig& config) {
 }
 
 Status RemoteInstrument::setFftBackend(std::string_view name) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     const bool known = std::ranges::any_of(m_backends, [name](const FftBackendInfo& backend) {
         return backend.name == name && backend.available;
     });
@@ -804,6 +856,9 @@ Status RemoteInstrument::setFftBackend(std::string_view name) {
 // -------------------------------------------------------------- corrections
 
 void RemoteInstrument::setCorrectionSettings(const CorrectionSettings& settings) {
+    if (!canControl()) {
+        return;
+    }
     m_correctionSettings = settings;
     Metadata args;
     args.setHash("settings", encodeCorrectionSettings(settings));
@@ -811,6 +866,9 @@ void RemoteInstrument::setCorrectionSettings(const CorrectionSettings& settings)
 }
 
 Status RemoteInstrument::startLearning() {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     if (!m_running) {
         return fail(ErrorCode::Unavailable, "start acquisition before learning corrections");
     }
@@ -820,21 +878,33 @@ Status RemoteInstrument::startLearning() {
 }
 
 void RemoteInstrument::cancelLearning() {
+    if (!canControl()) {
+        return;
+    }
     m_learning = false;
     send(op::kCancelLearning, {});
 }
 
 void RemoteInstrument::clearAutoSpurs() {
+    if (!canControl()) {
+        return;
+    }
     send(op::kClearAutoSpurs, {});
 }
 
 void RemoteInstrument::clearCorrections() {
+    if (!canControl()) {
+        return;
+    }
     send(op::kClearCorrections, {});
 }
 
 // ----------------------------------------------------------------- antennas
 
 Status RemoteInstrument::setUserAntennas(std::vector<Antenna> entries) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     std::vector<Antenna> library;
     for (const Antenna& existing : m_antennas.entries()) {
         const bool shadowed = std::ranges::any_of(
@@ -856,6 +926,9 @@ Status RemoteInstrument::setUserAntennas(std::vector<Antenna> entries) {
 }
 
 Status RemoteInstrument::setAntennaAssignments(AntennaAssignments assignments) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     Metadata args;
     args.setHash("assignments", encodeAssignments(assignments));
     m_assignments = std::move(assignments);
@@ -879,16 +952,25 @@ const SwitcherView* RemoteInstrument::switcher(std::string_view key) const {
 // ------------------------------------------------------------- recordings
 
 void RemoteInstrument::startRecording(std::uint32_t maxBins) {
+    if (!canControl()) {
+        return;
+    }
     Metadata args;
     args.setInt("maxBins", maxBins);
     send(op::kStartRecording, std::move(args));
 }
 
 void RemoteInstrument::stopRecording() {
+    if (!canControl()) {
+        return;
+    }
     send(op::kStopRecording, {});
 }
 
 void RemoteInstrument::deleteRecording(const std::string& name) {
+    if (!canControl()) {
+        return;
+    }
     Metadata args;
     args.setString("name", name);
     send(op::kDeleteRecording, std::move(args));
@@ -1046,6 +1128,9 @@ std::vector<RemoteInstrument::Download> RemoteInstrument::downloads() const {
 }
 
 Status RemoteInstrument::startBenchmark(const FftBenchmarkConfig& config) {
+    if (auto allowed = mayChange(); !allowed) {
+        return allowed;
+    }
     if (m_benchmark.running) {
         return fail(ErrorCode::Unavailable, "a benchmark is already running on {}", m_serverName);
     }
@@ -1057,6 +1142,9 @@ Status RemoteInstrument::startBenchmark(const FftBenchmarkConfig& config) {
 }
 
 void RemoteInstrument::cancelBenchmark() {
+    if (!canControl()) {
+        return;
+    }
     send(op::kCancelBenchmark, {});
 }
 
@@ -1068,7 +1156,25 @@ void RemoteInstrument::setLinkResolution(std::uint32_t maxBins) {
 }
 
 void RemoteInstrument::rescanSwitchers() {
+    if (!canControl()) {
+        return;
+    }
     send(op::kRescanSwitchers, {});
+}
+
+Status RemoteInstrument::takeControl() {
+    if (!linkUp()) {
+        return fail(ErrorCode::Unavailable, "not connected to {}", m_serverName);
+    }
+    m_controlState.you = true;
+    m_controlState.held = true;
+    send(op::kTakeControl, {});
+    return ok();
+}
+
+void RemoteInstrument::releaseControl() {
+    m_controlState.you = false;
+    send(op::kReleaseControl, {});
 }
 
 } // namespace sweeppp::remote

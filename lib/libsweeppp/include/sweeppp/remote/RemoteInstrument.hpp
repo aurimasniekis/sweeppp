@@ -36,6 +36,12 @@ struct RemoteEndpoint {
     [[nodiscard]] static Result<RemoteEndpoint> parse(std::string_view address);
 };
 
+/// How a desktop introduces itself to a server.
+struct ClientIdentity {
+    std::string name;     ///< This machine's name when empty
+    std::string clientId; ///< Kept across runs, so a reconnect is known as one
+};
+
 /// An instrument on another machine, served by `sweeppp-cli serve`.
 ///
 /// Everything is read from a copy of the server's state that the link keeps
@@ -54,7 +60,8 @@ public:
     /// until `begin()`.
     [[nodiscard]] static Result<std::unique_ptr<RemoteInstrument>>
     connect(const RemoteEndpoint& endpoint, FrameBus& output, EventBus& events,
-            std::chrono::milliseconds timeout = std::chrono::seconds(5));
+            std::chrono::milliseconds timeout = std::chrono::seconds(5),
+            const ClientIdentity& identity = {});
 
     ~RemoteInstrument() override;
 
@@ -98,6 +105,16 @@ public:
 
     [[nodiscard]] LinkStats link() const noexcept { return m_link; }
 
+    // ---- sharing ------------------------------------------------------------
+
+    /// Whether the server lets others watch alongside.
+    [[nodiscard]] bool shared() const noexcept { return m_controlState.shared; }
+    [[nodiscard]] const ControlState& control() const noexcept { return m_controlState; }
+    /// Everyone connected, this desktop included.
+    [[nodiscard]] const std::vector<ConnectedClient>& clients() const noexcept { return m_clients; }
+    /// Gives control up, leaving the radio as it is for whoever takes it.
+    void releaseControl();
+
     /// How many bins frames are reduced to before they cross the network;
     /// zero for whole. Set per connection, and lost with it.
     void setLinkResolution(std::uint32_t maxBins);
@@ -137,6 +154,9 @@ public:
     [[nodiscard]] std::string profileId() const override { return m_endpoint.address(); }
     [[nodiscard]] std::string displayLabel() const override;
     [[nodiscard]] std::string computeHost() const override { return m_serverName; }
+
+    [[nodiscard]] bool canControl() const noexcept override { return m_controlState.you; }
+    Status takeControl() override;
 
     [[nodiscard]] const DeviceDescriptor* device() const noexcept override;
     [[nodiscard]] std::optional<SdrValue> parameter(std::string_view key) const override;
@@ -219,6 +239,10 @@ private:
 
     RemoteInstrument(RemoteEndpoint endpoint, FrameBus& output, EventBus& events);
 
+    /// Refused with the reason while another client controls the server:
+    /// nothing is changed here or asked of it.
+    [[nodiscard]] Status mayChange() const;
+
     /// Queues `op`, holding the sections it touches until it is answered.
     /// Its sequence number, or zero when there is no link to send it on.
     std::uint64_t send(std::string_view op, sweeps::Metadata args);
@@ -274,6 +298,9 @@ private:
 
     BenchmarkStatus m_benchmark;
     ServerRecordings m_recordings;
+    /// Until the server says otherwise, this desktop is all there is.
+    ControlState m_controlState{.you = true};
+    std::vector<ConnectedClient> m_clients;
     std::vector<std::unique_ptr<DownloadState>> m_downloads;
     /// Which download each outstanding fetch belongs to, so a refused one
     /// fails the right download.
