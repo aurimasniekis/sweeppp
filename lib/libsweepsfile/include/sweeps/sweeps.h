@@ -45,8 +45,9 @@
  *   freed. The one exception is documented at each function that has it.
  *
  *   Owned handles -- `sweeps_reader_t`, `sweeps_writer_t`, `sweeps_tiles_t`,
- *   `sweeps_metadata_t` -- are released by their own `_close`, `_destroy` or
- *   `_free`. All are null-safe.
+ *   `sweeps_metadata_t`, `sweeps_stream_reader_t`, `sweeps_stream_mirror_t` --
+ *   are released by their own `_close`, `_destroy` or `_free`. All are
+ *   null-safe.
  *
  * Computed strings (the JSON renderings) belong to neither: they use the
  * two-call idiom, writing into a caller buffer. No allocator crosses this
@@ -58,9 +59,9 @@
  *
  * A `sweeps_reader_t` may be used concurrently from several threads: every
  * operation on it is read-only, and the library holds no global state. A
- * `sweeps_writer_t` and a `sweeps_metadata_t` are single-threaded, as is the
- * last-error slot -- which is thread-local, so a failure on one thread is
- * never observed on another.
+ * `sweeps_writer_t`, a `sweeps_metadata_t` and the stream handles are
+ * single-threaded, as is the last-error slot -- which is thread-local, so a
+ * failure on one thread is never observed on another.
  *
  * ---------------------------------------------------------------------------
  * Text
@@ -229,9 +230,9 @@ typedef enum sweeps_window_type_t {
     SWEEPS_WINDOW_FORCE_INT32 = 0x7FFFFFFF
 } sweeps_window_type_t;
 
-/** Record kinds in the chunk stream. Reported by nothing here yet; present
- *  because a `.sweeps` reader written against this header needs the vocabulary
- *  the specification uses. */
+/** Record kinds in the chunk stream, as `sweeps_stream_record_t` reports
+ *  them. A stream may carry a type this build does not know, which is why that
+ *  field is a `uint32_t` rather than this enum. */
 typedef enum sweeps_record_type_t {
     SWEEPS_RECORD_MANIFEST = 1,
     SWEEPS_RECORD_SEGMENT_OPEN = 2,
@@ -1206,6 +1207,141 @@ SWEEPS_API sweeps_str_t sweeps_writer_retention_reason(const sweeps_writer_t* wr
  *  need it later. */
 SWEEPS_API sweeps_str_t sweeps_writer_last_segment_reason(const sweeps_writer_t* writer)
     SWEEPS_NOEXCEPT;
+
+/* --------------------------------------------------------------------------
+ * Live streams
+ *
+ * The records of Appendix C as they arrive over a byte stream -- a pipe from
+ * `sweeppp-cli record -o -`, a socket. A reader splits the bytes into records;
+ * a mirror applies them to the current line. Both are single-threaded.
+ *
+ * An encrypted link is out of scope: decrypt it first and feed the plaintext.
+ * -------------------------------------------------------------------------- */
+
+/** Splits a byte stream into records. Owned; destroy it. */
+typedef struct sweeps_stream_reader_t sweeps_stream_reader_t;
+
+/** The current line of a stream, rebuilt from its records. Owned; destroy it. */
+typedef struct sweeps_stream_mirror_t sweeps_stream_mirror_t;
+
+/** One record. An output of `sweeps_stream_reader_next_record`, and an input
+ *  of `sweeps_stream_mirror_apply` -- which also takes one a caller framed
+ *  itself, so long as `struct_size` is set. */
+typedef struct sweeps_stream_record_t {
+    uint32_t struct_size;
+
+    /** A `sweeps_record_type_t`, or a type this build does not know --
+     *  skip those. */
+    uint32_t type;
+
+    /** The record's payload. From a reader, valid until the next call on that
+     *  reader. */
+    sweeps_bytes_t payload;
+} sweeps_stream_record_t;
+
+/** The current line. Output only. */
+typedef struct sweeps_stream_line_t {
+    uint32_t struct_size;
+
+    uint32_t segment_id;
+    uint32_t bin_count;
+
+    /** The sender's line number (the tile's `timeBlock`) of the latest tile
+     *  applied. */
+    uint32_t line;
+
+    /** Tiles applied since the segment opened. */
+    uint64_t tiles_applied;
+
+    double start_hz;
+    double bin_width_hz;
+
+    /** `bin_count` levels in dB, `SWEEPS_UNMEASURED_DB` where no tile has
+     *  carried that bin yet. Valid until the next apply on the mirror. */
+    const float* levels;
+} sweeps_stream_line_t;
+
+/** A reader. `max_payload_bytes` bounds every record before its payload is
+ *  buffered, as a stream must (Appendix C.3); 0 means 16 MiB. */
+SWEEPS_API sweeps_status_t sweeps_stream_reader_create(
+    uint32_t max_payload_bytes, sweeps_stream_reader_t** out) SWEEPS_NOEXCEPT;
+
+/** Null-safe. */
+SWEEPS_API void sweeps_stream_reader_destroy(sweeps_stream_reader_t* reader) SWEEPS_NOEXCEPT;
+
+/** Appends bytes however they happened to arrive; nothing need align with a
+ *  record. The first 16 are the stream header, checked here: a wrong magic, a
+ *  newer major version or an unknown feature bit is `SWEEPS_ERR_PROTOCOL` or
+ *  `SWEEPS_ERR_UNSUPPORTED`.
+ *
+ *  A broken stream stays broken. After a bad header, a checksum mismatch or an
+ *  oversized record, this and `sweeps_stream_reader_next_record` return that
+ *  same error for good: nothing after a bad record can be trusted to start
+ *  one. */
+SWEEPS_API sweeps_status_t sweeps_stream_reader_feed(sweeps_stream_reader_t* reader,
+                                                     const void* data,
+                                                     size_t bytes) SWEEPS_NOEXCEPT;
+
+/** The next complete record, if there is one.
+ *
+ *  `*out_has_record` is 1 with `*out` filled, or 0 when more bytes are needed
+ *  -- which is `SWEEPS_OK`, not an error. A checksum mismatch is
+ *  `SWEEPS_ERR_CORRUPT`, a record over the limit `SWEEPS_ERR_PROTOCOL`. The
+ *  payload is valid until the next call on this reader. */
+SWEEPS_API sweeps_status_t sweeps_stream_reader_next_record(sweeps_stream_reader_t* reader,
+                                                            sweeps_stream_record_t* out,
+                                                            int* out_has_record) SWEEPS_NOEXCEPT;
+
+/** Bytes fed and not yet returned as a record, a partial stream header
+ *  included. Non-zero once the input has ended means it ended mid-record. */
+SWEEPS_API size_t sweeps_stream_reader_buffered(const sweeps_stream_reader_t* reader)
+    SWEEPS_NOEXCEPT;
+
+/** A mirror. A SegmentOpen wider than `max_bins` is refused; 0 means 16 Mi
+ *  bins, whose levels alone are 64 MiB. */
+SWEEPS_API sweeps_status_t
+sweeps_stream_mirror_create(uint32_t max_bins, sweeps_stream_mirror_t** out) SWEEPS_NOEXCEPT;
+
+/** Null-safe. */
+SWEEPS_API void sweeps_stream_mirror_destroy(sweeps_stream_mirror_t* mirror) SWEEPS_NOEXCEPT;
+
+/** Applies a SegmentOpen, Tile or SegmentClose; any other type is ignored and
+ *  `SWEEPS_OK`.
+ *
+ *  A SegmentOpen supersedes the open segment and marks every bin unmeasured. A
+ *  tile for any segment but the open one is ignored. `SWEEPS_ERR_PROTOCOL` for
+ *  a grid over the limit or unusable, or a tile that does not fit it -- outside
+ *  the grid, not level 0, not one line -- and a refused record changes
+ *  nothing. */
+SWEEPS_API sweeps_status_t sweeps_stream_mirror_apply(
+    sweeps_stream_mirror_t* mirror, const sweeps_stream_record_t* record) SWEEPS_NOEXCEPT;
+
+/** The current line. `SWEEPS_ERR_NOT_FOUND` before the first SegmentOpen. */
+SWEEPS_API sweeps_status_t sweeps_stream_mirror_line(const sweeps_stream_mirror_t* mirror,
+                                                     sweeps_stream_line_t* out) SWEEPS_NOEXCEPT;
+
+/** The open segment's grid and acquisition config, as the file reader reports
+ *  a segment. `end_monotonic_ns` and `line_count` are 0: a stream carries them
+ *  only in the SegmentClose. `SWEEPS_ERR_NOT_FOUND` before the first
+ *  SegmentOpen. */
+SWEEPS_API sweeps_status_t sweeps_stream_mirror_segment(const sweeps_stream_mirror_t* mirror,
+                                                        sweeps_segment_t* out) SWEEPS_NOEXCEPT;
+
+/** The open segment's text and gains, as the reader's accessors of the same
+ *  names. `{"", 0}` before the first SegmentOpen. Valid until the next apply on
+ *  the mirror. */
+SWEEPS_API sweeps_str_t sweeps_stream_mirror_segment_reason(const sweeps_stream_mirror_t* mirror)
+    SWEEPS_NOEXCEPT;
+SWEEPS_API sweeps_str_t sweeps_stream_mirror_segment_device_id(const sweeps_stream_mirror_t* mirror)
+    SWEEPS_NOEXCEPT;
+SWEEPS_API sweeps_str_t
+sweeps_stream_mirror_segment_device_label(const sweeps_stream_mirror_t* mirror) SWEEPS_NOEXCEPT;
+
+/** One gain stage; `gain_count` in `sweeps_segment_t` says how many. Either
+ *  out-pointer may be null. */
+SWEEPS_API sweeps_status_t sweeps_stream_mirror_segment_gain(const sweeps_stream_mirror_t* mirror,
+                                                             size_t index, sweeps_str_t* out_name,
+                                                             double* out_value) SWEEPS_NOEXCEPT;
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -23,13 +23,18 @@ find_package(sweepsfile REQUIRED)
 
 add_executable(sweeps-consumer-c main.c)
 
-set_target_properties(sweeps-consumer-c PROPERTIES
-    C_STANDARD 99
-    C_STANDARD_REQUIRED ON
-    C_EXTENSIONS OFF)
+# A live-stream reader: `sweeppp-cli record -o - | sweeps-stream-c`.
+add_executable(sweeps-stream-c stream.c)
 
-target_link_libraries(sweeps-consumer-c PRIVATE sweeps::sweepsfile)
+foreach(target sweeps-consumer-c sweeps-stream-c)
+    set_target_properties(${target} PROPERTIES
+        C_STANDARD 99
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF)
 
-if(NOT MSVC)
-    target_compile_options(sweeps-consumer-c PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+    target_link_libraries(${target} PRIVATE sweeps::sweepsfile)
+
+    if(NOT MSVC)
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endforeach()

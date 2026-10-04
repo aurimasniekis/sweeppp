@@ -435,6 +435,15 @@ jobs:
 
       # --- Common from here on ---
 
+      # The browser UI `serve --web` carries is built with pnpm from web/'s
+      # lockfile, and compiled into sweeppp-cli.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
       # FetchContent's downloads, cached per platform. Cached in place rather
       # than through FETCHCONTENT_BASE_DIR: the default is one tree per build
       # directory, and two builds sharing one deps tree is the known failure.
@@ -543,12 +552,12 @@ jobs:
           # produces.
           mkdir -p "$stage/plugins" "$stage/resources/fonts" pkg/artifacts
 
-          binaries="sweeppp sweeppp-cli sweeppp-server sweeps"
+          binaries="sweeppp sweeppp-cli sweeps"
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             # The GUI is an .app here rather than a bare executable, named
             # after the product: "Sweep++.app", or "Sweep++ Nightly.app".
             cp -R "build/release/dist/$PRODUCT_NAME.app" "$stage/"
-            binaries="sweeppp-cli sweeppp-server sweeps"
+            binaries="sweeppp-cli sweeps"
           fi
           for binary in $binaries; do
             cp "build/release/dist/${binary}${exe}" "$stage/"
@@ -734,7 +743,6 @@ jobs:
 
           install -m755 build/release/dist/sweeppp "$root/usr/bin/$app"
           install -m755 build/release/dist/sweeppp-cli "$root/usr/bin/$app-cli"
-          install -m755 build/release/dist/sweeppp-server "$root/usr/bin/$app-server"
           install -m755 build/release/dist/sweeps "$root/usr/bin/sweeps$suffix"
           # 644: a shared object is not an executable, and lintian says so.
           install -m644 build/release/dist/plugins/sweeppp-plugin-*.so \

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "sweeppp/core/HostStats.hpp"
 #include "sweeppp/core/Result.hpp"
 #include "sweeppp/core/Telemetry.hpp"
 #include "sweeppp/instrument/Instrument.hpp"
@@ -10,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -65,6 +67,9 @@ struct Hello {
 struct Welcome {
     std::string serverName; ///< The server's host name, for "HackRF One on pi"
     bool shared = false;    ///< Whether other clients may watch alongside
+    /// The server's monotonic clock as it sent this: a first guess at the
+    /// offset, before any ping, for frames it replays straight away.
+    std::uint64_t serverNs = 0;
 
     [[nodiscard]] sweeps::Metadata toMetadata() const;
     [[nodiscard]] static Welcome from(const sweeps::Metadata& in);
@@ -148,6 +153,7 @@ struct FrameCommit {
     bool passComplete = false;
     std::uint32_t averageCount = 1;
     float clippedFraction = 0.0F;
+    bool replayed = false; ///< Kept while this client was away; see SpectrumFrame
 
     [[nodiscard]] sweeps::Metadata toMetadata() const;
     [[nodiscard]] static FrameCommit from(const sweeps::Metadata& in);
@@ -217,7 +223,8 @@ struct TelemetryReport {
     StreamStats stream;
     ProcessStats process;
     std::vector<SdrHealthReading> health;
-    LinkStats link; ///< The server's half
+    LinkStats link;                ///< The server's half
+    std::optional<HostStats> host; ///< The machine the server runs on
 };
 
 void appendTelemetry(std::vector<std::byte>& out, const TelemetryReport& report,

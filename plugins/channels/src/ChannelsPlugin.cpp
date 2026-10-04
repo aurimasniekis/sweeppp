@@ -88,6 +88,14 @@ std::string qualify(std::string_view setId, std::string_view groupId) {
     return std::format("{}/{}", setId, groupId);
 }
 
+std::string spanText(double lowHz, double highHz) {
+    if (lowHz == highHz) {
+        return toml_util::formatFrequencyShort(lowHz);
+    }
+    return std::format("{} – {}", toml_util::formatFrequencyShort(lowHz),
+                       toml_util::formatFrequencyShort(highHz));
+}
+
 /// One loaded file, with everything the tree and the queries read per frame
 /// worked out once at load rather than per group per frame.
 struct LoadedSet {
@@ -163,6 +171,11 @@ public:
     /// agreeing with the plot rather than holding a second opinion.
     [[nodiscard]] bool hide(const sweeppp_contribution_t& which);
 
+    /// Files, their groups and the channels in them: the tree the popover
+    /// draws and a host without one draws for itself.
+    [[nodiscard]] const std::vector<plugin::TreeRow>& treeRows();
+    [[nodiscard]] bool toggleTreeRow(std::string_view key);
+
 #if defined(SWEEPPP_PLUGIN_HAS_UI)
     // ---- ui --------------------------------------------------------------
 
@@ -226,9 +239,6 @@ private:
     /// Which sets, groups and entries are ticked. Inside the button's own
     /// popover, which is the only place it is drawn.
     void drawTree();
-    void drawGroupRow(LoadedSet& loaded, std::size_t index, std::span<const std::uint8_t> allOn,
-                      std::span<const std::uint8_t> anyOn);
-    void drawEntryRows(LoadedSet& loaded, std::size_t index);
     void drawEditorTable();
     void drawEditorForm();
     void addFromMarker(std::string_view label);
@@ -245,6 +255,17 @@ private:
     /// in a later version of a data file is on rather than hiding until
     /// someone finds the file.
     std::set<std::string, std::less<>> m_disabled;
+
+    /// What one tree row stands for: a whole file, a group, or one channel.
+    struct RowTarget {
+        enum class Kind : std::uint8_t { Set, Group, Entry } kind = Kind::Set;
+        std::size_t set = 0;
+        std::size_t index = kNoParent;
+    };
+
+    /// The rows `treeRows` last built, and what each stands for.
+    std::vector<plugin::TreeRow> m_rows;
+    std::vector<RowTarget> m_rowTargets;
 
     /// Where each marker was when it last moved, by label. Filled from
     /// `SWEEPPP_EVENT_MARKER`, which the host publishes on the UI thread once
@@ -762,6 +783,148 @@ bool ChannelsPlugin::hide(const sweeppp_contribution_t& which) {
     return false;
 }
 
+const std::vector<plugin::TreeRow>& ChannelsPlugin::treeRows() {
+    m_rows.clear();
+    m_rowTargets.clear();
+
+    for (std::size_t s = 0; s < m_sets.size(); ++s) {
+        const LoadedSet& loaded = m_sets[s];
+        const std::vector<ChannelGroup>& groups = loaded.set.groups();
+        const std::string_view setId = loaded.set.id();
+
+        // Tri-state over the whole tree, entries included: a group whose
+        // channels have been unticked one at a time has to read as "some", or
+        // the tick is describing the group's own flag rather than what is
+        // actually on screen.
+        const std::size_t count = groups.size();
+        std::vector<std::uint8_t> anyOn(count, 0);
+        std::vector<std::uint8_t> allOn(count, 1);
+        std::vector<std::uint8_t> hasEntries(count, 0);
+        for (std::size_t i = 0; i < loaded.set.entries().size(); ++i) {
+            const std::size_t group = loaded.set.entries()[i].group;
+            hasEntries[group] = 1;
+            if (loaded.entryOn[i] != 0) {
+                anyOn[group] = 1;
+            } else {
+                allOn[group] = 0;
+            }
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            // A group with nothing under it at all answers for itself.
+            if (hasEntries[i] == 0 && loaded.children[i].empty()) {
+                anyOn[i] = loaded.on[i];
+                allOn[i] = loaded.on[i];
+            }
+        }
+        for (std::size_t i = count; i-- > 0;) {
+            const std::size_t parent = groups[i].parent;
+            if (parent == kNoParent) {
+                continue;
+            }
+            anyOn[parent] = static_cast<std::uint8_t>(anyOn[parent] != 0 || anyOn[i] != 0);
+            allOn[parent] = static_cast<std::uint8_t>(allOn[parent] != 0 && allOn[i] != 0);
+        }
+
+        // The file itself is a row with a tick of its own, so switching a
+        // whole family off is one click rather than one per root -- and,
+        // because it only sets the file's own flag, switching it back on
+        // restores the selection inside rather than everything.
+        bool setAny = false;
+        bool setAll = !loaded.roots.empty();
+        for (const std::size_t root : loaded.roots) {
+            setAny = setAny || anyOn[root] != 0;
+            setAll = setAll && allOn[root] != 0;
+        }
+        m_rows.push_back(plugin::TreeRow{.depth = 0,
+                                         .key = std::string(setId),
+                                         .name = loaded.set.name(),
+                                         .detail = std::format("{}", loaded.set.entries().size()),
+                                         .anyOn = setAny,
+                                         .allOn = setAll,
+                                         .ownOn = !m_disabled.contains(setId)});
+        m_rowTargets.push_back(RowTarget{.kind = RowTarget::Kind::Set, .set = s});
+
+        // A group's child groups, then its own channels, which is the order
+        // the popover has always listed them in.
+        const auto addGroup = [&](const auto& self, std::size_t index,
+                                  std::uint32_t depth) -> void {
+            const ChannelGroup& group = groups[index];
+            const std::string key = qualify(setId, group.id);
+            m_rows.push_back(plugin::TreeRow{
+                .depth = depth,
+                .key = key,
+                .name = group.name,
+                .detail = loaded.counts[index] > 0
+                              ? std::format("{} · {}", loaded.counts[index],
+                                            spanText(loaded.lowHz[index], loaded.highHz[index]))
+                              : std::string{},
+                .description = group.description,
+                .color = {group.color.r, group.color.g, group.color.b, 1.0F},
+                .anyOn = anyOn[index] != 0,
+                .allOn = allOn[index] != 0,
+                .ownOn = !m_disabled.contains(key)});
+            m_rowTargets.push_back(
+                RowTarget{.kind = RowTarget::Kind::Group, .set = s, .index = index});
+
+            for (const std::size_t child : loaded.children[index]) {
+                self(self, child, depth + 1);
+            }
+            for (std::size_t i = 0; i < loaded.set.entries().size(); ++i) {
+                const ChannelEntry& entry = loaded.set.entries()[i];
+                if (entry.group != index) {
+                    continue;
+                }
+                // No third state on a leaf: there is nothing under it to
+                // disagree.
+                const std::string entryKey =
+                    qualify(setId, ChannelSet::entryKey(group.id, entry.name));
+                m_rows.push_back(
+                    plugin::TreeRow{.depth = depth + 1,
+                                    .key = entryKey,
+                                    .name = entry.name,
+                                    .detail = entry.stopHz > entry.startHz
+                                                  ? spanText(entry.startHz, entry.stopHz)
+                                                  : toml_util::formatFrequencyShort(entry.startHz),
+                                    .anyOn = loaded.entryOn[i] != 0,
+                                    .allOn = loaded.entryOn[i] != 0,
+                                    .ownOn = !m_disabled.contains(entryKey)});
+                m_rowTargets.push_back(
+                    RowTarget{.kind = RowTarget::Kind::Entry, .set = s, .index = i});
+            }
+        };
+        for (const std::size_t root : loaded.roots) {
+            addGroup(addGroup, root, 1);
+        }
+    }
+    return m_rows;
+}
+
+bool ChannelsPlugin::toggleTreeRow(std::string_view key) {
+    (void)treeRows();
+    const auto found = std::ranges::find(m_rows, key, &plugin::TreeRow::key);
+    if (found == m_rows.end()) {
+        return false;
+    }
+    const RowTarget target = m_rowTargets[static_cast<std::size_t>(found - m_rows.begin())];
+
+    switch (plugin::tickAction(*found)) {
+    case plugin::TickAction::Hide:
+        setKey(std::string(key), false);
+        break;
+    case plugin::TickAction::Unhide:
+        setKey(std::string(key), true);
+        break;
+    case plugin::TickAction::ShowAll:
+        if (target.kind == RowTarget::Kind::Entry) {
+            enableEntry(m_sets[target.set], target.index);
+        } else {
+            enableSubtree(m_sets[target.set], target.index);
+        }
+        break;
+    }
+    return true;
+}
+
 std::uint32_t ChannelsPlugin::contributionsIn(double fromHz, double toHz,
                                               sweeppp_contribution_t* out,
                                               std::uint32_t capacity) const {
@@ -892,14 +1055,6 @@ sweeppp::Status ChannelsPlugin::saveUserFile() const {
 
 namespace {
 
-std::string spanText(double lowHz, double highHz) {
-    if (lowHz == highHz) {
-        return toml_util::formatFrequencyShort(lowHz);
-    }
-    return std::format("{} – {}", toml_util::formatFrequencyShort(lowHz),
-                       toml_util::formatFrequencyShort(highHz));
-}
-
 const char* kindName(ChannelKind kind) {
     switch (kind) {
     case ChannelKind::Band:
@@ -922,123 +1077,7 @@ void copyInto(std::array<char, N>& buffer, std::string_view text) {
     buffer[taken] = '\0';
 }
 
-using plugin::drawTick;
-using plugin::TickAction;
-
-/// A small filled square in the group's own colour, so a row in the tree and a
-/// flag on the plot read as the same thing without either naming the other.
-void drawSwatch(const Color& color) {
-    const ImVec2 at = ImGui::GetCursorScreenPos();
-    const float size = ImGui::GetTextLineHeight();
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        ImVec2(at.x, at.y + (size * 0.2F)), ImVec2(at.x + (size * 0.5F), at.y + (size * 0.8F)),
-        ImGui::GetColorU32(ImVec4(color.r, color.g, color.b, 1.0F)), 2.0F);
-    ImGui::Dummy(ImVec2((size * 0.5F) + 4.0F, size));
-    ImGui::SameLine();
-}
-
 } // namespace
-
-void ChannelsPlugin::drawGroupRow(LoadedSet& loaded, std::size_t index,
-                                  std::span<const std::uint8_t> allOn,
-                                  std::span<const std::uint8_t> anyOn) {
-    const ChannelGroup& group = loaded.set.groups()[index];
-    const std::string key = qualify(loaded.set.id(), group.id);
-
-    ImGui::PushID(static_cast<int>(index));
-
-    if (const auto action =
-            drawTick(anyOn[index] != 0, allOn[index] != 0, !m_disabled.contains(key))) {
-        switch (*action) {
-        case TickAction::Hide:
-            setKey(key, false);
-            break;
-        case TickAction::Unhide:
-            setKey(key, true);
-            break;
-        case TickAction::ShowAll:
-            enableSubtree(loaded, index);
-            break;
-        }
-    }
-    ImGui::SameLine();
-    drawSwatch(group.color);
-
-    // A group's own channels hang off it as rows of their own, so the finest
-    // thing the operator can reach is one channel rather than the eight it
-    // came with. They are behind the disclosure arrow because three hundred
-    // tick rows is a list nobody scrolls -- the group is the usual unit and
-    // the individual channel is the exception.
-    const bool hasChildren = !loaded.children[index].empty() || loaded.own[index] > 0;
-
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-    if (!hasChildren) {
-        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-    }
-
-    const bool open = ImGui::TreeNodeEx("##node", flags, "%s", group.name.c_str());
-    const bool nodeHovered = ImGui::IsItemHovered();
-
-    if (loaded.counts[index] > 0) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("%zu · %s", loaded.counts[index],
-                            spanText(loaded.lowHz[index], loaded.highHz[index]).c_str());
-    }
-    if (!group.description.empty() && nodeHovered) {
-        ImGui::SetTooltip("%s", group.description.c_str());
-    }
-
-    if (open && hasChildren) {
-        for (const std::size_t child : loaded.children[index]) {
-            drawGroupRow(loaded, child, allOn, anyOn);
-        }
-        drawEntryRows(loaded, index);
-        ImGui::TreePop();
-    }
-
-    ImGui::PopID();
-}
-
-void ChannelsPlugin::drawEntryRows(LoadedSet& loaded, std::size_t index) {
-    const ChannelGroup& group = loaded.set.groups()[index];
-
-    for (std::size_t i = 0; i < loaded.set.entries().size(); ++i) {
-        const ChannelEntry& entry = loaded.set.entries()[i];
-        if (entry.group != index) {
-            continue;
-        }
-
-        ImGui::PushID(static_cast<int>(i) + 100000);
-
-        const std::string key =
-            qualify(loaded.set.id(), ChannelSet::entryKey(group.id, entry.name));
-        const bool own = !m_disabled.contains(key);
-
-        // No third state on a leaf: there is nothing under it to disagree.
-        if (const auto action = drawTick(loaded.entryOn[i] != 0, loaded.entryOn[i] != 0, own)) {
-            switch (*action) {
-            case TickAction::Hide:
-                setKey(key, false);
-                break;
-            case TickAction::Unhide:
-                setKey(key, true);
-                break;
-            case TickAction::ShowAll:
-                enableEntry(loaded, i);
-                break;
-            }
-        }
-        ImGui::SameLine();
-
-        ImGui::TextUnformatted(entry.name.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", entry.stopHz > entry.startHz
-                                      ? spanText(entry.startHz, entry.stopHz).c_str()
-                                      : toml_util::formatFrequencyShort(entry.startHz).c_str());
-
-        ImGui::PopID();
-    }
-}
 
 void ChannelsPlugin::drawToolbar() {
     namespace chrome = plugin::chrome;
@@ -1128,81 +1167,8 @@ void ChannelsPlugin::drawTree() {
     // screen and put its bottom out of reach.
     const float height = ImGui::GetTextLineHeightWithSpacing() * 14.0F;
     if (ImGui::BeginChild("##tree", ImVec2(0.0F, height), ImGuiChildFlags_Borders)) {
-        for (LoadedSet& loaded : m_sets) {
-            // Per set, so two files that both call a branch "analog" cannot
-            // share an ImGui id and fight over which was clicked.
-            ImGui::PushID(loaded.set.id().c_str());
-
-            // Tri-state over the whole tree, entries included: a group whose
-            // channels have been unticked one at a time has to read as "some",
-            // or the tick is describing the group's own flag rather than what
-            // is actually on screen.
-            const std::size_t count = loaded.set.groups().size();
-            std::vector<std::uint8_t> anyOn(count, 0);
-            std::vector<std::uint8_t> allOn(count, 1);
-            std::vector<std::uint8_t> hasEntries(count, 0);
-
-            for (std::size_t i = 0; i < loaded.set.entries().size(); ++i) {
-                const std::size_t group = loaded.set.entries()[i].group;
-                hasEntries[group] = 1;
-                if (loaded.entryOn[i] != 0) {
-                    anyOn[group] = 1;
-                } else {
-                    allOn[group] = 0;
-                }
-            }
-            for (std::size_t i = 0; i < count; ++i) {
-                // A group with nothing under it at all answers for itself.
-                if (hasEntries[i] == 0 && loaded.children[i].empty()) {
-                    anyOn[i] = loaded.on[i];
-                    allOn[i] = loaded.on[i];
-                }
-            }
-            for (std::size_t i = count; i-- > 0;) {
-                const std::size_t parent = loaded.set.groups()[i].parent;
-                if (parent == kNoParent) {
-                    continue;
-                }
-                anyOn[parent] = static_cast<std::uint8_t>(anyOn[parent] != 0 || anyOn[i] != 0);
-                allOn[parent] = static_cast<std::uint8_t>(allOn[parent] != 0 && allOn[i] != 0);
-            }
-
-            // The file itself is a row with a tick of its own, so switching a
-            // whole family off is one click rather than one per root -- and,
-            // because it only sets the file's own flag, switching it back on
-            // restores the selection inside rather than everything.
-            bool setAny = false;
-            bool setAll = !loaded.roots.empty();
-            for (const std::size_t root : loaded.roots) {
-                setAny = setAny || anyOn[root] != 0;
-                setAll = setAll && allOn[root] != 0;
-            }
-
-            if (const auto action =
-                    drawTick(setAny, setAll, !m_disabled.contains(loaded.set.id()))) {
-                switch (*action) {
-                case TickAction::Hide:
-                    setKey(loaded.set.id(), false);
-                    break;
-                case TickAction::Unhide:
-                    setKey(loaded.set.id(), true);
-                    break;
-                case TickAction::ShowAll:
-                    enableSubtree(loaded, kNoParent);
-                    break;
-                }
-            }
-            ImGui::SameLine();
-
-            if (ImGui::TreeNodeEx(
-                    "##set", ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth,
-                    "%s", loaded.set.name().c_str())) {
-                for (const std::size_t root : loaded.roots) {
-                    drawGroupRow(loaded, root, allOn, anyOn);
-                }
-                ImGui::TreePop();
-            }
-            ImGui::PopID();
+        if (const std::optional<std::string> clicked = plugin::drawTreeRows(treeRows())) {
+            (void)toggleTreeRow(*clicked);
         }
     }
     ImGui::EndChild();

@@ -10,6 +10,7 @@
 # is CMake.
 #
 # Expects: SOURCE_DIR BINARY_DIR PREFIX EXECUTABLE GENERATOR BUILD_TYPE
+# Optional: STREAM_EXECUTABLE, run with STREAM_INPUT on stdin
 
 foreach(required SOURCE_DIR BINARY_DIR PREFIX EXECUTABLE GENERATOR)
     if(NOT DEFINED ${required})
@@ -46,27 +47,36 @@ if(NOT result EQUAL 0)
 endif()
 
 # Multi-config generators put it one level down; single-config generators do not.
-set(candidates
-    "${BINARY_DIR}/${EXECUTABLE}"
-    "${BINARY_DIR}/${BUILD_TYPE}/${EXECUTABLE}"
-    "${BINARY_DIR}/${EXECUTABLE}.exe"
-    "${BINARY_DIR}/${BUILD_TYPE}/${EXECUTABLE}.exe")
+function(find_built name out)
+    set(candidates
+        "${BINARY_DIR}/${name}"
+        "${BINARY_DIR}/${BUILD_TYPE}/${name}"
+        "${BINARY_DIR}/${name}.exe"
+        "${BINARY_DIR}/${BUILD_TYPE}/${name}.exe")
+    foreach(candidate ${candidates})
+        if(EXISTS "${candidate}")
+            set(${out} "${candidate}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    message(FATAL_ERROR "built ${name} but could not find it under ${BINARY_DIR}")
+endfunction()
 
-set(program "")
-foreach(candidate ${candidates})
-    if(EXISTS "${candidate}")
-        set(program "${candidate}")
-        break()
-    endif()
-endforeach()
-
-if(NOT program)
-    message(FATAL_ERROR "built ${EXECUTABLE} but could not find it under ${BINARY_DIR}")
-endif()
+find_built("${EXECUTABLE}" program)
 
 # In its own directory: the consumers write and then delete a session file, and
 # two of them sharing a working directory would be racing over the name.
 execute_process(COMMAND "${program}" WORKING_DIRECTORY "${BINARY_DIR}" RESULT_VARIABLE result)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "${EXECUTABLE} ran against the installed package and failed")
+endif()
+
+# Optional: a program that reads a stream on stdin, given one to read.
+if(DEFINED STREAM_EXECUTABLE)
+    find_built("${STREAM_EXECUTABLE}" stream_program)
+    execute_process(COMMAND "${stream_program}" INPUT_FILE "${STREAM_INPUT}"
+        WORKING_DIRECTORY "${BINARY_DIR}" RESULT_VARIABLE result)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "${STREAM_EXECUTABLE} failed on ${STREAM_INPUT}")
+    endif()
 endif()

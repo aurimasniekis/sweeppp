@@ -79,4 +79,55 @@ private:
     Error m_error;
 };
 
+/// A receiver's copy of the current line (Appendix C.4, C.5): the open
+/// segment's grid, and each bin's latest dequantised level.
+///
+/// What marks a line complete is the application's to define, so this keeps
+/// the line and leaves deciding when to look at it to the caller.
+class LineMirror {
+public:
+    /// A grid at this limit already costs 64 MiB of levels.
+    static constexpr std::uint32_t kDefaultMaxBins = 16U * 1024U * 1024U;
+
+    explicit LineMirror(std::uint32_t maxBins = kDefaultMaxBins) noexcept : m_maxBins(maxBins) {}
+
+    /// Applies a SegmentOpen, SegmentClose or Tile; any other record type is
+    /// ignored. ProtocolError for a segment or tile that does not fit: a grid
+    /// wider than `maxBins`, a tile outside the grid, a level of detail or line
+    /// count no stream sends. A tile for a segment other than the open one is
+    /// ignored. A refused record changes nothing.
+    [[nodiscard]] Status apply(const StreamRecord& record);
+    [[nodiscard]] Status apply(std::uint16_t type, const std::byte* payload, std::size_t bytes);
+
+    /// The open segment, or null before the first.
+    [[nodiscard]] const SegmentInfo* segment() const noexcept {
+        return m_open ? &m_segment : nullptr;
+    }
+
+    /// One level per bin of the open segment's grid, `kUnmeasuredDb` where no
+    /// tile has carried it yet. Empty before the first segment.
+    [[nodiscard]] const std::vector<float>& levels() const noexcept { return m_levels; }
+
+    /// The sender's line number (`timeBlock`) of the latest tile applied.
+    [[nodiscard]] std::uint32_t line() const noexcept { return m_line; }
+
+    /// Tiles applied since the open segment opened.
+    [[nodiscard]] std::uint64_t tilesApplied() const noexcept { return m_tilesApplied; }
+
+    [[nodiscard]] std::uint32_t maxBins() const noexcept { return m_maxBins; }
+
+    void reset() noexcept;
+
+private:
+    Status applySegmentOpen(ByteReader& in);
+    Status applyTile(ByteReader& in);
+
+    std::uint32_t m_maxBins;
+    bool m_open = false;
+    SegmentInfo m_segment;
+    std::vector<float> m_levels;
+    std::uint32_t m_line = 0;
+    std::uint64_t m_tilesApplied = 0;
+};
+
 } // namespace sweeps

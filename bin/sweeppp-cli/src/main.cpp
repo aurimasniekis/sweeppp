@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "Options.hpp"
+#include "WebAssets.hpp"
 
 #include <Commands.hpp>
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <print>
 #include <sweeppp/backends/sdr/SyntheticDevice.hpp>
 #include <sweeppp/core/Clock.hpp>
@@ -25,6 +27,7 @@
 #include <sweeppp/correction/Corrections.hpp>
 #include <sweeppp/crypto/Sha256.hpp>
 #include <sweeppp/fft/FftBackendManager.hpp>
+#include <sweeppp/history/EventMapping.hpp>
 #include <sweeppp/history/IFrameSource.hpp>
 #include <sweeppp/history/SessionReader.hpp>
 #include <sweeppp/history/SessionRecorder.hpp>
@@ -35,13 +38,22 @@
 #include <sweeppp/pipeline/FrameBus.hpp>
 #include <sweeppp/pipeline/Pipeline.hpp>
 #include <sweeppp/plugin/PluginHost.hpp>
+#include <sweeppp/remote/FrameCodec.hpp>
 #include <sweeppp/remote/RemoteServer.hpp>
 #include <sweeppp/rf/Antenna.hpp>
 #include <sweeppp/rf/AntennaAssignments.hpp>
 #include <sweeppp/rf/IRfPath.hpp>
 #include <sweeppp/sdr/ISdrDevice.hpp>
 #include <sweeppp/sweep/SweepEngine.hpp>
+#include <sweeppp/web/WebServer.hpp>
+#include <sweeps/Records.hpp>
+#include <sweeps/Stream.hpp>
 #include <thread>
+
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 namespace {
 
@@ -211,6 +223,72 @@ private:
 /// you: a grid with holes has the same total as a solid one covering less
 /// ground, so runs of unmeasured bins are counted separately. Evenly spaced
 /// runs mean steps are being missed on a fixed stride rather than at random.
+/// What `record -o -` writes: the `.sweeps` stream of Appendix C on stdout,
+/// as a server sends it -- a stream header, segments and tiles, a frame
+/// commit after each line, events, and end of stream.
+class StreamWriter final : public IFrameConsumer {
+public:
+    explicit StreamWriter(std::FILE* out) : m_out(out) {
+        std::vector<std::byte> header;
+        sweeps::encodeStreamHeader(header, sweeps::StreamHeader{});
+        write(header);
+    }
+
+    void onFrame(const SpectrumFramePtr& frame) noexcept override {
+        const std::lock_guard lock(m_mutex);
+        m_buffer.clear();
+        m_encoder.encode(*frame, m_buffer, remote::ChangedBins::of(*frame));
+        write(m_buffer);
+        ++m_frames;
+    }
+
+    [[nodiscard]] std::string_view consumerName() const noexcept override { return "stdout"; }
+
+    void event(const session::SessionEvent& event) {
+        const std::lock_guard lock(m_mutex);
+        std::vector<std::byte> payload;
+        session::encodeEvent(payload, event);
+        m_buffer.clear();
+        sweeps::appendRecord(m_buffer, static_cast<std::uint16_t>(sweeps::RecordType::Event),
+                             payload.data(), payload.size());
+        write(m_buffer);
+    }
+
+    void finish() {
+        const std::lock_guard lock(m_mutex);
+        m_buffer.clear();
+        m_encoder.close(monotonicNs(), m_buffer);
+        sweeps::appendRecord(m_buffer, static_cast<std::uint16_t>(sweeps::RecordType::EndOfStream),
+                             nullptr, 0);
+        write(m_buffer);
+    }
+
+    /// False once whatever reads stdout has gone.
+    [[nodiscard]] bool open() const noexcept { return m_open.load(); }
+    [[nodiscard]] std::uint64_t frames() const {
+        const std::lock_guard lock(m_mutex);
+        return m_frames;
+    }
+
+private:
+    void write(const std::vector<std::byte>& bytes) noexcept {
+        if (!m_open.load() || bytes.empty()) {
+            return;
+        }
+        if (std::fwrite(bytes.data(), 1, bytes.size(), m_out) != bytes.size() ||
+            std::fflush(m_out) != 0) {
+            m_open.store(false);
+        }
+    }
+
+    std::FILE* m_out;
+    mutable std::mutex m_mutex;
+    remote::FrameEncoder m_encoder;
+    std::vector<std::byte> m_buffer;
+    std::uint64_t m_frames = 0;
+    std::atomic<bool> m_open{true};
+};
+
 class CoverageProbe final : public IFrameConsumer {
 public:
     void onFrame(const SpectrumFramePtr& frame) noexcept override {
@@ -1052,9 +1130,14 @@ int runRecord(const Options& options) {
     registerBuiltinsAndPlugins();
 
     if (options.outputPath.empty()) {
-        std::println(stderr, "sweeppp-cli: record needs -o <file.sweeps>");
+        std::println(stderr, "sweeppp-cli: record needs -o <file.sweeps>, or -o - for a stream "
+                             "on stdout");
         return 1;
     }
+    const bool toStdout = options.outputPath == "-";
+    // Nothing but the stream may reach stdout, so every line meant for a
+    // person goes to stderr.
+    std::FILE* messages = toStdout ? stderr : stdout;
 
     // Buses and the plugin scope before the radio, because destruction runs in
     // reverse: a device a plugin driver handed out carries a vtable in that
@@ -1073,75 +1156,67 @@ int runRecord(const Options& options) {
         std::println(stderr, "sweeppp-cli: {}", backend.error().describe());
         return 1;
     }
-
-    auto device = SdrDeviceManager::instance().openSpecifier(options.device);
-    if (!device) {
-        std::println(stderr, "sweeppp-cli: {}", device.error().describe());
-        return 1;
-    }
-
-    if (!options.rxPort.empty()) {
-        if (auto selected = (*device)->selectRxPort(options.rxPort); !selected) {
-            std::println(stderr, "sweeppp-cli: {}", selected.error().describe());
-            return 1;
-        }
-    }
-
-    (void)(*device)->setParameter("sample_rate", SdrValue{options.sampleRate});
-    (void)(*device)->setParameter("center_hz", SdrValue{options.centerHz});
-    for (const auto& [key, value] : options.deviceParameters) {
-        const auto parameters = (*device)->parameters();
-        const auto match = std::ranges::find_if(
-            parameters, [&key](const SdrParameter& p) { return p.key == key; });
-        if (match != parameters.end()) {
-            if (auto parsed = parseSdrValue(value, match->type)) {
-                (void)(*device)->setParameter(key, *parsed);
-            }
-        }
-    }
-
     auto window = windowTypeFromString(options.window);
     if (!window) {
         std::println(stderr, "sweeppp-cli: {}", window.error().describe());
         return 1;
     }
 
-    auto writer = session::SessionRecorder::create(
-        options.outputPath, session::RecorderConfig{{.sessionName = "cli-record"}});
-    if (!writer) {
-        std::println(stderr, "sweeppp-cli: {}", writer.error().describe());
+    // --start with --stop means sweep; anything else is a fixed tune.
+    const bool sweeping = options.startHz > 0.0 && options.stopHz > options.startHz;
+    std::unique_ptr<LocalInstrument> instrument =
+        openInstrument(options, frameBus, eventBus, telemetry, **backend, *window, sweeping, false);
+    if (!instrument) {
         return 1;
     }
-    (*writer)->attachEvents(eventBus);
-    frameBus.subscribe(writer->get());
 
-    Pipeline pipeline(frameBus, telemetry, eventBus);
-    if (auto configured =
-            pipeline.configure(**backend, PipelineConfig{.fftSize = options.fftSize,
-                                                         .window = *window,
-                                                         .overlap = options.overlap,
-                                                         .workerCount = options.workerCount,
-                                                         .averageCount = options.averageCount,
-                                                         .targetFrameRate = 30.0});
-        !configured) {
-        std::println(stderr, "sweeppp-cli: {}", configured.error().describe());
-        return 1;
+    std::unique_ptr<session::SessionRecorder> recorder;
+    std::unique_ptr<StreamWriter> stream;
+    std::vector<EventBus::SubscriptionId> streamEvents;
+    FrameBus::SubscriptionId streamFrames = 0;
+    if (toStdout) {
+#if defined(_WIN32)
+        (void)_setmode(_fileno(stdout), _O_BINARY);
+#else
+        // A reader that goes away is a reason to stop, not to be killed.
+        std::signal(SIGPIPE, SIG_IGN);
+#endif
+        stream = std::make_unique<StreamWriter>(stdout);
+        streamFrames = frameBus.subscribe(stream.get());
+        const auto forward = [&]<typename Event>() {
+            return eventBus.subscribe<Event>([&stream](const Event& event) {
+                stream->event(session::toSessionEvent(event, wallClockNs()));
+            });
+        };
+        streamEvents = {
+            forward.operator()<RetuneEvent>(), forward.operator()<ParameterChangedEvent>(),
+            forward.operator()<SweepPassEvent>(), forward.operator()<ThrottleChangedEvent>(),
+            forward.operator()<DeviceErrorEvent>()};
+    } else {
+        auto created = session::SessionRecorder::create(
+            options.outputPath, session::RecorderConfig{{.sessionName = "cli-record"}});
+        if (!created) {
+            std::println(stderr, "sweeppp-cli: {}", created.error().describe());
+            return 1;
+        }
+        recorder = std::move(*created);
+        recorder->attachEvents(eventBus);
+        // A sweep's partial frames are its progress, not its spectrum: a line
+        // a pass, as the server records.
+        recorder->setCompletePassesOnly(sweeping);
+        frameBus.subscribe(recorder.get());
     }
-    pipeline.setTuning(options.centerHz, options.sampleRate, options.sampleRate);
 
     std::signal(SIGINT, handleInterrupt);
     const std::uint64_t startedNs = monotonicNs();
-
-    if (auto started = pipeline.start(**device, StreamConfig{.framesPerBlock = 262'144,
-                                                             .blockCount = 64,
-                                                             .format = (*device)->nativeFormat()});
-        !started) {
+    if (auto started = instrument->start(); !started) {
         std::println(stderr, "sweeppp-cli: {}", started.error().describe());
         return 1;
     }
+    (void)instrument->takeNotices();
 
     if (!options.quiet) {
-        std::println(stderr, "recording to {} for {}", options.outputPath,
+        std::println(stderr, "recording to {} for {}", toStdout ? "stdout" : options.outputPath,
                      formatDuration(options.durationSeconds));
     }
 
@@ -1149,21 +1224,33 @@ int runRecord(const Options& options) {
            nsToSeconds(monotonicNs() - startedNs) < options.durationSeconds) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         telemetry.sample();
-        if ((*writer)->retentionReached()) {
-            std::println(stderr, "sweeppp-cli: {}", (*writer)->retentionReason());
+        service(*instrument, options.quiet);
+        if (recorder && recorder->retentionReached()) {
+            std::println(stderr, "sweeppp-cli: {}", recorder->retentionReason());
+            break;
+        }
+        if (stream && !stream->open()) {
             break;
         }
     }
 
-    pipeline.stop();
-    if (auto closed = (*writer)->close(); !closed) {
+    instrument->stop();
+    if (stream) {
+        for (const EventBus::SubscriptionId id : streamEvents) {
+            eventBus.unsubscribe(id);
+        }
+        frameBus.unsubscribe(streamFrames);
+        stream->finish();
+        std::println(messages, "wrote {} frames to stdout", stream->frames());
+        return 0;
+    }
+    if (auto closed = recorder->close(); !closed) {
         std::println(stderr, "sweeppp-cli: {}", closed.error().describe());
         return 1;
     }
-
-    std::println("wrote {} ({} lines, {} segments, {})", options.outputPath,
-                 (*writer)->linesWritten(), (*writer)->segmentCount(),
-                 toml_util::formatBytes((*writer)->bytesWritten()));
+    std::println(messages, "wrote {} ({} lines, {} segments, {})", options.outputPath,
+                 recorder->linesWritten(), recorder->segmentCount(),
+                 toml_util::formatBytes(recorder->bytesWritten()));
     return 0;
 }
 
@@ -1315,6 +1402,8 @@ int runServe(const Options& options) {
                              .token = *token,
                              .linger = std::chrono::milliseconds(
                                  static_cast<std::int64_t>(options.lingerSeconds * 1000.0)),
+                             .backlog = std::chrono::milliseconds(
+                                 static_cast<std::int64_t>(options.backlogSeconds * 1000.0)),
                              .sessionsDir = Paths::instance().sessionsDir(),
                              .recordAtStart = options.record,
                              .advertise = !options.noAdvertise &&
@@ -1328,6 +1417,28 @@ int runServe(const Options& options) {
 
     std::println("serving {} on {}:{}{}", instrument.displayLabel(), options.listenAddress,
                  server.port(), token->empty() ? " (no token: this machine only)" : "");
+
+    std::unique_ptr<web::WebServer> webServer;
+    if (options.webPort != 0) {
+        if (webAssets().empty() && options.webRoot.empty()) {
+            std::println(stderr, "sweeppp-cli: this build has no browser UI (built with "
+                                 "SWEEPPP_WITH_WEB_UI off); give --web-root to serve one");
+            return 1;
+        }
+        const std::string webListen =
+            options.webListen.empty() ? options.listenAddress : options.webListen;
+        webServer = std::make_unique<web::WebServer>(
+            server, web::WebServerConfig{.listenAddress = webListen,
+                                         .port = options.webPort,
+                                         .token = *token,
+                                         .assets = webAssets(),
+                                         .webRoot = options.webRoot});
+        if (auto started = webServer->start(); !started) {
+            std::println(stderr, "sweeppp-cli: {}", started.error().describe());
+            return 1;
+        }
+        std::println("browser UI on http://{}:{}", webListen, webServer->port());
+    }
     std::fflush(stdout);
 
     std::signal(SIGINT, handleInterrupt);
@@ -1360,6 +1471,9 @@ int runServe(const Options& options) {
     }
 
     std::println(stderr, "\nstopping");
+    if (webServer) {
+        webServer->stop();
+    }
     server.stop();
     return 0;
 }

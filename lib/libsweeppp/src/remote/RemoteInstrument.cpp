@@ -121,8 +121,10 @@ Result<RemoteEndpoint> RemoteEndpoint::parse(std::string_view address) {
 /// owner goes through the inbox; everything the owner sends goes through the
 /// outbox.
 struct RemoteInstrument::Link {
-    Link(net::SecureChannel socket, sweeps::RecordFramer framer, FrameBus& output, EventBus& events)
-        : socket(std::move(socket)), framer(std::move(framer)), output(output), events(events) {}
+    Link(net::SecureChannel socket, sweeps::RecordFramer framer, FrameBus& output, EventBus& events,
+         std::int64_t welcomeOffsetNs, std::uint64_t resumeAfterNs)
+        : socket(std::move(socket)), framer(std::move(framer)), output(output), events(events),
+          welcomeOffsetNs(welcomeOffsetNs), lastReplayNs(resumeAfterNs) {}
 
     void start() {
         reader = std::thread([this] { readLoop(); });
@@ -261,8 +263,10 @@ struct RemoteInstrument::Link {
             if (!frame) {
                 return frame.error().message();
             }
-            const std::uint64_t hostNs = clocks.toClient(commit.hostTimeNs, now);
+            const std::uint64_t hostNs = commit.replayed ? replayedTime(commit.hostTimeNs, now)
+                                                         : clocks.toClient(commit.hostTimeNs, now);
             (*frame)->hostTimeNs = hostNs;
+            (*frame)->replayed = commit.replayed;
             (*frame)->wallTimeNs = wallClockNs() - (now - hostNs);
             output.publish(std::move(*frame));
         } else if (message->name == msg::kPong) {
@@ -279,6 +283,18 @@ struct RemoteInstrument::Link {
             inbox.push_back(std::move(*message));
         }
         return {};
+    }
+
+    /// A frame from before this link existed, on the offset the welcome gave
+    /// -- no ping has answered yet -- no later than now, but always after the
+    /// frame before it: order matters more than a nanosecond either way.
+    std::uint64_t replayedTime(std::uint64_t serverNs, std::uint64_t now) {
+        const auto guess =
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(serverNs) + welcomeOffsetNs);
+        const std::uint64_t mapped = std::max(std::min(guess, now), lastReplayNs + 1);
+        lastReplayNs = mapped;
+        clocks.raiseFloor(mapped + 1);
+        return mapped;
     }
 
     // ---- the writer -------------------------------------------------------------
@@ -348,6 +364,8 @@ struct RemoteInstrument::Link {
     // The reader's alone.
     ClockMap clocks;
     FrameMirror mirror;
+    std::int64_t welcomeOffsetNs = 0;
+    std::uint64_t lastReplayNs = 0;
 
     std::thread reader;
     std::thread writer;
@@ -437,6 +455,10 @@ RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, Even
 
     Instance instrument(new RemoteInstrument(endpoint, output, events));
     const Welcome welcome = Welcome::from(answer->body);
+    const std::int64_t welcomeOffsetNs = welcome.serverNs == 0
+                                             ? 0
+                                             : static_cast<std::int64_t>(monotonicNs()) -
+                                                   static_cast<std::int64_t>(welcome.serverNs);
     instrument->m_serverName = welcome.serverName.empty() ? endpoint.host : welcome.serverName;
     instrument->m_controlState.shared = welcome.shared;
 
@@ -448,7 +470,8 @@ RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, Even
     instrument->applyState(first.ackSeq, first.sections);
 
     instrument->m_linkThreads =
-        std::make_unique<Link>(std::move(channel), std::move(framer), output, events);
+        std::make_unique<Link>(std::move(channel), std::move(framer), output, events,
+                               welcomeOffsetNs, identity.resumeAfterNs);
     if (telemetry) {
         const std::lock_guard lock(instrument->m_linkThreads->inMutex);
         instrument->m_linkThreads->telemetry = std::move(telemetry);
@@ -671,6 +694,7 @@ void RemoteInstrument::tick(std::uint64_t nowNs) {
         m_engineTelemetry.stream = telemetry->stream;
         m_engineTelemetry.process = telemetry->process;
         m_health = std::move(telemetry->health);
+        m_serverHost = std::move(telemetry->host);
         m_link.framesSent = telemetry->link.framesSent;
         m_link.passesCoalesced = telemetry->link.passesCoalesced;
         m_link.partialsCoalesced = telemetry->link.partialsCoalesced;

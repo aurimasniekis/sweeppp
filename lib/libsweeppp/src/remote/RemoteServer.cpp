@@ -9,6 +9,7 @@
 #include "sweeppp/history/EventMapping.hpp"
 #include "sweeppp/history/SessionRecorder.hpp"
 #include "sweeppp/net/Socket.hpp"
+#include "sweeppp/plugin/PluginHost.hpp"
 #include "sweeppp/remote/FrameCodec.hpp"
 #include "sweeppp/remote/Handshake.hpp"
 #include "sweeppp/remote/Mdns.hpp"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <format>
@@ -26,6 +28,7 @@
 #include <mutex>
 #include <optional>
 #include <sweeps/Records.hpp>
+#include <sweeps/SessionReader.hpp>
 #include <sweeps/Stream.hpp>
 #include <thread>
 #include <utility>
@@ -122,6 +125,9 @@ public:
         std::map<std::string, std::vector<std::byte>, std::less<>> sent;
         std::uint64_t lastAck = 0;
         std::uint64_t lastSentAck = 0;
+        /// Recordings this client is reading, by the handle it was given.
+        std::map<std::int64_t, std::unique_ptr<sweeps::SessionReader>> readers;
+        std::int64_t nextReader = 0;
     };
     [[nodiscard]] Ledger& ledger() noexcept { return m_ledger; }
 
@@ -225,6 +231,16 @@ public:
                 }
                 m_partial = frame;
             }
+        }
+        m_wake.notify_all();
+    }
+
+    /// Passes kept while this client was away, sent before anything live.
+    void offerReplay(std::vector<SpectrumFramePtr> frames) {
+        {
+            const std::lock_guard lock(m_mutex);
+            m_replay.insert(m_replay.end(), std::make_move_iterator(frames.begin()),
+                            std::make_move_iterator(frames.end()));
         }
         m_wake.notify_all();
     }
@@ -340,6 +356,7 @@ private:
         std::vector<std::vector<std::byte>> control;
         std::deque<OutgoingEvent> events;
         std::vector<std::vector<std::byte>> bulk;
+        std::vector<SpectrumFramePtr> replay;
         while (true) {
             SpectrumFramePtr pass;
             SpectrumFramePtr partial;
@@ -352,7 +369,7 @@ private:
                 m_wake.wait(lock, [this] {
                     return !m_alive.load() || m_finishing || !m_control.empty() ||
                            !m_events.empty() || m_pass || m_partial || m_closeSegment ||
-                           !m_bulk.empty();
+                           !m_bulk.empty() || !m_replay.empty();
                 });
                 if (!m_alive.load() && !m_finishing) {
                     return;
@@ -360,6 +377,7 @@ private:
                 control.swap(m_control);
                 events.swap(m_events);
                 bulk.swap(m_bulk);
+                replay.swap(m_replay);
                 pass = std::exchange(m_pass, nullptr);
                 partial = std::exchange(m_partial, nullptr);
                 passChanged = std::exchange(m_passChanged, ChangedBins{});
@@ -388,6 +406,10 @@ private:
                 }
                 m_framesSent.fetch_add(1);
             };
+            for (const SpectrumFramePtr& kept : replay) {
+                encode(*kept, ChangedBins::unknown());
+            }
+            replay.clear();
             if (pass) {
                 encode(*pass, passChanged);
             }
@@ -438,6 +460,7 @@ private:
     std::vector<std::vector<std::byte>> m_control;
     std::deque<OutgoingEvent> m_events;
     std::vector<std::vector<std::byte>> m_bulk;
+    std::vector<SpectrumFramePtr> m_replay;
     SpectrumFramePtr m_pass;
     SpectrumFramePtr m_partial;
     ChangedBins m_passChanged;
@@ -471,6 +494,7 @@ struct RemoteServer::Impl {
     public:
         explicit Sink(Impl& owner) : m_owner(owner) {}
         void onFrame(const SpectrumFramePtr& frame) noexcept override {
+            m_owner.backlog.keep(frame);
             const std::lock_guard lock(m_owner.sessionMutex);
             for (const SessionPtr& session : m_owner.sessions) {
                 session->offerFrame(frame);
@@ -487,6 +511,71 @@ struct RemoteServer::Impl {
     struct Handshake {
         std::thread thread;
         std::shared_ptr<std::atomic<bool>> done;
+    };
+
+    /// Completed passes kept for a controller that dropped, newest last,
+    /// bounded by age and by bytes. Filled on the bus thread, emptied on the
+    /// control thread.
+    class Backlog {
+    public:
+        void begin(std::chrono::milliseconds span, std::size_t bytes) {
+            const std::lock_guard lock(m_mutex);
+            m_frames.clear();
+            m_bytes = 0;
+            m_spanNs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(span).count());
+            m_limit = bytes;
+            m_active = m_spanNs > 0 && bytes > 0;
+        }
+
+        void keep(const SpectrumFramePtr& frame) noexcept {
+            if (!frame->passComplete) {
+                return;
+            }
+            const std::lock_guard lock(m_mutex);
+            if (!m_active) {
+                return;
+            }
+            m_frames.push_back(frame);
+            m_bytes += frame->binCount() * sizeof(float);
+            while (!m_frames.empty() &&
+                   (m_bytes > m_limit ||
+                    frame->hostTimeNs - m_frames.front()->hostTimeNs > m_spanNs)) {
+                m_bytes -= m_frames.front()->binCount() * sizeof(float);
+                m_frames.pop_front();
+            }
+        }
+
+        /// What was kept, marked replayed; nothing more is kept after.
+        std::vector<SpectrumFramePtr> take() {
+            const std::lock_guard lock(m_mutex);
+            std::vector<SpectrumFramePtr> out;
+            out.reserve(m_frames.size());
+            for (const SpectrumFramePtr& frame : m_frames) {
+                auto copy = std::make_shared<SpectrumFrame>(*frame);
+                copy->replayed = true;
+                out.push_back(std::move(copy));
+            }
+            m_frames.clear();
+            m_bytes = 0;
+            m_active = false;
+            return out;
+        }
+
+        void drop() {
+            const std::lock_guard lock(m_mutex);
+            m_frames.clear();
+            m_bytes = 0;
+            m_active = false;
+        }
+
+    private:
+        std::mutex m_mutex;
+        std::deque<SpectrumFramePtr> m_frames;
+        std::size_t m_bytes = 0;
+        std::size_t m_limit = 0;
+        std::uint64_t m_spanNs = 0;
+        bool m_active = false;
     };
 
     struct Arrival {
@@ -552,14 +641,72 @@ struct RemoteServer::Impl {
 
     /// A client through its handshake, for the control thread to admit or
     /// turn away.
-    void arrive(std::unique_ptr<net::ByteStream> socket, const Hello& hello) {
+    void arrive(std::unique_ptr<net::ByteStream> socket, const Hello& hello,
+                sweeps::RecordFramer framer = sweeps::RecordFramer(kMaxClientRecordBytes)) {
         {
             const std::lock_guard lock(controlMutex);
-            arrivals.push_back(Arrival{.socket = std::move(socket),
-                                       .framer = sweeps::RecordFramer(kMaxClientRecordBytes),
-                                       .hello = hello});
+            arrivals.push_back(
+                Arrival{.socket = std::move(socket), .framer = std::move(framer), .hello = hello});
         }
         controlWake.notify_all();
+    }
+
+    /// A stream someone else authenticated: stream headers both ways, then
+    /// the client's hello as its first message.
+    void greet(std::unique_ptr<net::ByteStream> stream) {
+        const std::string peer = stream->peerAddress();
+        const auto deadline = Clock::now() + config.handshakeTimeout;
+        if (auto sent = io::sendStreamHeader(*stream); !sent) {
+            return;
+        }
+        if (auto header = io::readStreamHeader(*stream, deadline, stopping); !header) {
+            logInfo("remote", "{}: {}", peer, header.error().describe());
+            return;
+        }
+        sweeps::RecordFramer framer(kMaxClientRecordBytes);
+        auto record = io::readRecord(*stream, framer, deadline, stopping);
+        if (!record) {
+            logInfo("remote", "{}: {}", peer, record.error().describe());
+            return;
+        }
+        auto message = isControl(*record) ? decodeMessage(*record)
+                                          : fail<Message>(ErrorCode::ProtocolError, "no hello");
+        if (!message || message->name != msg::kHello) {
+            const bool otherVersion = !message && message.error().code() == ErrorCode::Unsupported;
+            (void)stream->sendAll(asBytes(messageBytes(
+                msg::kRefused,
+                Refused{
+                    .reason = std::string(otherVersion ? refusal::kVersion : refusal::kProtocol),
+                    .message = otherVersion
+                                   ? std::format("this server speaks protocol {}", kProtocolVersion)
+                                   : std::string("the stream must open with a hello")}
+                    .toMetadata())));
+            stream->shutdown();
+            return;
+        }
+        arrive(std::move(stream), Hello::from(message->body), std::move(framer));
+    }
+
+    void adopt(std::unique_ptr<net::ByteStream> stream) {
+        const std::lock_guard lock(adoptMutex);
+        std::erase_if(greetings, [](Handshake& pending) {
+            if (!pending.done->load()) {
+                return false;
+            }
+            pending.thread.join();
+            return true;
+        });
+        if (stopping.load() || greetings.size() >= kMaxPendingHandshakes) {
+            stream->close();
+            return;
+        }
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        greetings.push_back(
+            Handshake{.thread = std::thread([this, stream = std::move(stream), done]() mutable {
+                          greet(std::move(stream));
+                          done->store(true);
+                      }),
+                      .done = done});
     }
 
     // ---- the handshake ------------------------------------------------------------
@@ -665,8 +812,7 @@ struct RemoteServer::Impl {
                 admit(std::move(arrival));
             }
             if (lingerUntil && Clock::now() >= *lingerUntil) {
-                lingerUntil.reset();
-                lingerClientId.clear();
+                endLinger();
                 if (currentSessions().empty()) {
                     logInfo("remote", "nobody came back; acquisition stopped");
                     idle();
@@ -758,6 +904,10 @@ struct RemoteServer::Impl {
         recorder->setCompletePassesOnly(instrument.sweeping());
         recorderSubscription = output.subscribe(recorder.get());
         recordingName = name;
+        {
+            const std::lock_guard lock(recordingMutex);
+            activeRecording = name;
+        }
         logInfo("remote", "recording to {}", (config.sessionsDir / name).string());
         listRecordings();
         return ok();
@@ -771,6 +921,10 @@ struct RemoteServer::Impl {
         Status closed = recorder->close();
         recorder.reset();
         recordingName.clear();
+        {
+            const std::lock_guard lock(recordingMutex);
+            activeRecording.clear();
+        }
         listRecordings();
         return closed;
     }
@@ -909,19 +1063,22 @@ struct RemoteServer::Impl {
         // that client to come back. A server for one client has nobody else
         // to wait for.
         const bool returning = !lingerClientId.empty() && fresh->clientId() == lingerClientId;
+        std::vector<SpectrumFramePtr> missed;
+        if (returning) {
+            missed = backlog.take();
+        }
         if (returning || !lingerUntil) {
-            lingerUntil.reset();
-            lingerClientId.clear();
+            endLinger();
         }
         if (controllerId.load() == 0 && (!lingerUntil || !config.shared)) {
-            lingerUntil.reset();
-            lingerClientId.clear();
+            endLinger();
             setController(fresh->id());
         }
 
-        fresh->pushControl(
-            messageBytes(msg::kWelcome,
-                         Welcome{.serverName = serverName, .shared = config.shared}.toMetadata()));
+        fresh->pushControl(messageBytes(
+            msg::kWelcome,
+            Welcome{.serverName = serverName, .shared = config.shared, .serverNs = monotonicNs()}
+                .toMetadata()));
         {
             const std::lock_guard lock(sessionMutex);
             sessions.push_back(fresh);
@@ -931,6 +1088,11 @@ struct RemoteServer::Impl {
         sendState(*fresh, currentSessions());
         sendTelemetry(*fresh, telemetryReport());
         stateDue = true;
+        if (!missed.empty()) {
+            logInfo("remote", "{} is back; sending the {} passes it missed", fresh->name(),
+                    missed.size());
+            fresh->offerReplay(std::move(missed));
+        }
 
         const std::weak_ptr<Session> self = fresh;
         fresh->run([this, self](
@@ -985,6 +1147,9 @@ struct RemoteServer::Impl {
             if (!gone->saidGoodbye() && config.linger.count() > 0 && instrument.running()) {
                 lingerUntil = Clock::now() + config.linger;
                 lingerClientId = gone->clientId();
+                if (!lingerClientId.empty()) {
+                    backlog.begin(config.backlog, config.backlogBytes);
+                }
                 logInfo("remote", "{} dropped; the radio keeps running for {:.1f} s", gone->name(),
                         std::chrono::duration<double>(config.linger).count());
             } else {
@@ -1002,10 +1167,16 @@ struct RemoteServer::Impl {
         }
     }
 
-    /// The radio stopped with nobody to watch it.
-    void idle() {
+    /// Nobody is being waited for any more, and nothing kept for them.
+    void endLinger() {
         lingerUntil.reset();
         lingerClientId.clear();
+        backlog.drop();
+    }
+
+    /// The radio stopped with nobody to watch it.
+    void idle() {
+        endLinger();
         instrument.cancelLearning();
         instrument.stop();
         running = false;
@@ -1033,8 +1204,7 @@ struct RemoteServer::Impl {
             return ok();
         }
         setController(from.id());
-        lingerUntil.reset();
-        lingerClientId.clear();
+        endLinger();
         logInfo("remote", "{} took control", from.name());
         notifyAll(InstrumentNotice::Kind::Warning,
                   std::format("{} ({}) took control", from.name(), from.kind()));
@@ -1220,10 +1390,191 @@ struct RemoteServer::Impl {
         if (name == op::kTakeControl) {
             return takeControl(from);
         }
+        if (name == op::kHistoryOpen) {
+            return historyOpen(from, args.getString("name"));
+        }
+        if (name == op::kHistoryQuery) {
+            return historyQuery(from, args, command.seq);
+        }
+        if (name == op::kHistoryClose) {
+            from.ledger().readers.erase(args.getInt("handle"));
+            return ok();
+        }
         if (name == op::kReleaseControl) {
             return releaseControl(from);
         }
+        if (name.starts_with("setContributor") || name == op::kSelectContributorDataset ||
+            name == op::kToggleContributorRow || name == op::kHideContribution) {
+            return runContributor(name, args);
+        }
         return fail(ErrorCode::Unsupported, "this server does not know '{}'", name);
+    }
+
+    /// The server's own plugins, which label what every client is shown.
+    static Status runContributor(std::string_view name, const Metadata& args) {
+        PluginManager& plugins = PluginManager::instance();
+        const std::string id = args.getString("id");
+        if (name == op::kSetContributorShown) {
+            return plugins.setContributorShown(id, args.getBool("shown"));
+        }
+        if (name == op::kSetContributorOrder) {
+            std::vector<std::string> ids;
+            const sweeps::Value* list = args.find("ids");
+            if (const std::vector<sweeps::Value>* items =
+                    list != nullptr ? list->asArray() : nullptr) {
+                for (const sweeps::Value& item : *items) {
+                    if (const std::string* text = item.asStringRef()) {
+                        ids.push_back(*text);
+                    }
+                }
+            }
+            return plugins.setContributorOrder(ids);
+        }
+        if (name == op::kSelectContributorDataset) {
+            const std::int64_t index = args.getInt("index", -1);
+            if (index < 0) {
+                return fail(ErrorCode::OutOfRange, "no dataset {}", index);
+            }
+            return plugins.selectDataset(id, static_cast<std::uint32_t>(index));
+        }
+        if (name == op::kToggleContributorRow) {
+            return plugins.toggleContributorRow(id, args.getString("key"));
+        }
+        if (name == op::kHideContribution) {
+            const Contribution entry{.pluginId = id,
+                                     .name = args.getString("name"),
+                                     .category = args.getString("category"),
+                                     .startHz = args.getFloat("startHz"),
+                                     .stopHz = args.getFloat("stopHz")};
+            if (!plugins.hideContribution(entry)) {
+                return fail(ErrorCode::Unavailable, "'{}' cannot hide '{}'", id, entry.name);
+            }
+            return ok();
+        }
+        return fail(ErrorCode::Unsupported, "this server does not know '{}'", name);
+    }
+
+    // ---- history of recordings ------------------------------------------------------
+
+    /// Opens a recording for this client to read, and tells it what is in it:
+    /// the time span, the frequencies, and each segment's grid.
+    Status historyOpen(Session& from, const std::string& name) {
+        Session::Ledger& ledger = from.ledger();
+        if (ledger.readers.size() >= kMaxHistoryReaders) {
+            return fail(ErrorCode::Unavailable, "{} recordings are open already; close one first",
+                        kMaxHistoryReaders);
+        }
+        auto path = recordingPath(name);
+        if (!path) {
+            return std::unexpected(std::move(path).error());
+        }
+        auto reader = sweeppp::adopt(sweeps::SessionReader::open(*path));
+        if (!reader) {
+            return std::unexpected(std::move(reader).error());
+        }
+        const sweeps::SessionSummary& summary = (*reader)->summary();
+        std::vector<sweeps::Value> segments;
+        for (const sweeps::SegmentInfo& segment : (*reader)->segments()) {
+            Metadata row;
+            row.setInt("id", segment.id);
+            row.setFloat("startHz", segment.grid.startHz);
+            row.setFloat("binWidthHz", segment.grid.binWidthHz);
+            row.setInt("binCount", segment.grid.binCount);
+            row.setInt("startMonotonicNs", static_cast<std::int64_t>(segment.startMonotonicNs));
+            row.setInt("startWallNs", static_cast<std::int64_t>(segment.startWallNs));
+            row.setString("reason", segment.reason);
+            segments.push_back(sweeps::Value::ofHash(std::move(row)));
+        }
+        const std::int64_t handle = ++ledger.nextReader;
+        Metadata body;
+        body.setInt("handle", handle);
+        body.setString("kind", "opened");
+        body.setString("name", name);
+        body.setInt("firstLineNs", static_cast<std::int64_t>(summary.firstLineNs));
+        body.setInt("lastLineNs", static_cast<std::int64_t>(summary.lastLineNs));
+        body.setInt("createdWallNs", static_cast<std::int64_t>(summary.createdWallNs));
+        body.setInt("totalLines", static_cast<std::int64_t>(summary.totalLines));
+        body.setFloat("lowestHz", summary.lowestHz);
+        body.setFloat("highestHz", summary.highestHz);
+        body.set("segments",
+                 sweeps::Value::ofArray(sweeps::Value::Type::Hash, std::move(segments)));
+        from.pushControl(messageBytes(msg::kHistory, body));
+        ledger.readers.emplace(handle, std::move(*reader));
+        return ok();
+    }
+
+    /// A range of an open recording, at the level of detail that fits the
+    /// lines and bins asked for. Sent after the live frames, in pieces of a
+    /// couple of megabytes; the last says so.
+    Status historyQuery(Session& from, const Metadata& args, std::uint64_t seq) {
+        const auto found = from.ledger().readers.find(args.getInt("handle"));
+        if (found == from.ledger().readers.end()) {
+            return fail(ErrorCode::NotFound, "no recording is open as {}", args.getInt("handle"));
+        }
+        const sweeps::SessionReader& reader = *found->second;
+        sweeps::HistoryQuery query;
+        query.fromNs = static_cast<std::uint64_t>(args.getInt("fromNs"));
+        if (const std::int64_t to = args.getInt("toNs"); to > 0) {
+            query.toNs = static_cast<std::uint64_t>(to);
+        }
+        query.fromHz = args.getFloat("fromHz");
+        if (const double to = args.getFloat("toHz"); to > 0.0) {
+            query.toHz = to;
+        }
+        query.maxLines = static_cast<std::uint32_t>(
+            std::clamp<std::int64_t>(args.getInt("lines", 1024), 1, kMaxHistoryLines));
+        query.maxBins = static_cast<std::uint32_t>(
+            std::clamp<std::int64_t>(args.getInt("bins", 2048), 1, kMaxHistoryBins));
+        if (const std::int64_t segment = args.getInt("segmentId", -1); segment >= 0) {
+            query.segmentId = static_cast<std::uint32_t>(segment);
+        }
+        auto tiles = sweeppp::adopt(reader.query(query));
+        if (!tiles) {
+            return std::unexpected(std::move(tiles).error());
+        }
+
+        constexpr std::size_t kPieceBytes = std::size_t{2} * 1024 * 1024;
+        std::vector<std::byte> out;
+        std::vector<sweeps::Value> piece;
+        std::size_t pieceBytes = 0;
+        const auto flush = [&](bool last) {
+            Metadata body;
+            body.setInt("handle", found->first);
+            body.setString("kind", "tiles");
+            body.setInt("query", static_cast<std::int64_t>(seq));
+            body.setBool("last", last);
+            body.set("tiles", sweeps::Value::ofArray(sweeps::Value::Type::Hash, std::move(piece)));
+            appendMessage(out, msg::kHistory, body);
+            piece.clear();
+            pieceBytes = 0;
+        };
+        for (sweeps::HistoryTile& tile : *tiles) {
+            Metadata row;
+            row.setInt("segmentId", tile.segmentId);
+            row.setInt("lod", tile.lod);
+            row.setInt("timeBlock", tile.timeBlock);
+            row.setInt("freqBlock", tile.freqBlock);
+            row.setInt("lines", tile.lines);
+            row.setInt("bins", tile.bins);
+            row.setInt("firstLineNs", static_cast<std::int64_t>(tile.firstLineNs));
+            row.setInt("lastLineNs", static_cast<std::int64_t>(tile.lastLineNs));
+            row.setFloat("startHz", tile.startHz);
+            row.setFloat("binWidthHz", tile.binWidthHz);
+            row.setFloat("originDb", static_cast<double>(tile.originDb));
+            pieceBytes += tile.data.size();
+            std::vector<std::byte> data(tile.data.size());
+            std::memcpy(data.data(), tile.data.data(), tile.data.size());
+            row.setBytes("data", std::move(data));
+            piece.push_back(sweeps::Value::ofHash(std::move(row)));
+            if (pieceBytes >= kPieceBytes) {
+                flush(false);
+            }
+        }
+        flush(true);
+        if (!from.pushBulk(std::move(out))) {
+            return fail(ErrorCode::Unavailable, "too much is waiting to be sent; ask again");
+        }
+        return ok();
     }
 
     // ---- state and telemetry -----------------------------------------------------------
@@ -1311,6 +1662,11 @@ struct RemoteServer::Impl {
 
         put(section::kBenchmark, encodeBenchmarkStatus(instrument.benchmark()));
         put(section::kRecordings, recordingsState().toMetadata());
+
+        Metadata overlays;
+        overlays.setInt("generation", static_cast<std::int64_t>(
+                                          PluginManager::instance().contributionsGeneration()));
+        put(section::kOverlays, std::move(overlays));
     }
 
     /// Every section that differs from what this client last received: the
@@ -1379,6 +1735,14 @@ struct RemoteServer::Impl {
         report.stream = snapshot.stream;
         report.process = snapshot.process;
         report.health = instrument.health();
+
+        // Once a second: a CPU share over a quarter second is mostly noise, and
+        // the disk and the sensors do not move faster than that.
+        if (const auto now = Clock::now(); !host || now - lastHostSample >= 1s) {
+            host = hostSampler.sample(config.sessionsDir);
+            lastHostSample = now;
+        }
+        report.host = host;
         return report;
     }
 
@@ -1390,6 +1754,10 @@ struct RemoteServer::Impl {
     }
 
     // ---- members ------------------------------------------------------------------
+
+    HostSampler hostSampler;
+    std::optional<HostStats> host;
+    Clock::time_point lastHostSample{};
 
     LocalInstrument& instrument;
     FrameBus& output;
@@ -1432,11 +1800,18 @@ struct RemoteServer::Impl {
     std::optional<Clock::time_point> lingerUntil;
     /// Whose radio is being kept running: they get control back.
     std::string lingerClientId;
+    Backlog backlog;
 
     std::unique_ptr<mdns::Advertiser> advertiser;
     std::unique_ptr<session::SessionRecorder> recorder;
     FrameBus::SubscriptionId recorderSubscription = 0;
     std::string recordingName;
+    /// The same, for `recordingFile()` on any thread.
+    mutable std::mutex recordingMutex;
+    std::string activeRecording;
+
+    std::mutex adoptMutex;
+    std::vector<Handshake> greetings;
     std::vector<RecordingFile> recordings;
     Clock::time_point lastListing{};
 };
@@ -1533,6 +1908,13 @@ void RemoteServer::stop() {
     if (impl.listenThread.joinable()) {
         impl.listenThread.join();
     }
+    {
+        const std::lock_guard lock(impl.adoptMutex);
+        for (Impl::Handshake& pending : impl.greetings) {
+            pending.thread.join();
+        }
+        impl.greetings.clear();
+    }
     if (impl.controlThread.joinable()) {
         impl.controlThread.join();
     }
@@ -1554,6 +1936,38 @@ std::uint16_t RemoteServer::port() const noexcept {
 bool RemoteServer::clientConnected() const {
     return std::ranges::any_of(m_impl->currentSessions(),
                                [](const Impl::SessionPtr& session) { return session->alive(); });
+}
+
+void RemoteServer::adopt(std::unique_ptr<net::ByteStream> stream) {
+    if (!m_impl->started) {
+        stream->close();
+        return;
+    }
+    m_impl->adopt(std::move(stream));
+}
+
+Result<std::filesystem::path> RemoteServer::recordingFile(const std::string& name) const {
+    using Path = std::filesystem::path;
+    const Impl& impl = *m_impl;
+    if (impl.config.sessionsDir.empty()) {
+        return fail<Path>(ErrorCode::NotFound, "this server keeps no recordings");
+    }
+    if (name.empty() || name.starts_with('.') || name.find_first_of("/\\") != std::string::npos ||
+        name.find("..") != std::string::npos || !name.ends_with(".sweeps")) {
+        return fail<Path>(ErrorCode::InvalidArgument, "'{}' is not a recording's name", name);
+    }
+    const Path path = impl.config.sessionsDir / name;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        return fail<Path>(ErrorCode::NotFound, "no recording called '{}'", name);
+    }
+    {
+        const std::lock_guard lock(impl.recordingMutex);
+        if (name == impl.activeRecording) {
+            return fail<Path>(ErrorCode::Unavailable, "'{}' is still being recorded", name);
+        }
+    }
+    return path;
 }
 
 std::vector<ConnectedClient> RemoteServer::clients() const {

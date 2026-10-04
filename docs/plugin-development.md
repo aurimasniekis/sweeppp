@@ -219,6 +219,21 @@ the other half of a contributor shipping no UI: report `dataset_count`,
 `select_dataset`, and the combo appears in **Menu → Data contributors**. Zero
 datasets is legal for a contributor with a single fixed one.
 
+### Tick trees
+
+A contributor whose entries are switched on and off one by one reports them as
+rows, so a host without the plugin's own UI — the browser — can draw the tree:
+
+```cpp
+const std::vector<plugin::TreeRow>& treeRows();     // wired only if T defines both
+bool toggleTreeRow(std::string_view key);
+```
+
+Rows come in drawing order, a row's children after it one level deeper.
+`toggleTreeRow` is a click on that row's tick; `plugin::tickAction(row)` says
+what it means. `plugin::drawTreeRows(rows)` draws the same rows in your own
+ImGui popover, so the two cannot drift.
+
 ### Priority
 
 The operator's order lives in `<configDir>/plugins.toml` beside

@@ -330,6 +330,7 @@ public:
         instrument().resetTelemetry();
         m_telemetry.reset();
         m_stats = m_telemetry.snapshot();
+        m_linkHistory = {};
     }
     [[nodiscard]] const TelemetrySnapshot& stats() const noexcept { return m_stats; }
 
@@ -341,6 +342,21 @@ public:
 
     /// Device readings, sampled with the rest of the telemetry.
     [[nodiscard]] const std::vector<HealthTrace>& health() const noexcept { return m_health; }
+
+    /// The server link's rates, sampled with the rest of the telemetry.
+    struct LinkHistory {
+        RollingHistory<Telemetry::kHistoryLength> roundTripMs;
+        RollingHistory<Telemetry::kHistoryLength> bytesPerSec;
+        RollingHistory<Telemetry::kHistoryLength> framesSentPerSec;
+        /// The server machine's own load, as a share of all of it.
+        RollingHistory<Telemetry::kHistoryLength> serverCpuPercent;
+        RollingHistory<Telemetry::kHistoryLength> serverMemoryPercent;
+        RollingHistory<Telemetry::kHistoryLength> serverTemperatureC;
+        std::uint64_t lastFramesSent = 0;
+        std::uint64_t lastSampleNs = 0;
+        float lastFramesSentPerSec = 0.0F;
+    };
+    [[nodiscard]] const LinkHistory& linkHistory() const noexcept { return m_linkHistory; }
     [[nodiscard]] FrameBus& displayBus() noexcept { return m_displayBus; }
     [[nodiscard]] EventBus& events() noexcept { return m_events; }
 
@@ -483,6 +499,8 @@ private:
     std::uint64_t m_browserWantedNs = 0;
     std::optional<Profile> m_reconnectProfile;
     bool m_reconnectWasRunning = false;
+    /// The last frame's time when the link went, for what the server kept.
+    std::uint64_t m_resumeAfterNs = 0;
 
     /// The instrument's start generation as last seen; a new one is a new run.
     std::uint64_t m_startGenerationSeen = 0;
@@ -524,6 +542,7 @@ private:
     ViewSettings m_view;
     TelemetrySnapshot m_stats;
     std::vector<HealthTrace> m_health;
+    LinkHistory m_linkHistory;
     Theme m_theme;
     std::vector<Theme> m_themes;
 
@@ -614,6 +633,7 @@ private:
 
     /// Device readings into their histories, at the telemetry cadence.
     void sampleHealth();
+    void sampleLink();
 
     /// The consumer callback parks the newest frame here and returns; the UI
     /// thread picks it up. Nothing expensive happens on the publishing thread.

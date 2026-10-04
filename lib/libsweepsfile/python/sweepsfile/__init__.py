@@ -51,6 +51,7 @@ from .errors import (
     WrongTypeError,
 )
 from .reader import Reader, open  # noqa: A004 - deliberate, as gzip.open is
+from .stream import StreamLine, StreamMirror, StreamReader, StreamRecord
 from .writer import DEFAULT_MIN_FREE_BYTES, AcquisitionConfig, FrameOutcome, Writer, create
 
 __version__ = "1.0.0"
@@ -61,12 +62,16 @@ __all__ = [
     "create",
     "Reader",
     "Writer",
+    "StreamReader",
+    "StreamMirror",
     # values
     "AcquisitionConfig",
     "Event",
     "FrameOutcome",
     "PluginRecord",
     "Segment",
+    "StreamLine",
+    "StreamRecord",
     "Summary",
     "Tile",
     # enumerations

@@ -28,8 +28,8 @@ lib/libsweeppp/     the core, as a static library. Links nothing GPL; every FFT
                     profile/ ui/
 bin/                sweeppp/         the desktop GUI
                     sweeppp-cli/     headless sweep, record, replay, info, extract,
-                                     and serve
-                    sweeppp-server/  placeholder for a future web interface
+                                     and serve, with the browser UI built in
+web/                the browser UI: React and TypeScript, built with pnpm
 plugins/            bandplan/ channels/ detections/
                     fft-pocketfft/ fft-fftw/ fft-accelerate/
                     sdr-hackrf/ sdr-bladerf/ sdr-rtlsdr/ sdr-fobos/
@@ -65,9 +65,10 @@ toml++ and threads, and no FFT or radio library.
 | `pipeline/`   | Turns IQ blocks into spectrum frames and fans them out to consumers.                                                                                                                         | `Pipeline`, `PipelineConfig`, `FrameBus`, `IFrameConsumer`, `AsyncFrameConsumer`, `SpectrumFrame`                               |
 | `instrument/` | The radio, pipeline and sweep engine driven as one, behind an interface the GUI and the server share. Returns values only, so it can be implemented over a network.                          | `Instrument`, `LocalInstrument`, `DeviceDescriptor`, `InstrumentNotice`                                                         |
 | `history/`    | A thin layer over libsweepsfile: a threaded recorder and replay, and the mapping between bus events and Event records they share with the remote link.                                       | `session::SessionRecorder`, `SessionReplay`, `IFrameSource`, `toSessionEvent`, `publishSessionEvent`                            |
-| `net/`        | Blocking TCP and UDP sockets, POSIX and Winsock; the encrypted channel; the machine's interfaces.                                                                                            | `TcpSocket`, `TcpListener`, `SecureChannel`, `UdpSocket`                                                                        |
-| `crypto/`     | The remote link's Noise handshake and ciphers, SHA-256 and HMAC, and the system random generator.                                                                                            | `NoiseHandshake`, `CipherState`, `Sha256`, `fillRandom`                                                                         |
+| `net/`        | Blocking TCP and UDP sockets, POSIX and Winsock; the byte streams a session runs over (the encrypted channel, a WebSocket); minimal HTTP; the machine's interfaces.                         | `TcpSocket`, `TcpListener`, `ByteStream`, `SecureChannel`, `ws::WebSocketChannel`, `http::Request`, `UdpSocket`                 |
+| `crypto/`     | The remote link's Noise handshake and ciphers, SHA-256 and HMAC, SHA-1 for the WebSocket handshake, and the system random generator.                                                        | `NoiseHandshake`, `CipherState`, `Sha256`, `sha1`, `fillRandom`                                                                 |
 | `remote/`     | The remote instrument protocol, its server and its client.                                                                                                                                   | `RemoteServer`, `RemoteInstrument`, `FrameEncoder`/`FrameMirror`, `ClockMap`, `ServerList`, `Reconnector`, `mdns::Browser`      |
+| `web/`        | The browser UI's server: static files, login, the WebSocket into `RemoteServer`, downloads, and the JSON the page boots from.                                                                 | `WebServer`, `EmbeddedFile`                                                                                                     |
 | `plugin/`     | The plugin host: search path, loading, manifests and dependencies, adapters from facets to host interfaces, events, contributors, UI dispatch. Also the headers plugins are written against. | `PluginManager`, `PluginAbi.h`, `Plugin.hpp`, `PluginSdr.hpp`, `PluginFft.hpp`, `PluginChrome.hpp`                              |
 | `profile/`    | One TOML-backed struct for the whole setup. `settings.toml` and named profiles are the same type.                                                                                            | `Profile`                                                                                                                       |
 | `ui/`         | UI state with no rendering in it.                                                                                                                                                            | `Theme`, `ColorMap`, `TraceStore`, `Marker`/`MarkerPresetStore`, `ToastCenter`, `ViewSettings`                                  |
@@ -198,6 +199,49 @@ A client that drops without saying goodbye leaves the radio running for the
 server's linger time. The desktop keeps a snapshot of its setup and tries
 again on `Reconnector`'s schedule; the next client to arrive takes over the
 running radio.
+
+### Sessions and control
+
+`RemoteServer` keeps a list of sessions, each over a `net::ByteStream`: a
+`SecureChannel` for a desktop, a `ws::WebSocketChannel` for a browser. Each
+has its own mailbox, encoder, link cap, record of what state it was last sent,
+and acknowledgements. The control thread builds the state sections once a
+tick and sends each session what differs for it; `control` and `clients` are
+per session.
+
+One session controls; on a `--shared` server the rest watch. A watcher's
+commands are refused, except its own link resolution, downloads, history
+reads and `takeControl`/`releaseControl`. A controller that drops frees
+control; its linger is kept for the same client id, so the desktop coming
+back gets control back. The radio stops once nobody is left.
+
+While a dropped controller's radio lingers, the server keeps its completed
+passes (`--backlog`, by age and bytes). The same client id coming back gets
+them first, marked `replayed`, then the live stream. The client times them on
+the offset its welcome carried, after the last frame it saw before the drop
+and before the first live one; they go to the recorder and the waterfall, not
+the live trace.
+
+### The browser
+
+`web::WebServer` (`sweeppp-cli serve --web`) is plain HTTP/1.1, a thread a
+connection, one request each. It serves the UI, compiled into the binary by
+`cmake/EmbedFiles.cmake` from a pnpm build of `web/`; `POST /login` trades the
+token, compared in constant time at one try a second per address, for an
+`HttpOnly`, `SameSite=Strict` session cookie. `GET /ws`, cookie-checked and
+same-origin only, upgrades to a WebSocket and hands it to `RemoteServer`: the
+browser speaks the same record stream as a desktop, opening with a stream
+header and a `hello` instead of the Noise handshake. Downloads are
+`GET /api/recordings/<name>`; themes, colour maps and band and channel labels
+are JSON.
+
+The page (`web/`, React and TypeScript) carries a port of the protocol in
+`web/src/protocol`: the record framer, metadata, messages, `FrameMirror` and
+`RemoteInstrument`'s cache, checked against a stream recorded from a real
+server and decoded by the C++ (`tests/web_fixtures.cpp`, run with Vitest by
+ctest). Spectra are drawn on a canvas, the waterfall in WebGL2 from a ring of
+lines on a fixed dB scale. Server recordings are read in place with
+`historyOpen`/`historyQuery`, answered with tiles from `SessionReader::query`.
 
 The server can record its own output at full resolution, and a client fetches
 a recording a 256 KiB piece at a time, four in flight, sent after everything
@@ -437,10 +481,9 @@ third-party GPL libraries are each linked only by their own plugin:
 | Binary or library       | Licence          | Links                                                                                                                                                               |
 |-------------------------|------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `libsweepsfile`         | MIT              | nothing                                                                                                                                                             |
-| `libsweeppp` (static)   | GPL-3.0-or-later | libsweepsfile, toml++ (MIT), Monocypher (CC0-1.0 or BSD-2-Clause)                                                                                                   |
+| `libsweeppp` (static)   | GPL-3.0-or-later | libsweepsfile, toml++ (MIT), Monocypher (CC0-1.0 or BSD-2-Clause), nlohmann/json (MIT)                                                                              |
 | `sweeppp`               | GPL-3.0-or-later | libsweeppp, ImGui and ImPlot (MIT), GLFW (Zlib), nativefiledialog-extended (Zlib), stb (MIT), GTK 3 on Linux (LGPL), libcurl and nlohmann/json for the update check |
-| `sweeppp-cli`           | GPL-3.0-or-later | libsweeppp, the `sweeps` tool's core                                                                                                                                |
-| `sweeppp-server`        | GPL-3.0-or-later | libsweeppp, nlohmann/json                                                                                                                                           |
+| `sweeppp-cli`           | GPL-3.0-or-later | libsweeppp, the `sweeps` tool's core, the browser UI (React, Radix UI, TanStack Store; MIT)                                                                         |
 | `fft-fftw` plugin       | GPL-3.0-or-later | **FFTW (GPL-2.0-or-later)**                                                                                                                                         |
 | `sdr-hackrf` plugin     | GPL-3.0-or-later | **libhackrf (GPL-2.0-only)**                                                                                                                                        |
 | `sdr-rtlsdr` plugin     | GPL-3.0-or-later | **librtlsdr (GPL-2.0-or-later)**                                                                                                                                    |

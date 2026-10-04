@@ -465,6 +465,33 @@ TEST_CASE("several contributors answer one frequency, in the operator's order") 
         CHECK_FALSE(manager.selectDataset("test.sweeppp.good", 7).has_value());
         CHECK_FALSE(manager.selectDataset("nothing.installed", 0).has_value());
     }
+
+    SUBCASE("a contributor's tick tree is read and clicked through the host") {
+        const std::uint64_t before = manager.contributionsGeneration();
+
+        const std::vector<ContributorTreeRow> tree = manager.contributorTree("test.sweeppp.good");
+        REQUIRE(tree.size() == 2);
+        CHECK(tree[0].depth == 0);
+        CHECK(tree[0].name == "Everything");
+        CHECK(tree[0].description == "every range the fixture knows");
+        CHECK(tree[1].depth == 1);
+        CHECK(tree[1].key == "narrow");
+        CHECK(tree[1].anyOn);
+        CHECK(tree[1].color[3] == doctest::Approx(1.0F));
+
+        REQUIRE(manager.toggleContributorRow("test.sweeppp.good", "narrow").has_value());
+        const std::vector<ContributorTreeRow> after = manager.contributorTree("test.sweeppp.good");
+        REQUIRE(after.size() == 2);
+        CHECK_FALSE(after[1].anyOn);
+        CHECK_FALSE(after[0].allOn);
+        CHECK(manager.contributionsGeneration() > before);
+
+        CHECK_FALSE(manager.toggleContributorRow("test.sweeppp.good", "nothing").has_value());
+        CHECK_FALSE(manager.toggleContributorRow("nothing.installed", "narrow").has_value());
+        CHECK(manager.contributorTree("nothing.installed").empty());
+
+        REQUIRE(manager.toggleContributorRow("test.sweeppp.good", "narrow").has_value());
+    }
 }
 
 TEST_CASE("a contributor order survives the plugin it names going missing") {

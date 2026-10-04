@@ -5217,28 +5217,99 @@ void MainWindow::drawPerformancePanel() {
         section("Link");
         ImGui::TextDisabled("Input and processing below are measured on %s.",
                             remote->serverName().c_str());
-        if (ImGui::BeginTable("##link", 2,
+        const AppState::LinkHistory& linkHistory = m_state.linkHistory();
+        if (ImGui::BeginTable("##link", 3,
                               ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
-            const auto row = [](const char* label, const std::string& value) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(label);
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(value.c_str());
-            };
-            row("Server", remote->endpoint().address());
-            row("Round trip", std::format("{:.1f} ms", link.roundTripMs));
-            row("Receiving", toml_util::formatByteRate(link.bytesPerSec));
-            row("Frames sent", std::format("{}", link.framesSent));
-            row("Passes merged", std::format("{}", link.passesCoalesced));
-            row("Partial updates merged", std::format("{}", link.partialsCoalesced));
-            row("Events dropped", std::format("{}", link.eventsDropped));
+            setupStatColumns();
+            statRow("Server", remote->endpoint().address());
+
+            int count = flatten(linkHistory.roundTripMs, buffer);
+            statRow("Round trip", std::format("{:.1f} ms", link.roundTripMs), buffer.data(), count,
+                    0.0F, std::max(linkHistory.roundTripMs.max(), 1.0F), &chrome.warning);
+
+            count = flatten(linkHistory.bytesPerSec, buffer);
+            statRow("Receiving", toml_util::formatByteRate(link.bytesPerSec), buffer.data(), count,
+                    0.0F, std::max(linkHistory.bytesPerSec.max(), 1.0F), &chrome.accent);
+
+            count = flatten(linkHistory.framesSentPerSec, buffer);
+            statRow("Frames sent",
+                    std::format("{} ({:.0f}/s)", link.framesSent,
+                                static_cast<double>(linkHistory.framesSentPerSec.latest())),
+                    buffer.data(), count, 0.0F, std::max(linkHistory.framesSentPerSec.max(), 1.0F),
+                    &chrome.accent);
+
+            statRow("Passes merged", std::format("{}", link.passesCoalesced));
+            statRow("Partials merged", std::format("{}", link.partialsCoalesced));
+            statRow("Events dropped", std::format("{}", link.eventsDropped));
             if (link.framesSent > 0) {
-                row("Encoding on the server",
-                    std::format("{:.2f} ms a frame", static_cast<double>(link.encodeNs) / 1e6 /
-                                                         static_cast<double>(link.framesSent)));
+                statRow("Server encoding",
+                        std::format("{:.2f} ms a frame", static_cast<double>(link.encodeNs) / 1e6 /
+                                                             static_cast<double>(link.framesSent)));
             }
             ImGui::EndTable();
+        }
+
+        // The machine at the other end, which nobody is sitting at: a Pi
+        // throttling at 85 °C or a disk filling with recordings has no other
+        // way to say so.
+        if (const std::optional<HostStats>& host = remote->serverHost()) {
+            section("Server");
+            if (ImGui::BeginTable("##serverhost", 3,
+                                  ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+                setupStatColumns();
+                if (!host->system.empty()) {
+                    statRow("System", std::format("{}, {} cores", host->system, host->cores));
+                }
+                if (host->cpuPercent >= 0.0) {
+                    const int count = flatten(linkHistory.serverCpuPercent, buffer);
+                    statRow("CPU", std::format("{:.0f}% of all cores", host->cpuPercent),
+                            buffer.data(), count, 0.0F, 100.0F, &chrome.warning);
+                }
+                if (host->processCpuPercent >= 0.0 || host->processMemoryBytes > 0) {
+                    statRow("sweeppp-cli",
+                            std::format("{:.0f}% of one core, {}",
+                                        std::max(host->processCpuPercent, 0.0),
+                                        toml_util::formatBytes(host->processMemoryBytes)));
+                }
+                if (host->memoryTotalBytes > 0) {
+                    const int count = flatten(linkHistory.serverMemoryPercent, buffer);
+                    statRow("Memory",
+                            std::format("{} of {} ({:.0f}%)",
+                                        toml_util::formatBytes(host->memoryUsedBytes),
+                                        toml_util::formatBytes(host->memoryTotalBytes),
+                                        100.0 * static_cast<double>(host->memoryUsedBytes) /
+                                            static_cast<double>(host->memoryTotalBytes)),
+                            buffer.data(), count, 0.0F, 100.0F, &chrome.accent);
+                }
+                if (host->temperatureC) {
+                    const int count = flatten(linkHistory.serverTemperatureC, buffer);
+                    const bool hot = *host->temperatureC >= 80.0;
+                    if (hot) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(chrome.danger));
+                    }
+                    statRow("Temperature", std::format("{:.1f} °C", *host->temperatureC),
+                            buffer.data(), count, 20.0F,
+                            std::max(linkHistory.serverTemperatureC.max(), 90.0F), &chrome.danger);
+                    if (hot) {
+                        ImGui::PopStyleColor();
+                    }
+                }
+                if (host->load1 >= 0.0) {
+                    statRow("Load", std::format("{:.2f}", host->load1));
+                }
+                if (host->diskTotalBytes > 0) {
+                    statRow("Recordings disk",
+                            std::format("{} free of {}",
+                                        toml_util::formatBytes(host->diskFreeBytes),
+                                        toml_util::formatBytes(host->diskTotalBytes)));
+                }
+                if (host->uptimeSeconds >= 0.0) {
+                    const auto hours = static_cast<long long>(host->uptimeSeconds / 3600.0);
+                    statRow("Up", hours >= 48 ? std::format("{} d {} h", hours / 24, hours % 24)
+                                              : formatDuration(host->uptimeSeconds));
+                }
+                ImGui::EndTable();
+            }
         }
     }
 

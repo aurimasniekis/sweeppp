@@ -187,16 +187,14 @@ if(SWEEPPP_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
-# nlohmann/json -- scoped to bin/sweeppp-server's HTTP/WS wire format only.
-# Deliberately not used for any config file; that is toml++'s job.
+# nlohmann/json -- the web UI's boot endpoints and the update check. Not for
+# any config file; that is toml++'s job.
 # ---------------------------------------------------------------------------
-if(SWEEPPP_BUILD_SERVER OR SWEEPPP_WITH_UPDATE_CHECK)
-    set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
-    set(JSON_Install    OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(nlohmann_json
-        URL https://github.com/nlohmann/json/archive/refs/tags/${SWEEPPP_PIN_JSON}.tar.gz)
-    FetchContent_MakeAvailable(nlohmann_json)
-endif()
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install    OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(nlohmann_json
+    URL https://github.com/nlohmann/json/archive/refs/tags/${SWEEPPP_PIN_JSON}.tar.gz)
+FetchContent_MakeAvailable(nlohmann_json)
 
 # ---------------------------------------------------------------------------
 # libcurl -- the update check, and nothing else.

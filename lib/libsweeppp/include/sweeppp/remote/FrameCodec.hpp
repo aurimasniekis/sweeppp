@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <sweeps/FileFormat.hpp>
 #include <sweeps/Stream.hpp>
 #include <vector>
@@ -109,9 +108,12 @@ private:
 };
 
 /// The client's copy of the server's current line, rebuilt from the records
-/// `FrameEncoder` sends.
+/// `FrameEncoder` sends: a `sweeps::LineMirror`, and the commit that turns its
+/// line into a frame.
 class FrameMirror {
 public:
+    FrameMirror() noexcept;
+
     /// Applies a SegmentOpen, SegmentClose or Tile; any other record type is
     /// not this class's and is ignored. ProtocolError for a segment or tile
     /// that does not fit: a grid wider than `kMaxGridBins`, a tile outside
@@ -124,18 +126,12 @@ public:
     [[nodiscard]] Result<std::shared_ptr<SpectrumFrame>> commit(const FrameCommit& commit);
 
     /// The open segment, or null before the first.
-    [[nodiscard]] const sweeps::SegmentInfo* segment() const noexcept {
-        return m_segment ? &*m_segment : nullptr;
-    }
+    [[nodiscard]] const sweeps::SegmentInfo* segment() const noexcept { return m_line.segment(); }
 
-    void reset() noexcept;
+    void reset() noexcept { m_line.reset(); }
 
 private:
-    Status applySegmentOpen(sweeps::ByteReader& in);
-    Status applyTile(sweeps::ByteReader& in);
-
-    std::optional<sweeps::SegmentInfo> m_segment;
-    std::vector<float> m_levels;
+    sweeps::LineMirror m_line;
 };
 
 } // namespace sweeppp::remote

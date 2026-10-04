@@ -56,9 +56,13 @@ while IFS= read -r f; do
     files+=("$f")
 done < <(
     find . -type f \
-        \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' -o -name '*.py' \) \
+        \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' -o -name '*.py' \
+        -o -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.css' -o -name '*.html' \) \
         -not -path './.git/*' \
         -not -path './build/*' \
+        -not -path '*/node_modules/*' \
+        -not -path './web/dist/*' \
+        -not -path './site/*' \
         -not -path '*/libsweepsfile/build/*' |
         sed 's|^\./||' | sort
 )
@@ -74,7 +78,9 @@ for f in "${files[@]}"; do
         *) want="GPL-3.0-or-later" ;;
     esac
 
-    have="$(sed -n 's|^[/#]*[[:space:]]*SPDX-License-Identifier:[[:space:]]*||p' "$f" | head -1)"
+    # The tag after whichever comment opener the language uses: //, #, /* or
+    # <!--, with any closer after it dropped.
+    have="$(sed -n 's|^[/#*<!-]*[[:space:]]*SPDX-License-Identifier:[[:space:]]*\([^[:space:]]*\).*|\1|p' "$f" | head -1)"
 
     if [ -n "$have" ]; then
         if [ "$have" != "$want" ]; then
@@ -85,17 +91,20 @@ for f in "${files[@]}"; do
     fi
 
     if [ "$fix" -eq 1 ]; then
+        e=""
         case "$f" in
             *.py) c="#" ;;
+            *.css) c="/*" e=" */" ;;
+            *.html) c="<!--" e=" -->" ;;
             *) c="//" ;;
         esac
         tmp="$(mktemp)"
         # Vendored code keeps its own provenance: tag the licence, claim nothing.
         if [ "$want" = "CC0-1.0" ]; then
-            printf '%s SPDX-License-Identifier: %s\n\n' "$c" "$want" > "$tmp"
+            printf '%s SPDX-License-Identifier: %s%s\n\n' "$c" "$want" "$e" > "$tmp"
         else
-            printf '%s SPDX-FileCopyrightText: %s\n%s SPDX-License-Identifier: %s\n\n' \
-                "$c" "$COPYRIGHT" "$c" "$want" > "$tmp"
+            printf '%s SPDX-FileCopyrightText: %s%s\n%s SPDX-License-Identifier: %s%s\n\n' \
+                "$c" "$COPYRIGHT" "$e" "$c" "$want" "$e" > "$tmp"
         fi
         cat "$f" >> "$tmp"
         mv "$tmp" "$f"

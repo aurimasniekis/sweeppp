@@ -97,6 +97,8 @@ struct Options {
     bool newToken = false;
     /// How long the radio keeps running for a client that dropped.
     double lingerSeconds = 30.0;
+    /// How much of what it missed a dropped desktop is sent when it is back.
+    double backlogSeconds = 120.0;
     /// Record on the server from the start.
     bool record = false;
     /// Stay out of desktops' "On this network" lists.
@@ -104,6 +106,12 @@ struct Options {
     /// Several clients at once, one in control.
     bool shared = false;
     std::uint32_t maxClients = 8;
+    /// The browser UI's port; zero for none.
+    std::uint16_t webPort = 0;
+    /// Where it listens; empty means wherever --listen does.
+    std::string webListen;
+    /// Its files from here rather than the binary, for working on it.
+    std::string webRoot;
 
     /// extract
     double fromSeconds = 0.0;

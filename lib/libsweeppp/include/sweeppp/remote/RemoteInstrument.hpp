@@ -40,6 +40,9 @@ struct RemoteEndpoint {
 struct ClientIdentity {
     std::string name;     ///< This machine's name when empty
     std::string clientId; ///< Kept across runs, so a reconnect is known as one
+    /// Reconnecting: the time of the last frame before the link went. Frames
+    /// the server kept meanwhile are placed after it.
+    std::uint64_t resumeAfterNs = 0;
 };
 
 /// An instrument on another machine, served by `sweeppp-cli serve`.
@@ -104,6 +107,10 @@ public:
     [[nodiscard]] const std::string& serverName() const noexcept { return m_serverName; }
 
     [[nodiscard]] LinkStats link() const noexcept { return m_link; }
+    /// The server machine's CPU, memory and disk, once it has said.
+    [[nodiscard]] const std::optional<HostStats>& serverHost() const noexcept {
+        return m_serverHost;
+    }
 
     // ---- sharing ------------------------------------------------------------
 
@@ -307,6 +314,7 @@ private:
     std::map<std::uint64_t, std::string> m_fetches;
     std::vector<SdrHealthReading> m_health;
     TelemetrySnapshot m_engineTelemetry;
+    std::optional<HostStats> m_serverHost;
     bool m_haveTelemetry = false;
     LinkStats m_link;
     std::uint32_t m_linkMaxBins = 0;

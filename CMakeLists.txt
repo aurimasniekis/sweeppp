@@ -68,7 +68,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${SWEEPPP_OUTPUT_DIR}")
 
 option(SWEEPPP_BUILD_TESTS      "Build the test suite"            ON)
 option(SWEEPPP_BUILD_GUI        "Build the desktop GUI"           ON)
-option(SWEEPPP_BUILD_SERVER     "Build the web server skeleton"   ON)
+option(SWEEPPP_WITH_WEB_UI      "Build the browser UI for serve --web (needs pnpm)" ON)
 option(SWEEPPP_BUILD_PLUGINS    "Build bundled plugins"           ON)
 option(SWEEPPP_WITH_FFTW        "Build the FFTW backend plugin"   ON)
 option(SWEEPPP_WITH_ACCELERATE  "Build the Accelerate/vDSP backend plugin (macOS)" ON)
@@ -151,10 +151,6 @@ if(SWEEPPP_BUILD_GUI)
     add_subdirectory(bin/sweeppp)
 endif()
 
-if(SWEEPPP_BUILD_SERVER)
-    add_subdirectory(bin/sweeppp-server)
-endif()
-
 # Before the plugins, and that ordering is load-bearing: each of them adds a
 # test suite of its own, and CMake silently discards an `add_test` issued
 # before `enable_testing()`. The suites still built, so the omission looked
@@ -212,7 +208,7 @@ message(STATUS "")
 message(STATUS "Sweep++ ${PROJECT_VERSION}")
 message(STATUS "  build type ......... ${CMAKE_BUILD_TYPE}")
 message(STATUS "  gui ................ ${SWEEPPP_BUILD_GUI}")
-message(STATUS "  server ............. ${SWEEPPP_BUILD_SERVER}")
+message(STATUS "  web ui ............. ${SWEEPPP_WITH_WEB_UI}")
 message(STATUS "  plugins ............ ${SWEEPPP_BUILD_PLUGINS}")
 message(STATUS "  tests .............. ${SWEEPPP_BUILD_TESTS}")
 message(STATUS "  fftw plugin ........ ${SWEEPPP_WITH_FFTW}")

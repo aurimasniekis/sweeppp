@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Aurimas Niekis <aurimas@niekis.lt>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <doctest/doctest.h>
@@ -8,6 +9,7 @@
 #include <random>
 #include <string>
 #include <sweeppp/core/EventBus.hpp>
+#include <sweeppp/core/HostStats.hpp>
 #include <sweeppp/history/EventMapping.hpp>
 #include <sweeppp/remote/ClockMap.hpp>
 #include <sweeppp/remote/FrameCodec.hpp>
@@ -17,6 +19,7 @@
 #include <sweeps/FileFormat.hpp>
 #include <sweeps/Records.hpp>
 #include <sweeps/Stream.hpp>
+#include <thread>
 #include <vector>
 
 using namespace sweeppp;
@@ -404,6 +407,76 @@ TEST_CASE("run, correction and telemetry figures round-trip") {
 }
 
 // ------------------------------------------------------------- the messages
+
+TEST_CASE("the server's host figures ride the telemetry record, and are optional") {
+    TelemetryReport report;
+    report.link.framesSent = 9;
+    report.host = HostStats{.system = "Linux 6.6 aarch64",
+                            .cores = 4,
+                            .cpuPercent = 37.5,
+                            .processCpuPercent = 112.0,
+                            .memoryTotalBytes = 8ULL << 30U,
+                            .memoryUsedBytes = 3ULL << 30U,
+                            .processMemoryBytes = 250ULL << 20U,
+                            .load1 = 1.25,
+                            .uptimeSeconds = 86400.5,
+                            .temperatureC = 61.2,
+                            .diskTotalBytes = 64ULL << 30U,
+                            .diskFreeBytes = 40ULL << 30U};
+
+    const auto roundTrip = [](const TelemetryReport& in) {
+        std::vector<std::byte> bytes;
+        appendTelemetry(bytes, in, 123);
+        sweeps::RecordFramer framer(kMaxServerRecordBytes);
+        framer.feed(bytes.data(), bytes.size());
+        sweeps::StreamRecord record;
+        REQUIRE(framer.next(record).value_or(false));
+        auto decoded = decodeTelemetry(record);
+        REQUIRE(decoded.has_value());
+        return *decoded;
+    };
+
+    const TelemetryReport back = roundTrip(report);
+    REQUIRE(back.host.has_value());
+    CHECK(back.host->system == "Linux 6.6 aarch64");
+    CHECK(back.host->cores == 4);
+    CHECK(back.host->cpuPercent == doctest::Approx(37.5));
+    CHECK(back.host->processCpuPercent == doctest::Approx(112.0));
+    CHECK(back.host->memoryTotalBytes == 8ULL << 30U);
+    CHECK(back.host->memoryUsedBytes == 3ULL << 30U);
+    CHECK(back.host->processMemoryBytes == 250ULL << 20U);
+    CHECK(back.host->load1 == doctest::Approx(1.25));
+    CHECK(back.host->uptimeSeconds == doctest::Approx(86400.5));
+    REQUIRE(back.host->temperatureC.has_value());
+    CHECK(*back.host->temperatureC == doctest::Approx(61.2));
+    CHECK(back.host->diskFreeBytes == 40ULL << 30U);
+    CHECK(back.link.framesSent == 9);
+
+    report.host->temperatureC.reset();
+    CHECK_FALSE(roundTrip(report).host->temperatureC.has_value());
+    report.host.reset();
+    CHECK_FALSE(roundTrip(report).host.has_value());
+}
+
+TEST_CASE("this machine's own figures are sampled, and rates appear on the second call") {
+    HostSampler sampler;
+    const HostStats first = sampler.sample({});
+    CHECK(first.cores > 0);
+    CHECK(first.memoryTotalBytes > 0);
+    CHECK(first.cpuPercent < 0.0);
+#if defined(__APPLE__) || defined(__linux__)
+    CHECK_FALSE(first.system.empty());
+    CHECK(first.system.find('\0') == std::string::npos);
+    CHECK(first.processMemoryBytes > 0);
+    CHECK(first.memoryUsedBytes > 0);
+    CHECK(first.memoryUsedBytes <= first.memoryTotalBytes);
+    CHECK(first.uptimeSeconds > 0.0);
+    CHECK(first.diskTotalBytes > 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const HostStats second = sampler.sample({});
+    CHECK(second.processCpuPercent >= 0.0);
+#endif
+}
 
 TEST_CASE("control messages frame, decode and keep their fields") {
     std::vector<std::byte> bytes;

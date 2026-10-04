@@ -46,6 +46,12 @@ inline constexpr std::size_t kDefaultMaxClients = 8;
 inline constexpr std::uint32_t kChunkBytes = 256U * 1024U;
 inline constexpr std::size_t kMaxChunksInFlight = 4;
 
+/// Recordings one client may have open for reading at once.
+inline constexpr std::size_t kMaxHistoryReaders = 2;
+/// The most of a recording one history query answers with, in lines and bins.
+inline constexpr std::uint32_t kMaxHistoryLines = 2048;
+inline constexpr std::uint32_t kMaxHistoryBins = 4096;
+
 inline constexpr std::chrono::seconds kHandshakeTimeout{5};
 inline constexpr std::chrono::seconds kSilenceTimeout{10};
 inline constexpr std::chrono::milliseconds kRefusalDelay{1000};
@@ -55,9 +61,15 @@ inline constexpr std::chrono::milliseconds kPingInterval{1000};
 /// saying goodbye, so a reconnect finds it still sweeping.
 inline constexpr std::chrono::seconds kDefaultLinger{30};
 
+/// What a server keeps for a dropped controller to catch up on.
+inline constexpr std::chrono::seconds kDefaultBacklog{120};
+inline constexpr std::size_t kDefaultBacklogBytes = std::size_t{64} * 1024 * 1024;
+
 // ---- message names -------------------------------------------------------------
 
 namespace msg {
+/// A stream that is not opened by the Noise handshake opens with this.
+inline constexpr std::string_view kHello = "hello";
 inline constexpr std::string_view kWelcome = "welcome";
 inline constexpr std::string_view kRefused = "refused";
 inline constexpr std::string_view kCommand = "command";
@@ -69,6 +81,8 @@ inline constexpr std::string_view kPing = "ping";
 inline constexpr std::string_view kPong = "pong";
 inline constexpr std::string_view kBye = "bye";
 inline constexpr std::string_view kChunk = "chunk";
+/// What a history op answers with: a recording opened, or tiles of it.
+inline constexpr std::string_view kHistory = "history";
 } // namespace msg
 
 /// Why a server turned a connection away.
@@ -120,6 +134,18 @@ inline constexpr std::string_view kFetchRecording = "fetchRecording";
 /// from whoever has it now. Immediate; the other is told.
 inline constexpr std::string_view kTakeControl = "takeControl";
 inline constexpr std::string_view kReleaseControl = "releaseControl";
+/// A recording on the server, read without downloading it: open by name,
+/// query a range of it as tiles, close. Answered with `history` messages.
+inline constexpr std::string_view kHistoryOpen = "historyOpen";
+inline constexpr std::string_view kHistoryQuery = "historyQuery";
+inline constexpr std::string_view kHistoryClose = "historyClose";
+/// The server's data contributors, which label the spectrum: shown, ranked,
+/// which dataset, a tick in one's tree, one entry dismissed.
+inline constexpr std::string_view kSetContributorShown = "setContributorShown";
+inline constexpr std::string_view kSetContributorOrder = "setContributorOrder";
+inline constexpr std::string_view kSelectContributorDataset = "selectContributorDataset";
+inline constexpr std::string_view kToggleContributorRow = "toggleContributorRow";
+inline constexpr std::string_view kHideContribution = "hideContribution";
 } // namespace op
 
 /// The parts of an instrument's state a `state` message carries, each a hash
@@ -145,6 +171,8 @@ inline constexpr std::string_view kRecordings = "recordings";
 inline constexpr std::string_view kControl = "control";
 /// Everyone connected, controller and viewers.
 inline constexpr std::string_view kClients = "clients";
+/// A counter that moves whenever the server's band and channel labels change.
+inline constexpr std::string_view kOverlays = "overlays";
 } // namespace section
 
 } // namespace sweeppp::remote

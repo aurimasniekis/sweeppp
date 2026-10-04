@@ -236,6 +236,27 @@ class FrameOutcome(ctypes.Structure):
     ]
 
 
+class StreamRecord(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", c_uint32),
+        ("type", c_uint32),
+        ("payload", Bytes),
+    ]
+
+
+class StreamLine(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", c_uint32),
+        ("segment_id", c_uint32),
+        ("bin_count", c_uint32),
+        ("line", c_uint32),
+        ("tiles_applied", c_uint64),
+        ("start_hz", c_double),
+        ("bin_width_hz", c_double),
+        ("levels", POINTER(c_float)),
+    ]
+
+
 #: ``sweeps_log_fn``: (user, level, category, message).
 LOG_FN = ctypes.CFUNCTYPE(None, c_void_p, c_int, Str, Str)
 
@@ -638,3 +659,32 @@ def _declare(lib: ctypes.CDLL) -> None:
     fn("sweeps_writer_retention_reached", c_int, _HANDLE)
     fn("sweeps_writer_retention_reason", Str, _HANDLE)
     fn("sweeps_writer_last_segment_reason", Str, _HANDLE)
+
+    # Live streams
+    fn("sweeps_stream_reader_create", _STATUS, c_uint32, POINTER(_HANDLE))
+    fn("sweeps_stream_reader_destroy", None, _HANDLE)
+    fn("sweeps_stream_reader_feed", _STATUS, _HANDLE, c_void_p, c_size_t)
+    fn(
+        "sweeps_stream_reader_next_record",
+        _STATUS,
+        _HANDLE,
+        POINTER(StreamRecord),
+        POINTER(c_int),
+    )
+    fn("sweeps_stream_reader_buffered", c_size_t, _HANDLE)
+    fn("sweeps_stream_mirror_create", _STATUS, c_uint32, POINTER(_HANDLE))
+    fn("sweeps_stream_mirror_destroy", None, _HANDLE)
+    fn("sweeps_stream_mirror_apply", _STATUS, _HANDLE, POINTER(StreamRecord))
+    fn("sweeps_stream_mirror_line", _STATUS, _HANDLE, POINTER(StreamLine))
+    fn("sweeps_stream_mirror_segment", _STATUS, _HANDLE, POINTER(Segment))
+    fn("sweeps_stream_mirror_segment_reason", Str, _HANDLE)
+    fn("sweeps_stream_mirror_segment_device_id", Str, _HANDLE)
+    fn("sweeps_stream_mirror_segment_device_label", Str, _HANDLE)
+    fn(
+        "sweeps_stream_mirror_segment_gain",
+        _STATUS,
+        _HANDLE,
+        c_size_t,
+        POINTER(Str),
+        POINTER(c_double),
+    )

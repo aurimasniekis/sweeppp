@@ -279,6 +279,10 @@ void AppState::loseRemote() {
     const remote::RemoteEndpoint endpoint = m_remote->endpoint();
     const std::string label = m_remote->serverName();
 
+    {
+        const std::lock_guard lock(m_frameMutex);
+        m_resumeAfterNs = m_latestFrame ? m_latestFrame->hostTimeNs : 0;
+    }
     dropRemote();
 
     m_reconnectProfile = std::move(snapshot);
@@ -339,8 +343,10 @@ void AppState::startDeviceWorker(DeviceStartup startup) {
     startup.startedNs = monotonicNs();
     startup.opening = std::make_shared<std::atomic_bool>(!startup.enumerate);
 
-    const remote::ClientIdentity identity =
-        startup.server ? clientIdentity() : remote::ClientIdentity{};
+    remote::ClientIdentity identity = startup.server ? clientIdentity() : remote::ClientIdentity{};
+    if (startup.reconnect) {
+        identity.resumeAfterNs = m_resumeAfterNs;
+    }
     startup.future = std::async(
         std::launch::async, [this, driver = startup.driver, id = startup.id,
                              server = startup.server, reconnect = startup.reconnect,
@@ -844,6 +850,47 @@ void AppState::sampleHealth() {
     m_health = std::move(updated);
 }
 
+void AppState::sampleLink() {
+    if (!m_remote) {
+        m_linkHistory = {};
+        return;
+    }
+    const LinkStats link = m_remote->link();
+    const std::uint64_t now = monotonicNs();
+    LinkHistory& history = m_linkHistory;
+
+    // The server's counters arrive with its telemetry, slower than this tick,
+    // so the rate holds between reports rather than dipping to zero. A count
+    // that went back belongs to a new connection.
+    if (history.lastSampleNs == 0 || link.framesSent < history.lastFramesSent) {
+        history.lastFramesSent = link.framesSent;
+        history.lastSampleNs = now;
+        history.lastFramesSentPerSec = 0.0F;
+    } else if (link.framesSent != history.lastFramesSent && now > history.lastSampleNs) {
+        history.lastFramesSentPerSec =
+            static_cast<float>(static_cast<double>(link.framesSent - history.lastFramesSent) * 1e9 /
+                               static_cast<double>(now - history.lastSampleNs));
+        history.lastFramesSent = link.framesSent;
+        history.lastSampleNs = now;
+    }
+
+    history.roundTripMs.push(static_cast<float>(link.roundTripMs));
+    history.bytesPerSec.push(static_cast<float>(link.bytesPerSec));
+    history.framesSentPerSec.push(history.lastFramesSentPerSec);
+
+    if (const std::optional<HostStats>& host = m_remote->serverHost()) {
+        history.serverCpuPercent.push(static_cast<float>(std::max(host->cpuPercent, 0.0)));
+        if (host->memoryTotalBytes > 0) {
+            history.serverMemoryPercent.push(
+                static_cast<float>(100.0 * static_cast<double>(host->memoryUsedBytes) /
+                                   static_cast<double>(host->memoryTotalBytes)));
+        }
+        if (host->temperatureC) {
+            history.serverTemperatureC.push(static_cast<float>(*host->temperatureC));
+        }
+    }
+}
+
 Status AppState::goBack() {
     std::vector<SweepSegment> segments = m_rangeHistory.goBack();
     if (segments.empty()) {
@@ -1058,7 +1105,12 @@ void AppState::onFrame(const SpectrumFramePtr& frame) noexcept {
     // Runs on a pipeline thread. Parks the frame and returns -- anything more
     // would put UI work on the acquisition path.
     const std::lock_guard lock(m_frameMutex);
-    m_pendingFrame = frame;
+    // Kept by the server while the link was down: history for the waterfall
+    // and the recording, which the bus already gave it, but not the live
+    // trace.
+    if (!frame->replayed) {
+        m_pendingFrame = frame;
+    }
     // Bounded like the lines they become: a stalled UI drops passes rather
     // than holding every grid.
     if (frame->passComplete && m_pendingPasses.size() < 64) {
@@ -1160,6 +1212,7 @@ void AppState::pumpFrames() {
         PluginManager::instance().setProfile(currentProfile("current", PluginState::Omit));
 
         sampleHealth();
+        sampleLink();
     }
 
     m_telemetry.render().framesRendered.fetch_add(1, std::memory_order_relaxed);

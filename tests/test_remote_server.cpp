@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <doctest/doctest.h>
 #include <filesystem>
 #include <format>
@@ -27,6 +28,7 @@
 #include <sweeppp/sdr/ISdrDevice.hpp>
 #include <sweeps/FileFormat.hpp>
 #include <sweeps/Records.hpp>
+#include <sweeps/SessionReader.hpp>
 #include <sweeps/Stream.hpp>
 #include <thread>
 #include <vector>
@@ -889,4 +891,115 @@ TEST_CASE("a shared server takes as many clients as it is told, and no more") {
     CHECK(answer->name == msg::kRefused);
     CHECK(Refused::from(answer->body).reason == refusal::kLimit);
     CHECK(fixture.server->clients().size() == 2);
+}
+
+// ---- history of server recordings ----------------------------------------------
+
+TEST_CASE("a recording on the server is read in tiles without downloading it") {
+    const std::filesystem::path sessions =
+        std::filesystem::temp_directory_path() / std::format("sweeppp-history-{}", monotonicNs());
+    ServerFixture fixture(ServerConfig{.sessionsDir = sessions});
+    RawClient client(fixture.port());
+    REQUIRE(client.handshake().has_value());
+
+    client.command(op::kStart);
+    sweeps::Metadata bins;
+    bins.setInt("maxBins", 4096);
+    client.command(op::kStartRecording, bins);
+    // Lines, not a time: under a sanitiser a second may hold none.
+    const auto deadline = Clock::now() + 20s;
+    while (ServerRecordings::from(hashAt(client.sections(), section::kRecordings)).lines < 20 &&
+           Clock::now() < deadline) {
+        client.pump(200ms);
+    }
+    client.command(op::kStopRecording);
+    // Nothing more to record: frames would only crowd out the answers below.
+    client.command(op::kStop);
+    client.pump(500ms);
+    const ServerRecordings recordings =
+        ServerRecordings::from(hashAt(client.sections(), section::kRecordings));
+    REQUIRE_FALSE(recordings.files.empty());
+    const std::string name = recordings.files.front().name;
+
+    sweeps::Metadata open;
+    open.setString("name", name);
+    const std::uint64_t openSeq = client.command(op::kHistoryOpen, open);
+    auto opened = client.expect(msg::kHistory, 15000ms);
+    REQUIRE(opened.has_value());
+    CHECK(opened->body.getString("kind") == "opened");
+    const std::int64_t handle = opened->body.getInt("handle");
+    CHECK(handle > 0);
+    CHECK(opened->body.getInt("lastLineNs") > opened->body.getInt("firstLineNs"));
+    const sweeps::Value* segments = opened->body.find("segments");
+    REQUIRE(segments != nullptr);
+    REQUIRE(segments->asArray() != nullptr);
+    CHECK_FALSE(segments->asArray()->empty());
+    client.pump(100ms);
+    CHECK(std::ranges::any_of(client.replies(),
+                              [openSeq](const Reply& r) { return r.seq == openSeq && r.ok; }));
+
+    sweeps::Metadata query;
+    query.setInt("handle", handle);
+    query.setInt("lines", 64);
+    query.setInt("bins", 512);
+    client.command(op::kHistoryQuery, query);
+    std::vector<sweeps::Metadata> tiles;
+    while (true) {
+        auto piece = client.expect(msg::kHistory, 15000ms);
+        REQUIRE(piece.has_value());
+        REQUIRE(piece->body.getString("kind") == "tiles");
+        if (const std::vector<sweeps::Value>* rows = piece->body.find("tiles")->asArray()) {
+            for (const sweeps::Value& row : *rows) {
+                tiles.push_back(*row.asHash());
+            }
+        }
+        if (piece->body.getBool("last")) {
+            break;
+        }
+    }
+
+    // What the server sent is what reading the file here gives.
+    auto reader = sweeps::SessionReader::open(sessions / name);
+    REQUIRE(reader.has_value());
+    auto direct = (*reader)->query(sweeps::HistoryQuery{.maxLines = 64, .maxBins = 512});
+    REQUIRE(direct.has_value());
+    REQUIRE_FALSE(direct->empty());
+    REQUIRE(tiles.size() == direct->size());
+    for (std::size_t i = 0; i < tiles.size(); ++i) {
+        const sweeps::HistoryTile& want = (*direct)[i];
+        const sweeps::Metadata& got = tiles[i];
+        CHECK(got.getInt("freqBlock") == want.freqBlock);
+        CHECK(got.getInt("lines") == want.lines);
+        CHECK(got.getInt("lod") == want.lod);
+        CHECK(static_cast<float>(got.getFloat("originDb")) == want.originDb);
+        const std::vector<std::byte>* data = got.find("data")->asBytes();
+        REQUIRE(data != nullptr);
+        REQUIRE(data->size() == want.data.size());
+        CHECK(std::memcmp(data->data(), want.data.data(), data->size()) == 0);
+    }
+
+    // A name the server did not list is refused, as is a third reader.
+    sweeps::Metadata bad;
+    bad.setString("name", "../etc/passwd");
+    const std::uint64_t badSeq = client.command(op::kHistoryOpen, bad);
+    const std::uint64_t second = client.command(op::kHistoryOpen, open);
+    const std::uint64_t third = client.command(op::kHistoryOpen, open);
+    client.pump(400ms);
+    const auto replied = [&](std::uint64_t seq) {
+        return *std::ranges::find(client.replies(), seq, &Reply::seq);
+    };
+    CHECK_FALSE(replied(badSeq).ok);
+    CHECK(replied(second).ok);
+    CHECK_FALSE(replied(third).ok);
+
+    sweeps::Metadata close;
+    close.setInt("handle", handle);
+    const std::uint64_t closeSeq = client.command(op::kHistoryClose, close);
+    const std::uint64_t after = client.command(op::kHistoryQuery, query);
+    client.pump(300ms);
+    CHECK(replied(closeSeq).ok);
+    CHECK_FALSE(replied(after).ok);
+
+    std::error_code ec;
+    std::filesystem::remove_all(sessions, ec);
 }

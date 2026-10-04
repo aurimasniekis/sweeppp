@@ -5,8 +5,11 @@
 
 #include "sweeps/Records.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace sweeps {
 
@@ -116,6 +119,101 @@ Result<bool> RecordFramer::next(StreamRecord& out) {
         m_read = 0;
     }
     return true;
+}
+
+Status LineMirror::apply(const StreamRecord& record) {
+    return apply(record.header.type, record.payload.data(), record.payload.size());
+}
+
+Status LineMirror::apply(std::uint16_t type, const std::byte* payload, std::size_t bytes) {
+    ByteReader in(payload, bytes);
+    switch (static_cast<RecordType>(type)) {
+    case RecordType::SegmentOpen:
+        return applySegmentOpen(in);
+
+    case RecordType::Tile:
+        return applyTile(in);
+
+    case RecordType::SegmentClose: {
+        // Nothing to undo: the levels stay what they were, and the next
+        // SegmentOpen replaces them.
+        auto close = decodeSegmentClose(in);
+        if (!close) {
+            return unexpected<Error>(close.error());
+        }
+        return ok();
+    }
+
+    default:
+        return ok();
+    }
+}
+
+Status LineMirror::applySegmentOpen(ByteReader& in) {
+    auto segment = decodeSegmentOpen(in, true);
+    if (!segment) {
+        return unexpected<Error>(segment.error());
+    }
+    const SegmentGrid& grid = segment->grid;
+    if (grid.binCount == 0 || grid.binCount > m_maxBins) {
+        return fail(ErrorCode::ProtocolError, "segment {} has {} bins; at most {} are accepted",
+                    segment->id, grid.binCount, m_maxBins);
+    }
+    if (!std::isfinite(grid.startHz) || !std::isfinite(grid.binWidthHz) || grid.binWidthHz <= 0.0) {
+        return fail(ErrorCode::ProtocolError, "segment {} has no usable grid", segment->id);
+    }
+
+    m_levels.assign(grid.binCount, static_cast<float>(kUnmeasuredDb));
+    m_segment = std::move(*segment);
+    m_open = true;
+    m_line = 0;
+    m_tilesApplied = 0;
+    return ok();
+}
+
+Status LineMirror::applyTile(ByteReader& in) {
+    auto tile = decodeTile(in);
+    if (!tile) {
+        return unexpected<Error>(tile.error());
+    }
+    const TileHeader& header = tile->header;
+    if (!m_open || header.segmentId != m_segment.id) {
+        return ok();
+    }
+    if (header.lod != 0 || header.lines != 1) {
+        return fail(ErrorCode::ProtocolError, "a tile of {} lines at level {} on a live stream",
+                    header.lines, header.lod);
+    }
+
+    // In u64: a hostile freqBlock times the tile width overflows a u32.
+    const std::uint64_t binCount = m_segment.grid.binCount;
+    const std::uint64_t first = std::uint64_t{header.freqBlock} * kTileBins;
+    if (first >= binCount || header.bins != std::min<std::uint64_t>(kTileBins, binCount - first)) {
+        return fail(ErrorCode::ProtocolError, "tile {} of {} bins does not fit a {}-bin grid",
+                    header.freqBlock, header.bins, binCount);
+    }
+    if (!std::isfinite(header.originDb)) {
+        return fail(ErrorCode::ProtocolError, "tile {} has no usable origin", header.freqBlock);
+    }
+
+    float* levels = m_levels.data() + first;
+    const double origin = static_cast<double>(header.originDb);
+    for (std::size_t i = 0; i < header.bins; ++i) {
+        const std::uint8_t value = tile->data[i];
+        levels[i] = isMeasured(value) ? static_cast<float>(dequantiseDb(value, origin))
+                                      : static_cast<float>(kUnmeasuredDb);
+    }
+    m_line = header.timeBlock;
+    ++m_tilesApplied;
+    return ok();
+}
+
+void LineMirror::reset() noexcept {
+    m_open = false;
+    m_segment = SegmentInfo{};
+    m_levels.clear();
+    m_line = 0;
+    m_tilesApplied = 0;
 }
 
 } // namespace sweeps

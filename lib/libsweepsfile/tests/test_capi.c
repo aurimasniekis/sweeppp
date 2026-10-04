@@ -732,6 +732,374 @@ static void test_metadata_builder(void) {
     sweeps_metadata_destroy(outer);
 }
 
+/* ------------------------------------------------------------- live streams */
+
+/* The golden stream's numbers, restated from tests/test_stream.cpp, which
+ * writes it. */
+static const char* const kGoldenStreamPath = SWEEPSFILE_TEST_DATA_DIR "/v1-golden.sweepstream";
+
+static unsigned char* read_file(const char* path, size_t* size) {
+    FILE* file = fopen(path, "rb");
+    unsigned char* data = NULL;
+    long length;
+
+    *size = 0;
+    if (file == NULL) {
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) == 0 && (length = ftell(file)) > 0 &&
+        fseek(file, 0, SEEK_SET) == 0) {
+        data = (unsigned char*)malloc((size_t)length);
+        if (data != NULL && fread(data, 1, (size_t)length, file) == (size_t)length) {
+            *size = (size_t)length;
+        } else {
+            free(data);
+            data = NULL;
+        }
+    }
+    (void)fclose(file);
+    return data;
+}
+
+/* Within half a quantisation step, which is all a stored byte promises. */
+static int near_db(float actual, double expected) {
+    double diff = (double)actual - expected;
+    if (diff < 0) {
+        diff = -diff;
+    }
+    return diff <= 0.25 + 1e-4;
+}
+
+/* Little-endian u32, for finding a record's payload by hand. */
+static uint32_t read_u32(const unsigned char* bytes) {
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) |
+           ((uint32_t)bytes[3] << 24);
+}
+
+typedef struct stream_tally_t {
+    size_t records;
+    size_t tiles;
+    size_t plugin_data;
+    size_t unknown;
+    size_t end_of_stream;
+    int checked_first_segment;
+} stream_tally_t;
+
+static void check_first_segment(const sweeps_stream_mirror_t* mirror) {
+    sweeps_stream_line_t line;
+    sweeps_segment_t segment;
+    sweeps_str_t gain_name;
+    double gain_value = 0.0;
+
+    line.struct_size = sizeof(line);
+    CHECK_OK(sweeps_stream_mirror_line(mirror, &line));
+    CHECK(line.segment_id == 7);
+    CHECK(line.bin_count == 1500);
+    CHECK(line.start_hz == 100e6);
+    CHECK(line.bin_width_hz == 1000.0);
+    CHECK(line.line == 1);
+    CHECK(line.tiles_applied == 3);
+    CHECK(line.levels != NULL);
+    if (line.levels != NULL) {
+        CHECK(near_db(line.levels[0], -100.0));
+        CHECK(near_db(line.levels[39], -80.5));
+        CHECK(line.levels[10] == (float)SWEEPS_UNMEASURED_DB);
+        CHECK(near_db(line.levels[700], -20.0));
+        CHECK(near_db(line.levels[1200], -15.0));
+    }
+
+    segment.struct_size = sizeof(segment);
+    CHECK_OK(sweeps_stream_mirror_segment(mirror, &segment));
+    CHECK(segment.id == 7);
+    CHECK(segment.bin_count == 1500);
+    CHECK(segment.fft_size == 2048);
+    CHECK(segment.window == SWEEPS_WINDOW_HANN);
+    CHECK(segment.sample_rate == 2e6);
+    CHECK(segment.center_hz == 100.75e6);
+    CHECK(segment.start_monotonic_ns == 1000000000ULL);
+    CHECK(segment.gain_count == 1);
+    CHECK(str_equals(sweeps_stream_mirror_segment_reason(mirror), "stream start"));
+    CHECK(str_equals(sweeps_stream_mirror_segment_device_id(mirror), "golden-stream"));
+    CHECK(str_equals(sweeps_stream_mirror_segment_device_label(mirror), "Golden stream device"));
+    CHECK_OK(sweeps_stream_mirror_segment_gain(mirror, 0, &gain_name, &gain_value));
+    CHECK(str_equals(gain_name, "lna"));
+    CHECK(gain_value == 24.0);
+    CHECK_STATUS(sweeps_stream_mirror_segment_gain(mirror, 1, NULL, NULL), SWEEPS_ERR_OUT_OF_RANGE);
+}
+
+/* Drains every complete record, applying each to the mirror. Returns the first
+ * failure, or SWEEPS_OK when the reader wants more bytes. */
+static sweeps_status_t drain_stream(sweeps_stream_reader_t* reader, sweeps_stream_mirror_t* mirror,
+                                    stream_tally_t* tally) {
+    for (;;) {
+        sweeps_stream_record_t record;
+        int has_record = 0;
+        sweeps_status_t status;
+
+        record.struct_size = sizeof(record);
+        status = sweeps_stream_reader_next_record(reader, &record, &has_record);
+        if (status != SWEEPS_OK || !has_record) {
+            return status;
+        }
+
+        ++tally->records;
+        switch (record.type) {
+        case SWEEPS_RECORD_TILE:
+            ++tally->tiles;
+            break;
+        case SWEEPS_RECORD_PLUGIN_DATA:
+            ++tally->plugin_data;
+            break;
+        case SWEEPS_RECORD_END_OF_STREAM:
+            ++tally->end_of_stream;
+            CHECK(record.payload.len == 0);
+            break;
+        case 0x0042:
+            ++tally->unknown;
+            CHECK(record.payload.len == 1 && record.payload.data[0] == 0x5A);
+            break;
+        default:
+            break;
+        }
+
+        CHECK_OK(sweeps_stream_mirror_apply(mirror, &record));
+
+        /* Line 1 of segment 7 is complete by its SegmentClose, which leaves
+         * the line as it was. */
+        if (record.type == SWEEPS_RECORD_SEGMENT_CLOSE) {
+            check_first_segment(mirror);
+            tally->checked_first_segment = 1;
+        }
+    }
+}
+
+/* Feeds `bytes` in chunks of 1, 2, 3, 5, 8, ... 233 and back to 1, so record
+ * and header boundaries land everywhere but where they would by accident. */
+static sweeps_status_t feed_in_chunks(sweeps_stream_reader_t* reader,
+                                      sweeps_stream_mirror_t* mirror, const unsigned char* bytes,
+                                      size_t size, stream_tally_t* tally) {
+    size_t offset = 0;
+    size_t a = 1;
+    size_t b = 2;
+
+    while (offset < size) {
+        size_t chunk = a < size - offset ? a : size - offset;
+        size_t next = a + b;
+        sweeps_status_t status = sweeps_stream_reader_feed(reader, bytes + offset, chunk);
+
+        if (status != SWEEPS_OK) {
+            return status;
+        }
+        offset += chunk;
+        status = drain_stream(reader, mirror, tally);
+        if (status != SWEEPS_OK) {
+            return status;
+        }
+
+        a = b;
+        b = next > 233 ? 1 : next;
+    }
+    return SWEEPS_OK;
+}
+
+static void test_stream_golden(const unsigned char* bytes, size_t size) {
+    sweeps_stream_reader_t* reader = NULL;
+    sweeps_stream_mirror_t* mirror = NULL;
+    sweeps_stream_line_t line;
+    stream_tally_t tally;
+
+    memset(&tally, 0, sizeof(tally));
+    CHECK_OK(sweeps_stream_reader_create(0, &reader));
+    CHECK_OK(sweeps_stream_mirror_create(0, &mirror));
+    if (reader == NULL || mirror == NULL) {
+        sweeps_stream_reader_destroy(reader);
+        sweeps_stream_mirror_destroy(mirror);
+        return;
+    }
+
+    line.struct_size = sizeof(line);
+    CHECK_STATUS(sweeps_stream_mirror_line(mirror, &line), SWEEPS_ERR_NOT_FOUND);
+    CHECK(sweeps_stream_mirror_segment_reason(mirror).len == 0);
+
+    CHECK_OK(feed_in_chunks(reader, mirror, bytes, size, &tally));
+    CHECK(tally.records == 12);
+    CHECK(tally.tiles == 4);
+    CHECK(tally.plugin_data == 3);
+    CHECK(tally.unknown == 1);
+    CHECK(tally.end_of_stream == 1);
+    CHECK(tally.checked_first_segment == 1);
+    CHECK(sweeps_stream_reader_buffered(reader) == 0);
+
+    /* The second segment replaced the first. */
+    CHECK_OK(sweeps_stream_mirror_line(mirror, &line));
+    CHECK(line.segment_id == 8);
+    CHECK(line.bin_count == 300);
+    CHECK(line.start_hz == 433.05e6);
+    CHECK(line.bin_width_hz == 2500.0);
+    CHECK(line.line == 0);
+    CHECK(line.tiles_applied == 1);
+    if (line.levels != NULL) {
+        CHECK(near_db(line.levels[0], -90.0));
+        CHECK(near_db(line.levels[299], -81.0));
+    }
+    CHECK(str_equals(sweeps_stream_mirror_segment_reason(mirror), "acquisition changed"));
+
+    sweeps_stream_reader_destroy(reader);
+    sweeps_stream_mirror_destroy(mirror);
+}
+
+static void test_stream_truncated(const unsigned char* bytes, size_t size) {
+    sweeps_stream_reader_t* reader = NULL;
+    sweeps_stream_mirror_t* mirror = NULL;
+    stream_tally_t tally;
+
+    CHECK_OK(sweeps_stream_mirror_create(0, &mirror));
+
+    /* Inside the header: nothing to report yet, and nothing wrong. */
+    memset(&tally, 0, sizeof(tally));
+    CHECK_OK(sweeps_stream_reader_create(0, &reader));
+    CHECK_OK(feed_in_chunks(reader, mirror, bytes, 10, &tally));
+    CHECK(tally.records == 0);
+    CHECK(sweeps_stream_reader_buffered(reader) == 10);
+    sweeps_stream_reader_destroy(reader);
+
+    /* Halfway: what arrived intact is read, the rest is pending, not an
+     * error -- a connection that drops is a truncated file, not a corrupt
+     * one. */
+    memset(&tally, 0, sizeof(tally));
+    CHECK_OK(sweeps_stream_reader_create(0, &reader));
+    CHECK_OK(feed_in_chunks(reader, mirror, bytes, size / 2, &tally));
+    CHECK(tally.records > 0 && tally.records < 12);
+    CHECK(tally.end_of_stream == 0);
+    CHECK(sweeps_stream_reader_buffered(reader) > 0);
+    sweeps_stream_reader_destroy(reader);
+
+    sweeps_stream_mirror_destroy(mirror);
+}
+
+static void test_stream_broken(const unsigned char* golden, size_t size) {
+    sweeps_stream_reader_t* reader = NULL;
+    sweeps_stream_mirror_t* mirror = NULL;
+    sweeps_stream_record_t record;
+    unsigned char* damaged = (unsigned char*)malloc(size);
+    stream_tally_t tally;
+    int has_record = 1;
+    const char http[] = "GET / HTTP/1.1\r\n";
+    size_t second_payload;
+
+    CHECK(damaged != NULL);
+    if (damaged == NULL) {
+        return;
+    }
+    CHECK_OK(sweeps_stream_mirror_create(0, &mirror));
+    record.struct_size = sizeof(record);
+
+    /* A bit flipped in the second record's payload (the first tile's data):
+     * the first record is read, then the stream is broken for good. */
+    second_payload = 16 + 12 + read_u32(golden + 16 + 4) + 12;
+    memcpy(damaged, golden, size);
+    damaged[second_payload + 100] ^= 0x01;
+
+    memset(&tally, 0, sizeof(tally));
+    CHECK_OK(sweeps_stream_reader_create(0, &reader));
+    CHECK_STATUS(feed_in_chunks(reader, mirror, damaged, size, &tally), SWEEPS_ERR_CORRUPT);
+    CHECK(tally.records == 1);
+    CHECK(sweeps_last_error().len > 0);
+    CHECK_STATUS(sweeps_stream_reader_next_record(reader, &record, &has_record),
+                 SWEEPS_ERR_CORRUPT);
+    CHECK(has_record == 0);
+    CHECK_STATUS(sweeps_stream_reader_feed(reader, golden, size), SWEEPS_ERR_CORRUPT);
+    sweeps_stream_reader_destroy(reader);
+
+    /* Not a stream at all. */
+    CHECK_OK(sweeps_stream_reader_create(0, &reader));
+    CHECK_STATUS(sweeps_stream_reader_feed(reader, http, sizeof(http) - 1), SWEEPS_ERR_PROTOCOL);
+    CHECK_STATUS(sweeps_stream_reader_feed(reader, golden + 16, size - 16), SWEEPS_ERR_PROTOCOL);
+    CHECK_STATUS(sweeps_stream_reader_next_record(reader, &record, &has_record),
+                 SWEEPS_ERR_PROTOCOL);
+    sweeps_stream_reader_destroy(reader);
+
+    /* A record over the reader's limit: the SegmentOpen fits, the first tile
+     * does not. */
+    memset(&tally, 0, sizeof(tally));
+    CHECK_OK(sweeps_stream_reader_create(512, &reader));
+    CHECK_STATUS(feed_in_chunks(reader, mirror, golden, size, &tally), SWEEPS_ERR_PROTOCOL);
+    CHECK(tally.records == 1);
+    sweeps_stream_reader_destroy(reader);
+
+    free(damaged);
+    sweeps_stream_mirror_destroy(mirror);
+}
+
+static void test_stream_misuse(void) {
+    sweeps_stream_reader_t* reader = NULL;
+    sweeps_stream_mirror_t* mirror = NULL;
+    sweeps_stream_record_t record;
+    sweeps_stream_line_t line;
+    const uint8_t garbage[3] = {1, 2, 3};
+    int has_record = 0;
+
+    CHECK_STATUS(sweeps_stream_reader_create(0, NULL), SWEEPS_ERR_INVALID_ARGUMENT);
+    CHECK_STATUS(sweeps_stream_mirror_create(0, NULL), SWEEPS_ERR_INVALID_ARGUMENT);
+    CHECK_STATUS(sweeps_stream_reader_feed(NULL, garbage, 3), SWEEPS_ERR_INVALID_ARGUMENT);
+    CHECK(sweeps_stream_reader_buffered(NULL) == 0);
+    CHECK_STATUS(sweeps_stream_mirror_line(NULL, &line), SWEEPS_ERR_INVALID_ARGUMENT);
+    sweeps_stream_reader_destroy(NULL);
+    sweeps_stream_mirror_destroy(NULL);
+
+    CHECK_OK(sweeps_stream_reader_create(0, &reader));
+    CHECK_OK(sweeps_stream_mirror_create(0, &mirror));
+    if (reader == NULL || mirror == NULL) {
+        sweeps_stream_reader_destroy(reader);
+        sweeps_stream_mirror_destroy(mirror);
+        return;
+    }
+
+    CHECK_STATUS(sweeps_stream_reader_feed(reader, NULL, 3), SWEEPS_ERR_INVALID_ARGUMENT);
+    CHECK_OK(sweeps_stream_reader_feed(reader, NULL, 0));
+
+    memset(&record, 0, sizeof(record));
+    CHECK_STATUS(sweeps_stream_reader_next_record(reader, &record, &has_record),
+                 SWEEPS_ERR_INVALID_ARGUMENT);
+    record.struct_size = sizeof(record);
+    CHECK_STATUS(sweeps_stream_reader_next_record(reader, &record, NULL),
+                 SWEEPS_ERR_INVALID_ARGUMENT);
+
+    /* A record a caller framed itself: a damaged tile is refused, an unknown
+     * type ignored, and a zeroed struct diagnosed. */
+    record.type = SWEEPS_RECORD_TILE;
+    record.payload.data = garbage;
+    record.payload.len = sizeof(garbage);
+    CHECK(sweeps_stream_mirror_apply(mirror, &record) != SWEEPS_OK);
+    record.type = 0x10000U + SWEEPS_RECORD_SEGMENT_OPEN;
+    CHECK_OK(sweeps_stream_mirror_apply(mirror, &record));
+    record.payload.data = NULL;
+    CHECK_STATUS(sweeps_stream_mirror_apply(mirror, &record), SWEEPS_ERR_INVALID_ARGUMENT);
+    record.struct_size = 0;
+    CHECK_STATUS(sweeps_stream_mirror_apply(mirror, &record), SWEEPS_ERR_INVALID_ARGUMENT);
+    CHECK_STATUS(sweeps_stream_mirror_apply(mirror, NULL), SWEEPS_ERR_INVALID_ARGUMENT);
+
+    sweeps_stream_reader_destroy(reader);
+    sweeps_stream_mirror_destroy(mirror);
+}
+
+static void test_streams(void) {
+    size_t size = 0;
+    unsigned char* golden = read_file(kGoldenStreamPath, &size);
+
+    CHECK(golden != NULL && size > 16);
+    if (golden == NULL) {
+        (void)fprintf(stderr, "cannot read %s\n", kGoldenStreamPath);
+        return;
+    }
+
+    test_stream_golden(golden, size);
+    test_stream_truncated(golden, size);
+    test_stream_broken(golden, size);
+    test_stream_misuse();
+    free(golden);
+}
+
 /* --------------------------------------------------------------------- main */
 
 int main(void) {
@@ -758,6 +1126,7 @@ int main(void) {
 
     test_writer_round_trip();
     test_metadata_builder();
+    test_streams();
 
     if (g_failures != 0) {
         (void)fprintf(stderr, "%d check(s) failed\n", g_failures);

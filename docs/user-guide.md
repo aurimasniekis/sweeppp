@@ -85,6 +85,8 @@ where the time goes.
 - **Link:** only when connected to a server: round trip, data rate, how many
   frames the server merged because the network was slower, and how long it
   takes to encode each. The sections below it are measured on the server.
+- **Server:** the server machine's CPU, memory, load, temperature (Linux),
+  free space where recordings go, and uptime.
 - **Input:** how full the USB link and buffers are, sample rate, dropped
   samples, overruns and gaps. **Reset** clears the counters.
 - **Device:** temperatures, power and similar readings, for radios that
@@ -148,8 +150,43 @@ While connected:
 
 If the connection drops, Sweep++ returns to the radios on this computer and
 keeps trying the server, at longer intervals up to every 30 seconds. When it
-is back, the plan and settings are put back and the recording carries on in
-the same file. **Stop trying**, in the device panel, gives up.
+is back, the plan and settings are put back, the passes the server kept
+meanwhile fill the waterfall, and the recording carries on in the same file
+without a gap. **Stop trying**, in the device panel, gives up.
+
+### Watching and control
+
+A server started with `--shared` takes several desktops and browsers at once.
+One controls the radio; the others watch the same spectrum.
+
+- Watching, a banner reads "Watching — *name* has control", the Via chip says
+  **watching**, and the controls that change the radio are greyed out. Zoom,
+  markers, panels, snapshots, local recording and the History viewer still
+  work.
+- **Take control** in the banner takes it from whoever has it, at once; they
+  are told and go on watching.
+- The device panel lists who is connected. "In use, can watch" under **On
+  this network** marks a shared server someone controls.
+- If the one in control drops, control is free and the radio keeps running
+  for the others.
+
+### In a browser
+
+`sweeppp-cli serve --web 8080` serves the same instrument to a browser,
+phones included: open `http://<server>:8080` and log in with the token.
+
+- The browser has the live spectrum and waterfall, panels, markers, range,
+  analysis and corrections, device settings, antennas, recordings and
+  downloads, benchmark and performance, themes, band and channel labels,
+  snapshots, and a History view of the server's recordings.
+- Watching and **Take control** work as on the desktop, between browsers and
+  desktops alike.
+- **Bands** and **Channels** on the bar tick the server's allocations and
+  channel lists; **Menu → Data contributors** orders them.
+- Plugin windows (detections, plugin panels) and plugin management are
+  desktop-only.
+- View settings, profiles, range presets and marker presets are kept in the
+  browser.
 
 ## Setting the range
 

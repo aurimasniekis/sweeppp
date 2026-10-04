@@ -88,6 +88,7 @@ void SessionRecorder::processFrame(const SpectrumFramePtr& frame) {
     view.config = &frame->config;
 
     auto outcome = m_writer->writeFrame(view);
+    publishCounts();
     if (!outcome) {
         logError("session", "{}", outcome.error().describe());
         return;
@@ -119,6 +120,7 @@ Status SessionRecorder::close() {
     drainEvents();
 
     const Status written = adopt(m_writer->close());
+    publishCounts();
     m_closed = true;
 
     // Dropping is the right behaviour for a live display consumer, but for a
@@ -149,6 +151,11 @@ void SessionRecorder::Pending::push(const SessionEvent& event) {
         return;
     }
     events.push_back(event);
+}
+
+void SessionRecorder::publishCounts() noexcept {
+    m_bytesWritten.store(m_writer->bytesWritten());
+    m_linesWritten.store(m_writer->linesWritten());
 }
 
 void SessionRecorder::recordEvent(const SessionEvent& event) {

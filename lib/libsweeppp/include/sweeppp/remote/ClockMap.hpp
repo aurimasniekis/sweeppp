@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,10 @@ public:
     /// returned before -- so events and frames mapped in the order they
     /// arrived stay in that order. `nowNs` itself before the first ping.
     [[nodiscard]] std::uint64_t toClient(std::uint64_t serverNs, std::uint64_t nowNs) noexcept;
+
+    /// Nothing mapped from here on is earlier than `ns`: replayed frames
+    /// came first, and live ones must follow them.
+    void raiseFloor(std::uint64_t ns) noexcept { m_lastMappedNs = std::max(m_lastMappedNs, ns); }
 
     /// Round trip of the latest ping, and of the fastest in the window.
     [[nodiscard]] std::uint64_t lastRoundTripNs() const noexcept { return m_lastRoundTripNs; }

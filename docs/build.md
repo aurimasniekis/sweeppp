@@ -17,6 +17,8 @@
 - **Ninja**
 - **pkg-config** (or pkgconf)
 - **A C++23 compiler:** GCC 14+, Clang 18+, or Apple clang from Xcode 26+
+- **Node.js 20+ and pnpm**, for the browser UI (`corepack enable pnpm`), unless
+  built with `SWEEPPP_WITH_WEB_UI=OFF`
 
 CMake doesn't check the compiler version, so an older compiler fails partway
 through the build rather than at configure time:
@@ -58,6 +60,7 @@ CI installs the same list, plus the tools its packaging step needs; see
 | GLFW ≥ 3.3            | the GUI                                         | `SWEEPPP_BUILD_GUI=OFF`         |
 | OpenGL, GTK 3 (Linux) | the GUI (GTK for the file dialog and clipboard) | `SWEEPPP_BUILD_GUI=OFF`         |
 | libcurl               | the update check                                | `SWEEPPP_WITH_UPDATE_CHECK=OFF` |
+| Node.js, pnpm         | the browser UI for `serve --web`                | `SWEEPPP_WITH_WEB_UI=OFF`       |
 | FFTW (`fftw3f`)       | the FFTW plugin                                 | `SWEEPPP_WITH_FFTW=OFF`         |
 | libhackrf             | the HackRF plugin                               | `SWEEPPP_WITH_HACKRF=OFF`       |
 | libbladeRF            | the bladeRF plugin                              | `SWEEPPP_WITH_BLADERF=OFF`      |
@@ -95,7 +98,7 @@ make test     # build and run the tests
 Everything lands in `build/<preset>/dist/`:
 
 - `sweeppp` (on macOS, `Sweep++ Nightly.app`, or `Sweep++.app` from the
-  `release` preset), `sweeppp-cli`, `sweeppp-server` and `sweeps`;
+  `release` preset), `sweeppp-cli` and `sweeps`;
 - the plugins, in `dist/plugins/` as `sweeppp-plugin-<name>.so`, `.dylib` or
   `.dll`;
 - the test executables.
@@ -130,7 +133,7 @@ Pass these to CMake with `-D<option>=ON|OFF`.
 | Option                      | Default | Effect                                                                                                     |
 |-----------------------------|---------|------------------------------------------------------------------------------------------------------------|
 | `SWEEPPP_BUILD_GUI`         | `ON`    | The desktop GUI, `sweeppp`.                                                                                |
-| `SWEEPPP_BUILD_SERVER`      | `ON`    | `sweeppp-server`, currently a placeholder.                                                                 |
+| `SWEEPPP_WITH_WEB_UI`       | `ON`    | The browser UI for `serve --web`, built with pnpm and compiled into `sweeppp-cli`. Needs Node 20 and pnpm. |
 | `SWEEPPP_BUILD_PLUGINS`     | `ON`    | All bundled plugins. Off skips every plugin's system library.                                              |
 | `SWEEPPP_BUILD_TESTS`       | `ON`    | The test suites, including libsweepsfile's.                                                                |
 | `SWEEPPP_WITH_FFTW`         | `ON`    | The FFTW plugin. Needs `fftw3f`.                                                                           |
@@ -286,7 +289,7 @@ Every build is Sweep++ Nightly except the `release` preset, which sets
 | Identifier   | `sweeppp`                                                       | `sweeppp-nightly`                                                                                       |
 | macOS bundle | `Sweep++.app`, `org.sweeppp.app`                                | `Sweep++ Nightly.app`, `org.sweeppp.app.nightly`                                                        |
 | Settings     | `~/.config/sweeppp`                                             | `~/.config/sweeppp-nightly`                                                                             |
-| `.deb`       | `sweeppp`: `sweeppp`, `sweeppp-cli`, `sweeppp-server`, `sweeps` | `sweeppp-nightly`: `sweeppp-nightly`, `sweeppp-nightly-cli`, `sweeppp-nightly-server`, `sweeps-nightly` |
+| `.deb`       | `sweeppp`: `sweeppp`, `sweeppp-cli`, `sweeps`                   | `sweeppp-nightly`: `sweeppp-nightly`, `sweeppp-nightly-cli`, `sweeps-nightly`                           |
 
 *Share settings with the Sweep++ release* in the nightly's settings switches
 it to the release's directory from the next start; the choice is the empty

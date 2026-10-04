@@ -80,8 +80,9 @@ public:
     [[nodiscard]] Status close();
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return m_writer->path(); }
-    [[nodiscard]] std::uint64_t bytesWritten() const noexcept { return m_writer->bytesWritten(); }
-    [[nodiscard]] std::uint64_t linesWritten() const noexcept { return m_writer->linesWritten(); }
+    /// As of the recorder thread's last write. Callable from any thread.
+    [[nodiscard]] std::uint64_t bytesWritten() const noexcept { return m_bytesWritten.load(); }
+    [[nodiscard]] std::uint64_t linesWritten() const noexcept { return m_linesWritten.load(); }
     [[nodiscard]] std::uint32_t segmentCount() const noexcept { return m_writer->segmentCount(); }
 
     [[nodiscard]] bool retentionReached() const noexcept { return m_writer->retentionReached(); }
@@ -137,6 +138,12 @@ private:
     };
     std::shared_ptr<Pending> m_pending = std::make_shared<Pending>();
     std::atomic<bool> m_completePassesOnly{false};
+
+    /// The writer's counts, published by whichever thread wrote last: the
+    /// writer's own are plain fields that thread alone may read.
+    void publishCounts() noexcept;
+    std::atomic<std::uint64_t> m_bytesWritten{0};
+    std::atomic<std::uint64_t> m_linesWritten{0};
 };
 
 } // namespace sweeppp::session

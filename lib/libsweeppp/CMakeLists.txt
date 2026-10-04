@@ -2,6 +2,7 @@ set(SWEEPPP_SOURCES
     src/core/BlockPool.cpp
     src/core/CrashHandler.cpp
     src/core/EventBus.cpp
+    src/core/HostStats.cpp
     src/core/Log.cpp
     src/core/Paths.cpp
     src/core/SystemInfo.cpp
@@ -12,6 +13,7 @@ set(SWEEPPP_SOURCES
     src/dsp/Convert.cpp
 
     src/crypto/Noise.cpp
+    src/crypto/Sha1.cpp
     src/crypto/Sha256.cpp
 
     src/correction/CorrectionLearner.cpp
@@ -29,9 +31,12 @@ set(SWEEPPP_SOURCES
 
     src/instrument/LocalInstrument.cpp
 
+    src/net/Base64.cpp
+    src/net/Http.cpp
     src/net/SecureChannel.cpp
     src/net/Socket.cpp
     src/net/Udp.cpp
+    src/net/WebSocket.cpp
 
     src/pipeline/AsyncFrameConsumer.cpp
     src/pipeline/FrameBus.cpp
@@ -79,6 +84,8 @@ set(SWEEPPP_SOURCES
     src/ui/ToastCenter.cpp
     src/ui/TraceStore.cpp
 
+    src/web/WebServer.cpp
+
     src/backends/sdr/iqfile/IqFileDevice.cpp
     src/backends/sdr/synthetic/SyntheticDevice.cpp
 )
@@ -98,7 +105,7 @@ target_include_directories(sweeppp
 # rather than guessed.
 target_link_libraries(sweeppp
     PUBLIC  sweeps::sweepsfile tomlplusplus::tomlplusplus Threads::Threads
-    PRIVATE sweeppp_warnings sweeppp_monocypher ${CMAKE_DL_LIBS})
+    PRIVATE sweeppp_warnings sweeppp_monocypher nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})
 
 # dbghelp is the crash handler's, and nothing else in the tree needs it:
 # turning a captured return address into a name is SymFromAddr's job, and the

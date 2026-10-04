@@ -7,6 +7,7 @@
 #include "sweeppp/core/Result.hpp"
 #include "sweeppp/core/Telemetry.hpp"
 #include "sweeppp/instrument/LocalInstrument.hpp"
+#include "sweeppp/net/ByteStream.hpp"
 #include "sweeppp/pipeline/FrameBus.hpp"
 #include "sweeppp/remote/Messages.hpp"
 #include "sweeppp/remote/Protocol.hpp"
@@ -36,6 +37,12 @@ struct ServerConfig {
     /// After a client drops without saying goodbye, how long the radio keeps
     /// running for it to come back. Zero stops it at once, as a goodbye does.
     std::chrono::milliseconds linger = kDefaultLinger;
+
+    /// While a dropped controller's radio lingers, its completed passes are
+    /// kept, up to this long and this many bytes, and sent first when that
+    /// client comes back. Zero keeps none.
+    std::chrono::milliseconds backlog = kDefaultBacklog;
+    std::size_t backlogBytes = kDefaultBacklogBytes;
 
     /// Where recordings made on the server go; empty means it makes none.
     std::filesystem::path sessionsDir;
@@ -88,6 +95,15 @@ public:
 
     /// The bound port, once started.
     [[nodiscard]] std::uint16_t port() const noexcept;
+
+    /// A client on a stream already authenticated elsewhere -- a browser's
+    /// WebSocket. The client opens with its stream header and a hello, as a
+    /// desktop does inside the encrypted channel. Any thread, once started.
+    void adopt(std::unique_ptr<net::ByteStream> stream);
+
+    /// A recording to hand out by name, checked as a client's fetch is: only
+    /// a finished `.sweeps` file in the recordings folder. Any thread.
+    [[nodiscard]] Result<std::filesystem::path> recordingFile(const std::string& name) const;
 
     [[nodiscard]] bool clientConnected() const;
 

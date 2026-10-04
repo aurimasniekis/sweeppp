@@ -40,13 +40,28 @@ downloads go into `build/<preset>/_deps`.
 | [nativefiledialog-extended](https://github.com/btzy/nativefiledialog-extended) | `v1.2.1`           | Zlib                 | GUI: file dialog                      |
 | [stb_image_write](https://github.com/nothings/stb)                             | `2c980bb5`         | MIT or public domain | GUI: PNG snapshots                    |
 | [Material Design Icons](https://github.com/Templarian/MaterialDesign-Webfont)  | `v7.4.47`          | Apache-2.0           | GUI: icon font file                   |
-| [nlohmann/json](https://github.com/nlohmann/json)                              | `v3.12.0`          | MIT                  | Server, GUI update check              |
+| [nlohmann/json](https://github.com/nlohmann/json)                              | `v3.12.0`          | MIT                  | Web server, GUI update check          |
 | [toml++](https://github.com/marzer/tomlplusplus)                               | `v3.4.0`           | MIT                  | `libsweeppp`: config files            |
 | [Monocypher](https://github.com/LoupVaillant/Monocypher)                       | `4.0.2`            | CC0-1.0 or BSD-2-Clause | `libsweeppp`: remote link encryption |
 | [PocketFFT](https://github.com/mreineck/pocketfft) (`cpp` branch)              | `c90e55b3`         | BSD-3-Clause         | `fft-pocketfft` plugin                |
 | [libfobos](https://github.com/rigexpert/libfobos)                              | `v2.4.0`           | LGPL-2.1             | `sdr-fobos` plugin, linked statically |
 | [libfobos-sdr-agile](https://github.com/rigexpert/libfobos-sdr-agile)          | `v.3.3.0`          | LGPL-2.1             | `sdr-fobos` plugin, linked statically |
 | [doctest](https://github.com/doctest/doctest)                                  | `v2.4.12`          | MIT                  | Tests only                            |
+
+## The browser UI
+
+Installed by pnpm from [`web/pnpm-lock.yaml`](web/pnpm-lock.yaml) when the UI is
+built, and bundled into `sweeppp-cli`. Turn off with `SWEEPPP_WITH_WEB_UI=OFF`.
+
+| Project                                             | Version  | Licence    | In the bundle   |
+|-----------------------------------------------------|----------|------------|-----------------|
+| [React](https://react.dev/), React DOM              | `19.3.0` | MIT        | yes             |
+| [Radix UI](https://www.radix-ui.com/) primitives    | `1.x`    | MIT        | yes             |
+| [TanStack Store](https://tanstack.com/store)        | `0.11.2` | MIT        | yes             |
+| [Material Design Icons](https://pictogrammers.com/), `@mdi/js` | `7.4.47` | Apache-2.0 | the icons used  |
+| [Tailwind CSS](https://tailwindcss.com/)            | `4.3.3`  | MIT        | generated CSS   |
+| [Vite](https://vite.dev/), Vitest                   | `8.3.2`  | MIT        | build and tests |
+| [TypeScript](https://www.typescriptlang.org/)       | `7.0.2`  | Apache-2.0 | build only      |
 
 ## Copied into the repository
 
@@ -64,8 +79,8 @@ third-party code.
 ## Licence notes
 
 - **GPL libraries are only linked by their own plugins.** FFTW, libhackrf and
-  librtlsdr are each linked by a single plugin. `libsweeppp`, `sweeppp`,
-  `sweeppp-cli` and `sweeppp-server` link none of them, and you can confirm
+  librtlsdr are each linked by a single plugin. `libsweeppp`, `sweeppp`
+  and `sweeppp-cli` link none of them, and you can confirm
   this with `otool -L` or `ldd`. Plugins are loaded at runtime. The app needs
   an FFT plugin to run, though, so leaving FFTW out means another FFT plugin
   has to provide the transform.

@@ -134,7 +134,8 @@ std::span<const std::string_view> sectionsTouchedBy(std::string_view name) noexc
 
 bool viewerMay(std::string_view name) noexcept {
     return name == op::kSetLinkResolution || name == op::kFetchRecording ||
-           name == op::kTakeControl || name == op::kReleaseControl;
+           name == op::kTakeControl || name == op::kReleaseControl || name == op::kHistoryOpen ||
+           name == op::kHistoryQuery || name == op::kHistoryClose;
 }
 
 // ---- the handshake -------------------------------------------------------------
@@ -161,11 +162,14 @@ Metadata Welcome::toMetadata() const {
     Metadata out;
     out.setString("serverName", serverName);
     out.setBool("shared", shared);
+    setU64(out, "serverNs", serverNs);
     return out;
 }
 
 Welcome Welcome::from(const Metadata& in) {
-    return Welcome{.serverName = in.getString("serverName"), .shared = in.getBool("shared")};
+    return Welcome{.serverName = in.getString("serverName"),
+                   .shared = in.getBool("shared"),
+                   .serverNs = getU64(in, "serverNs")};
 }
 
 Metadata Refused::toMetadata() const {
@@ -291,6 +295,9 @@ Metadata FrameCommit::toMetadata() const {
     out.setBool("passComplete", passComplete);
     out.setInt("averageCount", averageCount);
     out.setFloat("clippedFraction", static_cast<double>(clippedFraction));
+    if (replayed) {
+        out.setBool("replayed", true);
+    }
     return out;
 }
 
@@ -305,7 +312,8 @@ FrameCommit FrameCommit::from(const Metadata& in) {
                        .sweepStep = getU32(in, "sweepStep"),
                        .passComplete = in.getBool("passComplete"),
                        .averageCount = getU32(in, "averageCount", 1),
-                       .clippedFraction = static_cast<float>(in.getFloat("clippedFraction"))};
+                       .clippedFraction = static_cast<float>(in.getFloat("clippedFraction")),
+                       .replayed = in.getBool("replayed")};
 }
 
 Metadata Ping::toMetadata() const {
@@ -411,6 +419,48 @@ Chunk Chunk::from(const Metadata& in) {
 
 // ---- telemetry --------------------------------------------------------------------
 
+namespace {
+
+Metadata encodeHost(const HostStats& host) {
+    Metadata out;
+    out.setString("system", host.system);
+    out.setInt("cores", host.cores);
+    out.setFloat("cpuPercent", host.cpuPercent);
+    out.setFloat("processCpuPercent", host.processCpuPercent);
+    setU64(out, "memoryTotalBytes", host.memoryTotalBytes);
+    setU64(out, "memoryUsedBytes", host.memoryUsedBytes);
+    setU64(out, "processMemoryBytes", host.processMemoryBytes);
+    out.setFloat("load1", host.load1);
+    out.setFloat("uptimeSeconds", host.uptimeSeconds);
+    if (host.temperatureC) {
+        out.setFloat("temperatureC", *host.temperatureC);
+    }
+    setU64(out, "diskTotalBytes", host.diskTotalBytes);
+    setU64(out, "diskFreeBytes", host.diskFreeBytes);
+    return out;
+}
+
+HostStats decodeHost(const Metadata& in) {
+    HostStats host;
+    host.system = in.getString("system");
+    host.cores = static_cast<std::uint32_t>(std::max<std::int64_t>(in.getInt("cores"), 0));
+    host.cpuPercent = in.getFloat("cpuPercent", -1.0);
+    host.processCpuPercent = in.getFloat("processCpuPercent", -1.0);
+    host.memoryTotalBytes = getU64(in, "memoryTotalBytes");
+    host.memoryUsedBytes = getU64(in, "memoryUsedBytes");
+    host.processMemoryBytes = getU64(in, "processMemoryBytes");
+    host.load1 = in.getFloat("load1", -1.0);
+    host.uptimeSeconds = in.getFloat("uptimeSeconds", -1.0);
+    if (in.find("temperatureC") != nullptr) {
+        host.temperatureC = in.getFloat("temperatureC");
+    }
+    host.diskTotalBytes = getU64(in, "diskTotalBytes");
+    host.diskFreeBytes = getU64(in, "diskFreeBytes");
+    return host;
+}
+
+} // namespace
+
 void appendTelemetry(std::vector<std::byte>& out, const TelemetryReport& report,
                      std::uint64_t monotonicNs) {
     Metadata link;
@@ -426,6 +476,9 @@ void appendTelemetry(std::vector<std::byte>& out, const TelemetryReport& report,
     body.setHash("process", encodeProcessStats(report.process));
     body.setHash("health", encodeHealth(report.health));
     body.setHash("link", std::move(link));
+    if (report.host) {
+        body.setHash("host", encodeHost(*report.host));
+    }
 
     std::vector<std::byte> payload;
     body.encode(payload);
@@ -449,6 +502,9 @@ Result<TelemetryReport> decodeTelemetry(const sweeps::StreamRecord& record) {
     report.link.partialsCoalesced = getU64(link, "partialsCoalesced");
     report.link.eventsDropped = getU64(link, "eventsDropped");
     report.link.encodeNs = getU64(link, "encodeNs");
+    if (const Value* host = body->find("host"); host != nullptr && host->asHash() != nullptr) {
+        report.host = decodeHost(*host->asHash());
+    }
     return report;
 }
 

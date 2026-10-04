@@ -16,12 +16,14 @@
 #include <sweeppp/backends/sdr/SyntheticDevice.hpp>
 #include <sweeppp/core/Clock.hpp>
 #include <sweeppp/fft/FftBackendManager.hpp>
+#include <sweeppp/history/SessionRecorder.hpp>
 #include <sweeppp/instrument/LocalInstrument.hpp>
 #include <sweeppp/remote/Reconnector.hpp>
 #include <sweeppp/remote/RemoteInstrument.hpp>
 #include <sweeppp/remote/RemoteServer.hpp>
 #include <sweeppp/remote/ServerList.hpp>
 #include <sweeppp/sdr/ISdrDevice.hpp>
+#include <sweeps/SessionReader.hpp>
 #include <thread>
 #include <vector>
 
@@ -108,8 +110,8 @@ public:
         return RemoteEndpoint{.host = "127.0.0.1", .port = server->port(), .token = "secret"};
     }
 
-    void connect() {
-        auto connected = RemoteInstrument::connect(endpoint(), output, events, 3000ms);
+    void connect(const ClientIdentity& identity = {}) {
+        auto connected = RemoteInstrument::connect(endpoint(), output, events, 3000ms, identity);
         REQUIRE(connected.has_value());
         remote = std::move(*connected);
         remote->begin();
@@ -770,4 +772,116 @@ TEST_CASE("a second desktop on a shared server watches until it takes control") 
 
     other.reset();
     otherOutput.unsubscribe(subscription);
+}
+
+namespace {
+
+/// Every frame the desktop's bus carries, with what store-and-forward marks.
+struct FrameLog final : IFrameConsumer {
+    struct Entry {
+        std::uint64_t hostNs = 0;
+        bool replayed = false;
+        bool passComplete = false;
+    };
+    void onFrame(const SpectrumFramePtr& frame) noexcept override {
+        const std::lock_guard lock(mutex);
+        entries.push_back({frame->hostTimeNs, frame->replayed, frame->passComplete});
+    }
+    [[nodiscard]] std::string_view consumerName() const noexcept override { return "log"; }
+    std::vector<Entry> snapshot() {
+        const std::lock_guard lock(mutex);
+        return entries;
+    }
+    std::mutex mutex;
+    std::vector<Entry> entries;
+};
+
+} // namespace
+
+TEST_CASE("passes missed while the link was down arrive first, in order, and fill the recording") {
+    Loopback loop;
+    FrameLog log;
+    const auto logged = loop.output.subscribe(&log);
+    const std::filesystem::path file = loop.root() / "through-the-gap.sweeps";
+    auto recorder = session::SessionRecorder::create(file, session::RecorderConfig{});
+    REQUIRE(recorder.has_value());
+    (*recorder)->setCompletePassesOnly(true);
+    const auto recording = loop.output.subscribe(recorder->get());
+
+    loop.connect(ClientIdentity{.clientId = "desk-1"});
+    REQUIRE(loop.remote->start().has_value());
+    REQUIRE(loop.tickUntil([&] {
+        const std::lock_guard lock(loop.counter.mutex);
+        return loop.counter.passes >= 5;
+    }));
+    const std::uint64_t lastBefore = log.snapshot().back().hostNs;
+    const std::size_t before = log.snapshot().size();
+
+    loop.remote->abandon();
+    REQUIRE(loop.tickUntil([&] { return !loop.remote->linkUp(); }));
+    REQUIRE(loop.tickUntil([&] { return !loop.server->clientConnected(); }));
+    // The radio sweeps on with nobody connected, and the server keeps it.
+    std::this_thread::sleep_for(1000ms);
+
+    loop.remote.reset();
+    loop.connect(ClientIdentity{.clientId = "desk-1", .resumeAfterNs = lastBefore});
+    REQUIRE(loop.tickUntil([&] {
+        const auto entries = log.snapshot();
+        return std::any_of(entries.begin() + static_cast<std::ptrdiff_t>(before), entries.end(),
+                           [](const FrameLog::Entry& e) { return !e.replayed; });
+    }));
+    loop.tickFor(300ms);
+
+    const std::vector<FrameLog::Entry> entries = log.snapshot();
+    const std::vector<FrameLog::Entry> after(entries.begin() + static_cast<std::ptrdiff_t>(before),
+                                             entries.end());
+    const auto firstLive =
+        std::ranges::find_if(after, [](const FrameLog::Entry& e) { return !e.replayed; });
+    const auto replayed = static_cast<std::size_t>(firstLive - after.begin());
+    CHECK(replayed > 5);
+    CHECK(
+        std::none_of(firstLive, after.end(), [](const FrameLog::Entry& e) { return e.replayed; }));
+    CHECK(std::all_of(after.begin(), firstLive,
+                      [](const FrameLog::Entry& e) { return e.passComplete; }));
+    CHECK(after.front().hostNs > lastBefore);
+    // Replayed passes each after the last; live ones never go backwards, and
+    // the clock keeps those that arrive together on one time.
+    for (std::size_t i = 1; i < after.size(); ++i) {
+        CAPTURE(i);
+        if (i < replayed) {
+            CHECK(after[i].hostNs > after[i - 1].hostNs);
+        } else {
+            CHECK(after[i].hostNs >= after[i - 1].hostNs);
+        }
+    }
+    REQUIRE(firstLive != after.end());
+    CHECK(firstLive->hostNs > after[replayed - 1].hostNs);
+
+    loop.output.unsubscribe(recording);
+    loop.output.unsubscribe(logged);
+    REQUIRE((*recorder)->close().has_value());
+    auto reader = sweeps::SessionReader::open(file);
+    REQUIRE(reader.has_value());
+    auto tiles =
+        (*reader)->query(sweeps::HistoryQuery{.maxLines = 100000, .maxBins = 64, .lod = 0});
+    REQUIRE(tiles.has_value());
+    std::vector<std::uint64_t> times;
+    for (const sweeps::HistoryTile& tile : *tiles) {
+        if (tile.freqBlock != 0) {
+            continue;
+        }
+        const std::uint64_t step =
+            tile.lines > 1 ? (tile.lastLineNs - tile.firstLineNs) / (tile.lines - 1) : 0;
+        for (std::uint32_t line = 0; line < tile.lines; ++line) {
+            times.push_back(tile.firstLineNs + step * line);
+        }
+    }
+    std::ranges::sort(times);
+    REQUIRE(times.size() > 10);
+    std::uint64_t widest = 0;
+    for (std::size_t i = 1; i < times.size(); ++i) {
+        widest = std::max(widest, times[i] - times[i - 1]);
+    }
+    // A second's outage, filled: no two lines further apart than a few passes.
+    CHECK(widest < 400'000'000ULL);
 }

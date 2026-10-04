@@ -292,8 +292,35 @@ Result<Options> parseArguments(int argc, char** argv) {
                 return std::unexpected(value.error());
             }
             options.lingerSeconds = *value;
+        } else if (argument == "--backlog") {
+            auto value = durationValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.backlogSeconds = *value;
         } else if (argument == "--no-advertise") {
             options.noAdvertise = true;
+        } else if (argument == "--web") {
+            auto value = intValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            if (*value < 1 || *value > 65535) {
+                return fail<Options>(ErrorCode::InvalidArgument, "--web takes a port");
+            }
+            options.webPort = static_cast<std::uint16_t>(*value);
+        } else if (argument == "--web-listen") {
+            auto value = stringValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.webListen = *value;
+        } else if (argument == "--web-root") {
+            auto value = stringValue();
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.webRoot = *value;
         } else if (argument == "--shared") {
             options.shared = true;
         } else if (argument == "--max-clients") {
@@ -413,6 +440,8 @@ SERVE
   --new-token              print a new random token and exit
   --linger <time>          keep sweeping this long for a desktop that dropped
                            (default: 30s; 0 stops at once)
+  --backlog <time>         passes kept meanwhile and sent when it is back
+                           (default: 120s, at most 64 MiB; 0 keeps none)
   --record                 record from the start, into the config folder's
                            sessions/; desktops can download what is recorded
   --no-advertise           do not answer desktops looking for servers (mDNS);
@@ -420,6 +449,9 @@ SERVE
   --shared                 several clients at once: one controls, the rest
                            watch, and any can take control
   --max-clients <n>        with --shared (default: 8)
+  --web <port>             serve the browser UI on this port too
+  --web-listen <address>   where the browser UI listens (default: --listen)
+  --web-root <dir>         serve the UI's files from here, for working on it
 
 EXTRACT
   --from <time>            offset from session start
@@ -442,6 +474,10 @@ EXAMPLES
 
   # Serve a HackRF to desktops on the local network
   sweeppp-cli serve --device hackrf --listen 0.0.0.0 --token-file ~/.sweeppp-token
+
+  # ...and to browsers, several at once
+  sweeppp-cli serve --device hackrf --listen 0.0.0.0 --token-file ~/.sweeppp-token \
+      --shared --web 8080
 
   # What is available in this build?
   sweeppp-cli info)");
