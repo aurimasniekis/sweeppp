@@ -199,6 +199,21 @@ public:
     return height(statusFramePadding());
 }
 
+/// Puts the next modal prompt at the top of the main window, under the
+/// toolbar, every frame.
+///
+/// Every frame, and pinned to the main viewport: placed only as it appears,
+/// a prompt is placed before its size is known, lands partly outside the
+/// window, and -- with panels able to tear off into windows of their own -- is
+/// given one, at the top of the screen.
+inline void placePrompt() {
+    const ImGuiViewport* main = ImGui::GetMainViewport();
+    ImGui::SetNextWindowViewport(main->ID);
+    ImGui::SetNextWindowPos(ImVec2(main->WorkPos.x + (main->WorkSize.x * 0.5F),
+                                   main->WorkPos.y + toolbarHeight() + scaled(12.0F)),
+                            ImGuiCond_Always, ImVec2(0.5F, 0.0F));
+}
+
 [[nodiscard]] inline ImVec4 toVec4(const Color& color) {
     return {color.r, color.g, color.b, color.a};
 }

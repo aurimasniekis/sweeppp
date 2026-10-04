@@ -414,6 +414,7 @@ void MainWindow::draw() {
     // Once a frame, for every panel: each pushes these unless it is paused.
     m_frameLines = m_state.takePendingWaterfallLines();
     m_reducedLines.clear();
+    m_waterfallSeed = {};
     m_state.telemetry().render().waterfallLines.fetch_add(m_frameLines.size(),
                                                           std::memory_order_relaxed);
 
@@ -1551,9 +1552,7 @@ void MainWindow::toast(ToastSeverity severity, std::string text) {
 
 void MainWindow::drawClosePrompt() {
     ImGui::OpenPopup("Save session?");
-
-    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    bar::placePrompt();
 
     if (ImGui::BeginPopupModal("Save session?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped("This session has unsaved data.\n"

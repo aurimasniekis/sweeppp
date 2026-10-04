@@ -3,6 +3,7 @@
 
 #include "AppWindow.hpp"
 
+#include "FileDialog.hpp"
 #include "Icons.hpp"
 
 #include <GLFW/glfw3.h>
@@ -288,6 +289,7 @@ std::expected<void, std::string> AppWindow::create(const Options& options) {
     }
 
     glfwSetWindowUserPointer(m_window, this);
+    setFileDialogParent(m_window);
     glfwSetDropCallback(m_window, [](GLFWwindow* window, int count, const char** paths) {
         auto* self = static_cast<AppWindow*>(glfwGetWindowUserPointer(window));
         if (self == nullptr || !self->m_fileDropHandler) {
@@ -461,6 +463,7 @@ void AppWindow::destroy() noexcept {
         m_implotInitialised = false;
     }
     if (m_window != nullptr) {
+        setFileDialogParent(nullptr);
         glfwDestroyWindow(m_window);
         m_window = nullptr;
     }
