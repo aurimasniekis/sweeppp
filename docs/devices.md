@@ -2,7 +2,7 @@
 
 Sweep++ works with these radios:
 
-- [HackRF One](#hackrf-one)
+- [HackRF One and HackRF Pro](#hackrf-one-and-hackrf-pro)
 - [bladeRF](#bladerf)
 - [RTL-SDR](#rtl-sdr)
 - [Fobos SDR](#fobos-sdr)
@@ -30,16 +30,16 @@ Sweep++ works with these radios:
 
 ## At a glance
 
-|                 | HackRF One    | bladeRF                                                        | RTL-SDR                                                                        | Fobos SDR                              |
-|-----------------|---------------|----------------------------------------------------------------|--------------------------------------------------------------------------------|----------------------------------------|
-| Frequency range | 1 MHz – 6 GHz | 47 MHz – 6 GHz                                                 | depends on the tuner, about 24 – 1766 MHz; 0.5 – 28.8 MHz with direct sampling | 50 MHz – 6.9 GHz                       |
-| Sample rates    | 2 – 20 MS/s   | 0.52 – 61.44 MS/s, plus 8-bit rates above that where supported | 0.25 – 3.2 MS/s                                                                | 8 – 80 MS/s (8 – 64 on agile firmware) |
-| Sample format   | 8-bit         | 16-bit, or 8-bit above 61.44 MS/s                              | 8-bit                                                                          | floating point                         |
-| Inputs          | 1             | 1, or 2 on the 2.0 micro                                       | tuner, plus HF on most tuners                                                  | 1                                      |
-| Bias-T          | yes, 3.3 V    | yes                                                            | yes, if your librtlsdr supports it                                             | —                                      |
-| Health readings | —             | yes (2.0 micro)                                                | —                                                                              | —                                      |
+|                 | HackRF One/Pro | bladeRF                                                        | RTL-SDR                                                                        | Fobos SDR                              |
+|-----------------|----------------|----------------------------------------------------------------|--------------------------------------------------------------------------------|----------------------------------------|
+| Frequency range | 1 MHz – 6 GHz  | 47 MHz – 6 GHz                                                 | depends on the tuner, about 24 – 1766 MHz; 0.5 – 28.8 MHz with direct sampling | 50 MHz – 6.9 GHz                       |
+| Sample rates    | 2 – 20 MS/s    | 0.52 – 61.44 MS/s, plus 8-bit rates above that where supported | 0.25 – 3.2 MS/s                                                                | 8 – 80 MS/s (8 – 64 on agile firmware) |
+| Sample format   | 8-bit          | 16-bit, or 8-bit above 61.44 MS/s                              | 8-bit                                                                          | floating point                         |
+| Inputs          | 1              | 1, or 2 on the 2.0 micro                                       | tuner, plus HF on most tuners                                                  | 1                                      |
+| Bias-T          | yes, 3.3 V     | yes                                                            | yes, if your librtlsdr supports it                                             | —                                      |
+| Health readings | —              | yes (2.0 micro)                                                | —                                                                              | —                                      |
 
-## HackRF One
+## HackRF One and HackRF Pro
 
 **Driver name:** `hackrf`. Also works with HackRF-compatible radios.
 

@@ -71,7 +71,7 @@ One click copies a PNG of the spectrum and waterfall to the clipboard.
 
 | Device                                    | Frequency range                                                             | Max sample rate                                           | Inputs                                  | Bias-T |
 |-------------------------------------------|-----------------------------------------------------------------------------|-----------------------------------------------------------|-----------------------------------------|--------|
-| HackRF One                                | 1 MHz – 6 GHz                                                               | 20 MS/s                                                   | 1                                       | yes    |
+| HackRF One, HackRF Pro                    | 1 MHz – 6 GHz                                                               | 20 MS/s                                                   | 1                                       | yes    |
 | bladeRF (x40/x115, 2.0 micro xA4/xA5/xA9) | 47 MHz – 6 GHz                                                              | 61.44 MS/s, more in 8-bit mode where the FPGA supports it | 2 on the 2.0 micro                      | yes    |
 | RTL-SDR                                   | about 24 – 1766 MHz depending on the tuner, plus HF through direct sampling | 3.2 MS/s                                                  | tuner, and HF where the tuner allows it | yes    |
 | Fobos SDR (standard and agile firmware)   | 50 MHz – 6.9 GHz                                                            | 80 MS/s                                                   | 1                                       | —      |
