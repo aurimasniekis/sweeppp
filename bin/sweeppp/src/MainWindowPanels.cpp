@@ -2363,9 +2363,7 @@ void MainWindow::drawCorrectionsBlock(bool sweeping) {
 void MainWindow::drawLearnPrompt() {
     constexpr const char* kId = "Learn receiver corrections";
     ImGui::OpenPopup(kId);
-
-    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    bar::placePrompt();
 
     if (ImGui::BeginPopupModal(kId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0F);
@@ -2409,9 +2407,7 @@ void MainWindow::drawLearnPrompt() {
 void MainWindow::drawClearCorrectionsPrompt() {
     constexpr const char* kId = "Clear corrections?";
     ImGui::OpenPopup(kId);
-
-    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    bar::placePrompt();
 
     if (ImGui::BeginPopupModal(kId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         const std::size_t automatic = m_state.automaticSpurCount();

@@ -189,6 +189,8 @@ private:
     /// Clones the focused panel into new slots or drops trailing attached
     /// panels, until the attached ones fill `arrangement`.
     void setArrangement(PanelArrangement arrangement);
+    /// Keeps the waterfall a rearrangement is about to take from new panels.
+    void captureWaterfallSeed();
 
     void setPanelMode(PanelMode mode);
 
@@ -449,6 +451,10 @@ private:
     /// `m_frameLines` reduced to a texture width, by width, made on first use
     /// this frame and shared by every Mirror panel that width.
     std::map<std::uint32_t, std::vector<std::vector<float>>> m_reducedLines;
+
+    /// The focused panel's waterfall as it was just before the panels were
+    /// rearranged, for the panels that arrangement makes. Held for one frame.
+    WaterfallHistory m_waterfallSeed;
     std::vector<float> m_reduceScratch;
 
     /// The plan generation and segments the views were last fitted and bound

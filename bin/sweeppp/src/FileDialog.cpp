@@ -6,6 +6,24 @@
 #include <array>
 #include <nfd.h>
 #include <string>
+
+#if defined(__APPLE__)
+#define GLFW_EXPOSE_NATIVE_COCOA
+#elif defined(_WIN32)
+#define GLFW_EXPOSE_NATIVE_WIN32
+#endif
+#if defined(__APPLE__) || defined(_WIN32)
+#include <nfd_glfw3.h>
+#endif
+
+#if defined(__APPLE__)
+#include <cstdlib>
+
+extern "C" int sweepppSaveSheet(void* window, const char* directory, const char* name,
+                                const char* extension, char** out);
+extern "C" int sweepppOpenSheet(void* window, const char* directory, const char* extension,
+                                char** out);
+#endif
 #include <sweeppp/core/Log.hpp>
 #include <vector>
 
@@ -32,6 +50,31 @@ extern char** environ;
 
 namespace sweeppp::ui {
 namespace {
+
+GLFWwindow* g_parent = nullptr;
+
+#if defined(__APPLE__)
+/// A path a sheet handed back, taken over and freed.
+std::optional<std::filesystem::path> adoptPath(int chosen, char* path) {
+    std::optional<std::filesystem::path> out;
+    if (chosen != 0 && path != nullptr) {
+        out = std::filesystem::path(path);
+    }
+    std::free(path);
+    return out;
+}
+#endif
+
+/// The main window as NFD names it, or unset where it cannot.
+nfdwindowhandle_t parentHandle() {
+    nfdwindowhandle_t handle{};
+#if defined(__APPLE__) || defined(_WIN32)
+    if (g_parent != nullptr) {
+        (void)NFD_GetNativeWindowFromGLFWWindow(g_parent, &handle);
+    }
+#endif
+    return handle;
+}
 
 #if !defined(_WIN32)
 /// Runs `argv` detached, without a shell.
@@ -65,10 +108,27 @@ bool spawnDetached(const std::vector<std::string>& argv) {
 
 } // namespace
 
+void setFileDialogParent(GLFWwindow* window) noexcept {
+    g_parent = window;
+}
+
 std::optional<std::filesystem::path> saveFileDialog(const std::filesystem::path& defaultDirectory,
                                                     const std::string& defaultName,
                                                     const std::string& filterLabel,
                                                     const std::string& filterExtension) {
+#if defined(__APPLE__)
+    // A sheet on the main window, which is where a Mac dialog belongs.
+    if (g_parent != nullptr) {
+        std::error_code made;
+        std::filesystem::create_directories(defaultDirectory, made);
+        char* path = nullptr;
+        const int chosen =
+            sweepppSaveSheet(glfwGetCocoaWindow(g_parent), defaultDirectory.string().c_str(),
+                             defaultName.c_str(), filterExtension.c_str(), &path);
+        return adoptPath(chosen, path);
+    }
+#endif
+
     // Initialised per call rather than once at start-up.
     //
     // NFD's own guidance, and it matters on Linux where the portal backend
@@ -89,8 +149,12 @@ std::optional<std::filesystem::path> saveFileDialog(const std::filesystem::path&
     const nfdu8filteritem_t filters[1] = {{filterLabel.c_str(), filterExtension.c_str()}};
 
     nfdu8char_t* chosen = nullptr;
-    const nfdresult_t result =
-        NFD_SaveDialogU8(&chosen, filters, 1, directory.c_str(), defaultName.c_str());
+    const nfdsavedialogu8args_t args{.filterList = filters,
+                                     .filterCount = 1,
+                                     .defaultPath = directory.c_str(),
+                                     .defaultName = defaultName.c_str(),
+                                     .parentWindow = parentHandle()};
+    const nfdresult_t result = NFD_SaveDialogU8_With(&chosen, &args);
 
     std::optional<std::filesystem::path> path;
     if (result == NFD_OKAY) {
@@ -107,6 +171,16 @@ std::optional<std::filesystem::path> saveFileDialog(const std::filesystem::path&
 std::optional<std::filesystem::path> openFileDialog(const std::filesystem::path& defaultDirectory,
                                                     const std::string& filterLabel,
                                                     const std::string& filterExtension) {
+#if defined(__APPLE__)
+    if (g_parent != nullptr) {
+        char* path = nullptr;
+        const int chosen =
+            sweepppOpenSheet(glfwGetCocoaWindow(g_parent), defaultDirectory.string().c_str(),
+                             filterExtension.c_str(), &path);
+        return adoptPath(chosen, path);
+    }
+#endif
+
     if (NFD_Init() != NFD_OKAY) {
         logWarn("ui", "could not open the file dialog: {}", NFD_GetError());
         return std::nullopt;
@@ -119,7 +193,11 @@ std::optional<std::filesystem::path> openFileDialog(const std::filesystem::path&
     const nfdu8filteritem_t filters[1] = {{filterLabel.c_str(), filterExtension.c_str()}};
 
     nfdu8char_t* chosen = nullptr;
-    const nfdresult_t result = NFD_OpenDialogU8(&chosen, filters, 1, directory.c_str());
+    const nfdopendialogu8args_t args{.filterList = filters,
+                                     .filterCount = 1,
+                                     .defaultPath = directory.c_str(),
+                                     .parentWindow = parentHandle()};
+    const nfdresult_t result = NFD_OpenDialogU8_With(&chosen, &args);
 
     std::optional<std::filesystem::path> path;
     if (result == NFD_OKAY) {

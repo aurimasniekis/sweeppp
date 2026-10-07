@@ -11,6 +11,23 @@
 
 namespace sweeppp::ui {
 
+/// A waterfall's rows copied out, oldest first, with what they were written
+/// against: enough to lay them onto another span, width or gradient.
+struct WaterfallHistory {
+    std::uint32_t bins = 0;
+    std::vector<std::uint8_t> rows; ///< `bins` bytes a row
+    std::vector<std::uint64_t> times;
+    double startHz = 0.0;
+    double stopHz = 0.0;
+    float minDb = 0.0F;
+    float maxDb = 0.0F;
+
+    [[nodiscard]] std::uint32_t count() const noexcept {
+        return bins > 0 ? static_cast<std::uint32_t>(rows.size() / bins) : 0;
+    }
+    [[nodiscard]] bool empty() const noexcept { return count() == 0; }
+};
+
 /// GPU waterfall.
 ///
 /// Two decisions carry the performance:
@@ -103,6 +120,14 @@ public:
                             float originDb);
 
     void clear();
+
+    /// The stored rows, read back from the GPU.
+    [[nodiscard]] WaterfallHistory history() const;
+
+    /// Replaces the rows with `from`'s, laid onto this span, width and
+    /// gradient: where the spans overlap the rows are the same measurement,
+    /// and elsewhere they are unmeasured.
+    void seed(const WaterfallHistory& from);
 
     /// Re-bakes the palette. Cheap: one 256-texel upload, no history touched.
     void setColorMap(const ColorMap& map);

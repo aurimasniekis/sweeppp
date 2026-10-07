@@ -76,6 +76,9 @@ struct ViewPanel {
     /// Created on the first frame the panel draws a waterfall.
     std::unique_ptr<WaterfallRenderer> waterfall;
 
+    /// Whether the waterfall has been given the history another panel holds.
+    bool seeded = false;
+
     /// Screen-space X and width of the spectrum's plot area, last frame.
     ///
     /// The waterfall is drawn to exactly this rectangle rather than to its own
