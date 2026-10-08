@@ -1086,7 +1086,7 @@ bool MainWindow::drawWaterfallTimeAxis(WaterfallRenderer& renderer, float x, flo
 
     // One label roughly every 70 pixels, snapped to whole rows.
     const auto rowsPerLabel = static_cast<std::uint32_t>(
-        std::max(1.0F, 70.0F * ImGui::GetWindowViewport()->FramebufferScale.y));
+        std::max(1.0F, 70.0F * bar::framebufferScale(ImGui::GetWindowViewport()).y));
     const float pixelsPerRow = size.y / static_cast<float>(visibleLines);
 
     for (std::uint32_t row = 0; row < visibleLines; row += rowsPerLabel) {
@@ -1276,7 +1276,7 @@ void MainWindow::drawWaterfall(PanelView& view, ViewPanel& panel) {
     // The pane is measured in *framebuffer* rows: 660 points on a 2x display is
     // 1320 rows. The requested size is treated as a minimum and a screenful is
     // guaranteed on top of it.
-    const ImVec2 framebufferScale = ImGui::GetWindowViewport()->FramebufferScale;
+    const ImVec2 framebufferScale = bar::framebufferScale(ImGui::GetWindowViewport());
     const auto paneRows = static_cast<int>(plotSize.y * framebufferScale.y);
     const int wanted = std::max(settings.waterfallLines, paneRows + paneRows / 2);
 
@@ -1554,7 +1554,7 @@ void MainWindow::drawHistoryWaterfall() {
     const ImVec2 origin(x, ImGui::GetCursorScreenPos().y);
     const ImVec2 size(width, available.y);
 
-    const ImVec2 scale = ImGui::GetWindowViewport()->FramebufferScale;
+    const ImVec2 scale = bar::framebufferScale(ImGui::GetWindowViewport());
     const std::uint32_t texture = m_history.texture(static_cast<std::uint32_t>(size.x * scale.x),
                                                     static_cast<std::uint32_t>(size.y * scale.y));
 

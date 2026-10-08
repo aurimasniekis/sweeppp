@@ -252,7 +252,7 @@ void MainWindow::takeSnapshot(bool toFile) {
     // and reading the rectangle in points would capture the top-left quarter.
     // The rectangle is already relative to the main viewport, which is the
     // framebuffer being read.
-    const ImVec2 scale = ImGui::GetMainViewport()->FramebufferScale;
+    const ImVec2 scale = bar::framebufferScale(ImGui::GetMainViewport());
     const int x = static_cast<int>(m_snapshotRect.x * scale.x);
     const int y = static_cast<int>(m_snapshotRect.y * scale.y);
     const int width = static_cast<int>(m_snapshotRect.z * scale.x);

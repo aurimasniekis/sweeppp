@@ -199,6 +199,19 @@ public:
     return height(statusFramePadding());
 }
 
+/// Framebuffer pixels per point in the window being drawn.
+///
+/// The viewport's own where the platform keeps one, the display's otherwise.
+/// Without multi-viewports -- Wayland -- ImGui never sets the main viewport's
+/// and it reads zero, which draws everything sized by it at no size at all.
+[[nodiscard]] inline ImVec2 framebufferScale(const ImGuiViewport* viewport) {
+    if (viewport != nullptr && viewport->FramebufferScale.x > 0.0F &&
+        viewport->FramebufferScale.y > 0.0F) {
+        return viewport->FramebufferScale;
+    }
+    return ImGui::GetIO().DisplayFramebufferScale;
+}
+
 /// Puts the next modal prompt at the top of the main window, under the
 /// toolbar, every frame.
 ///

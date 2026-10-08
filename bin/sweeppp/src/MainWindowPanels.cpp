@@ -5630,7 +5630,7 @@ void MainWindow::drawHistoryOverview(float height) {
         return;
     }
 
-    const ImVec2 scale = ImGui::GetWindowViewport()->FramebufferScale;
+    const ImVec2 scale = bar::framebufferScale(ImGui::GetWindowViewport());
     const std::uint32_t texture = m_history.overviewTexture(
         static_cast<std::uint32_t>(size.x * scale.x),
         static_cast<std::uint32_t>(std::max(height * scale.y, 8.0F)), centerHz, bandHz);
