@@ -2,6 +2,7 @@ set(SWEEPPP_TEST_SOURCES
     main.cpp
     ReferenceFft.cpp
     test_antenna.cpp
+    test_changelog.cpp
     test_core.cpp
     test_correction.cpp
     test_fft.cpp
@@ -57,7 +58,8 @@ target_compile_definitions(sweeppp-tests PRIVATE DOCTEST_CONFIG_DOUBLE_STRINGIFY
 # synchronous writer are checked against one reference rather than two that
 # could drift apart.
 target_compile_definitions(sweeppp-tests PRIVATE
-    SWEEPSFILE_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/lib/libsweepsfile/tests/data")
+    SWEEPSFILE_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/lib/libsweepsfile/tests/data"
+    SWEEPPP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 include("${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake")
 

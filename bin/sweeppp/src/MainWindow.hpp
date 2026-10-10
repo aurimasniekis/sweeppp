@@ -9,6 +9,7 @@
 #include "UpdateCheck.hpp"
 #include "ViewPanel.hpp"
 #include "render/HistoryView.hpp"
+#include "render/ImageTexture.hpp"
 #include "render/WaterfallRenderer.hpp"
 
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <sweeppp/ui/Changelog.hpp>
 #include <vector>
 
 namespace sweeppp::ui {
@@ -281,6 +283,14 @@ private:
     [[nodiscard]] std::string historyTimeLabel(std::uint64_t monotonicNs, double stepSeconds,
                                                bool withDate = false) const;
     void drawClosePrompt();
+
+    /// Opens What's new on a fresh install or after an update, once nothing
+    /// else is on screen asking for attention.
+    void offerWhatsNew();
+    /// Every release, from the menu; or only those since the last seen.
+    void openWhatsNew(bool sinceSeen);
+    void drawWhatsNew();
+    void closeWhatsNew();
 
     /// The Corrections block of the Analysis panel, and its two prompts.
     void drawCorrectionsBlock(bool sweeping);
@@ -599,6 +609,15 @@ private:
     bool m_showFftBenchmark = false;
     bool m_showLearnPrompt = false;
     bool m_showClearCorrectionsPrompt = false;
+
+    /// What's new: the releases on show, the changelog they point into, and
+    /// the screenshots, loaded when first drawn and dropped on close.
+    std::vector<ChangelogRelease> m_changelog;
+    std::vector<const ChangelogRelease*> m_whatsNew;
+    std::map<std::string, std::unique_ptr<ImageTexture>> m_whatsNewImages;
+    bool m_showWhatsNew = false;
+    /// Settled for this run: shown, or found to have nothing new.
+    bool m_whatsNewSettled = false;
 
     bool m_showAntennaEditor = false;
     Antenna m_editingAntenna;

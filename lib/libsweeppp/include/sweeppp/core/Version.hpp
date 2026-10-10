@@ -17,6 +17,14 @@ namespace sweeppp {
 /// not belong in it. `buildString()` is the one to show a person.
 [[nodiscard]] std::string_view versionString() noexcept;
 
+/// Compares dotted-decimal versions. Negative, zero or positive, like strcmp.
+///
+/// Missing components read as zero, so "1.2" and "1.2.0" are equal and a
+/// manifest may be as precise as it likes. Anything non-numeric in a component
+/// stops the comparison there and the components compared so far decide it --
+/// which makes "1.2.3-rc1" sort with "1.2.3" rather than throwing.
+[[nodiscard]] int compareVersions(std::string_view left, std::string_view right);
+
 /// The version with the commit it was built from -- "0.1.0+abc12345", or
 /// "+abc12345.dirty" from a modified tree, or just the version where there was
 /// no git repository to ask.

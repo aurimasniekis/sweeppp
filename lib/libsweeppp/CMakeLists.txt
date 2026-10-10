@@ -48,6 +48,7 @@ set(SWEEPPP_SOURCES
     src/sweep/RangeHistory.cpp
     src/sweep/SweepPreset.cpp
 
+    src/ui/Changelog.cpp
     src/ui/ColorMap.cpp
     src/ui/Marker.cpp
     src/ui/MarkerPreset.cpp

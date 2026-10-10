@@ -609,6 +609,9 @@ next time you start.
 start-up** and **Open config folder**. When an update is available, a message
 appears in the top-right corner with **Show** and **Stop checking** buttons.
 
+**What's new** lists the changes in each release. It also opens by itself on
+the first start after an update.
+
 ## Keyboard and mouse
 
 ### Keys
@@ -663,7 +666,7 @@ setup, start Sweep++ with `--config-dir <folder>` (see
 | File or folder                              | Holds                                                                           |
 |---------------------------------------------|---------------------------------------------------------------------------------|
 | `settings.toml`                             | Your current setup, saved when you quit.                                        |
-| `app.toml`                                  | Interface scale, text size and weight, and the update check.                    |
+| `app.toml`                                  | Interface scale, text size and weight, the update check, and What's new seen.   |
 | `sweep-presets.toml`, `marker-presets.toml` | Your range and marker presets.                                                  |
 | `profiles/`                                 | Saved profiles.                                                                 |
 | `themes/`, `colormaps/`                     | Your themes and colour maps.                                                    |

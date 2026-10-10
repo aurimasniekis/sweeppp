@@ -35,6 +35,7 @@ AppSettings AppSettings::load(const std::filesystem::path& path) {
                    kMinFontWeight, kMaxFontWeight);
     settings.checkForUpdates =
         toml_util::getBool(*table, "updates.check_on_start", settings.checkForUpdates);
+    settings.whatsNewSeen = toml_util::getString(*table, "whats_new.seen", settings.whatsNewSeen);
 
     return settings;
 }
@@ -49,6 +50,8 @@ Status AppSettings::save(const std::filesystem::path& path) const {
 
     ::toml::table& updates = toml_util::ensureTable(root, "updates");
     updates.insert_or_assign("check_on_start", checkForUpdates);
+
+    toml_util::ensureTable(root, "whats_new").insert_or_assign("seen", whatsNewSeen);
 
     return toml_util::save(path, root,
                            "Sweep++ application preferences.\n"

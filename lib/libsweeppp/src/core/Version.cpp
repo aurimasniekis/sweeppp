@@ -3,7 +3,9 @@
 
 #include "sweeppp/core/Version.hpp"
 
+#include <charconv>
 #include <sweeppp/core/BuildInfo.hpp>
+#include <system_error>
 
 #ifndef SWEEPPP_VERSION_STRING
 #define SWEEPPP_VERSION_STRING "0.0.0-unknown"
@@ -30,6 +32,49 @@
 #endif
 
 namespace sweeppp {
+namespace {
+
+struct VersionComponent {
+    long value = 0;
+    bool numeric = false;
+};
+
+VersionComponent nextComponent(std::string_view& text) {
+    if (text.empty()) {
+        return {.value = 0, .numeric = true};
+    }
+
+    const std::size_t dot = text.find('.');
+    const std::string_view piece = text.substr(0, dot);
+    text = dot == std::string_view::npos ? std::string_view{} : text.substr(dot + 1);
+
+    VersionComponent component;
+    const auto* end = piece.data() + piece.size();
+    const auto result = std::from_chars(piece.data(), end, component.value);
+    component.numeric = result.ec == std::errc{} && result.ptr == end;
+    return component;
+}
+
+} // namespace
+
+int compareVersions(std::string_view left, std::string_view right) {
+    while (!left.empty() || !right.empty()) {
+        const VersionComponent a = nextComponent(left);
+        const VersionComponent b = nextComponent(right);
+
+        // A component that is not a number ends the comparison: "1.2.3-rc1"
+        // and "1.2.3" differ in a way this cannot rank, and guessing would put
+        // a pre-release either side of its own release depending on the
+        // spelling. Everything compared so far decides it.
+        if (!a.numeric || !b.numeric) {
+            return 0;
+        }
+        if (a.value != b.value) {
+            return a.value < b.value ? -1 : 1;
+        }
+    }
+    return 0;
+}
 
 std::string_view versionString() noexcept {
     return SWEEPPP_VERSION_STRING;
