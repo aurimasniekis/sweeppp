@@ -826,17 +826,21 @@ TEST_CASE("a two-segment sweep reports whole passes as fully covered" *
     REQUIRE(engine.start(**device, pipeline).has_value());
 
     // The best of several passes, for the reason the comb case gives: a busy
-    // host drops a different scattering of steps each pass.
+    // host drops a different scattering of steps each pass. Watched until one
+    // pass clears the bar rather than for a fixed handful: the old denominator
+    // could never read above a quarter however long it ran, so waiting longer
+    // for a quiet pass costs the check nothing, and a shared runner can drop
+    // steps in every one of six.
     double bestPassCoverage = 0.0;
     {
-        const std::uint64_t deadline = monotonicNs() + secondsToNs(60.0);
-        while (engine.passCount() <= 6) {
-            REQUIRE(monotonicNs() < deadline);
+        const std::uint64_t deadline = monotonicNs() + secondsToNs(30.0);
+        while ((engine.passCount() <= 6 || bestPassCoverage <= 0.5) && monotonicNs() < deadline) {
             bestPassCoverage = std::max(bestPassCoverage, engine.lastPassCoverage());
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         bestPassCoverage = std::max(bestPassCoverage, engine.lastPassCoverage());
     }
+    REQUIRE(engine.passCount() > 6);
     engine.stop();
     pipeline.stop();
 

@@ -271,6 +271,15 @@ private:
     void seekHistory(std::uint64_t monotonicNs);
     void drawHistoryAxes(const ImVec2& origin, const ImVec2& size, float axisWidth,
                          float axisHeight);
+
+    /// When a recorded line was captured, by the wall clock: its segment's
+    /// pairing of the two clocks carried forward. Zero where the file has none.
+    [[nodiscard]] std::uint64_t historyWallNs(std::uint64_t monotonicNs) const;
+
+    /// A position in the recording as the viewer is set to show it, at the
+    /// precision `stepSeconds` apart can tell apart.
+    [[nodiscard]] std::string historyTimeLabel(std::uint64_t monotonicNs, double stepSeconds,
+                                               bool withDate = false) const;
     void drawClosePrompt();
 
     /// The Corrections block of the Analysis panel, and its two prompts.
@@ -579,6 +588,10 @@ private:
     /// visibly re-aims the strip; zero means the whole recorded span.
     double m_historyBandHz = 50e6;
     float m_historyOverviewHeight = 72.0F;
+
+    /// Times in the history viewer: from the recording's start, or the local
+    /// clock time each line was captured at.
+    bool m_historyClockTime = false;
 
     bool m_showPerformance = false;
     bool m_showHistory = false;

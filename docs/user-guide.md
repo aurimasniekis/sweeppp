@@ -519,7 +519,8 @@ and never changes your settings.
   pause, step forward, jump to the end, and **−** / **+** to change the speed
   (0.1× to 16×).
 - **Reset view** goes back to the start.
-- **View** sets the overview strip's band width and the playback speed.
+- **View** sets the overview strip's band width, the playback speed, and
+  whether times read **From start** or as **Clock time**.
 - **Close** closes the recording.
 
 ### Panes
@@ -542,7 +543,8 @@ and never changes your settings.
 
 ### Status bar
 
-- What is at the marker, and how far into the recording the playhead is.
+- What is at the marker, and how far into the recording the playhead is, or
+  the clock time it was recorded at. Click the time to switch between the two.
 - **playing N×** while playing.
 - The number of lines in the recording.
 - **segments:** a new segment starts whenever the range or resolution changed

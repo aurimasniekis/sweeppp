@@ -173,20 +173,20 @@ void HistoryView::setTimeRange(std::uint64_t fromNs, std::uint64_t toNs) {
         toNs = fromNs + kMinSpanNs;
     }
 
-    // Never begins before the recording does.
+    // Never wider than the recording, and never running off either end of it.
     //
-    // Seeking to an instant centres the window on it, so seeking to the very
-    // first line put the top of the view half a window earlier than anything
-    // that exists. There is nothing to draw up there, and the time axis
-    // subtracts the session start from each label in unsigned arithmetic, so
-    // the labels wrapped into timestamps centuries long.
+    // Zoomed out past the whole session, the recorded lines shrank to a sliver
+    // at the top and the axis counted off days of nothing. Seeking centres the
+    // window on an instant, so seeking near either end would otherwise put
+    // half a window outside anything that exists.
     if (m_reader) {
-        const std::uint64_t first = m_reader->summary().firstLineNs;
-        if (fromNs < first) {
-            const std::uint64_t span = toNs - fromNs;
-            fromNs = first;
-            toNs = first + span;
-        }
+        const session::SessionSummary& summary = m_reader->summary();
+        const std::uint64_t first = summary.firstLineNs;
+        const std::uint64_t whole =
+            std::max(summary.lastLineNs > first ? summary.lastLineNs - first : 0, kMinSpanNs);
+        const std::uint64_t span = std::min(toNs - fromNs, whole);
+        fromNs = std::clamp(fromNs, first, first + whole - span);
+        toNs = fromNs + span;
     }
 
     // Compared before assigning, because the window re-asserts its range every
