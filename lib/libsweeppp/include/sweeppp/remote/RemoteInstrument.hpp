@@ -244,7 +244,7 @@ public:
 private:
     struct Link;
 
-    RemoteInstrument(RemoteEndpoint endpoint, FrameBus& output, EventBus& events);
+    RemoteInstrument(RemoteEndpoint endpoint, EventBus& events);
 
     /// Refused with the reason while another client controls the server:
     /// nothing is changed here or asked of it.
@@ -264,7 +264,6 @@ private:
     void linkLost(std::string reason);
 
     RemoteEndpoint m_endpoint;
-    FrameBus& m_output;
     EventBus& m_events;
     std::unique_ptr<Link> m_linkThreads;
     std::string m_serverName;

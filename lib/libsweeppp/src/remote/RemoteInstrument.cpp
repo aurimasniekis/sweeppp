@@ -382,8 +382,8 @@ struct RemoteInstrument::DownloadState {
 
 // ---------------------------------------------------------------- connecting
 
-RemoteInstrument::RemoteInstrument(RemoteEndpoint endpoint, FrameBus& output, EventBus& events)
-    : m_endpoint(std::move(endpoint)), m_output(output), m_events(events) {
+RemoteInstrument::RemoteInstrument(RemoteEndpoint endpoint, EventBus& events)
+    : m_endpoint(std::move(endpoint)), m_events(events) {
 }
 
 RemoteInstrument::~RemoteInstrument() {
@@ -453,7 +453,7 @@ RemoteInstrument::connect(const RemoteEndpoint& endpoint, FrameBus& output, Even
         return std::unexpected(refusalError(Refused::from(answer->body), where));
     }
 
-    Instance instrument(new RemoteInstrument(endpoint, output, events));
+    Instance instrument(new RemoteInstrument(endpoint, events));
     const Welcome welcome = Welcome::from(answer->body);
     const std::int64_t welcomeOffsetNs = welcome.serverNs == 0
                                              ? 0

@@ -24,8 +24,13 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <psapi.h>
+// windows.h first: psapi.h uses its types without including it. Pinned, or a
+// formatting pass sorts them back and the Windows build fails inside psapi.h.
+// clang-format off
 #include <windows.h>
+
+#include <psapi.h>
+// clang-format on
 #else
 #include <sys/utsname.h>
 #include <unistd.h>
