@@ -142,13 +142,15 @@ jobs:
             cc: ''
             cxx: ''
             deb: ''
-          - name: macos-intel
-            runner: macos-15-intel
-            container: ''
-            apt: ''
-            cc: ''
-            cxx: ''
-            deb: ''
+          # Off for now. Uncommented, it builds as before, and the Homebrew
+          # casks pick its archive up again.
+          # - name: macos-intel
+          #   runner: macos-15-intel
+          #   container: ''
+          #   apt: ''
+          #   cc: ''
+          #   cxx: ''
+          #   deb: ''
           - name: windows-x64
             runner: windows-2025
             container: ''

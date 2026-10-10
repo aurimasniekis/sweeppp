@@ -92,7 +92,7 @@ are on the GitHub Releases page. Each has:
 
 - `.deb` packages for Ubuntu 24.04, Ubuntu 26.04 and Debian 13, for amd64 and
   arm64, plus a `.tar.gz` of each;
-- a `.tar.gz` for macOS, for Apple silicon (`arm`) or Intel;
+- a `.tar.gz` for macOS on Apple silicon;
 - a `.zip` for Windows x64.
 
 **macOS.** Install from the Homebrew tap:
