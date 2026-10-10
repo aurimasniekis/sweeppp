@@ -14,6 +14,7 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <future>
 #include <imgui.h>
 #include <implot.h>
@@ -60,6 +61,33 @@ std::string formatTimestamp(double seconds, double step) {
         return std::format("{}:{:0{}.{}f}", minutes, remainder, decimals + 3, decimals);
     }
     return std::format("{:.{}f} s", seconds, decimals);
+}
+
+/// A wall-clock instant as local time of day, at a precision `step` can tell
+/// apart, and with the date in front when asked for.
+std::string formatClockTime(std::uint64_t wallNs, double step, bool withDate) {
+    const auto seconds = static_cast<std::time_t>(wallNs / 1'000'000'000ULL);
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &seconds);
+#else
+    localtime_r(&seconds, &local);
+#endif
+
+    std::string out = withDate ? std::format("{:04}-{:02}-{:02} ", local.tm_year + 1900,
+                                             local.tm_mon + 1, local.tm_mday)
+                               : std::string{};
+    out += std::format("{:02}:{:02}:{:02}", local.tm_hour, local.tm_min, local.tm_sec);
+
+    // Truncated rather than rounded, so .96 never reads as the next second.
+    if (step < 1.0) {
+        const int decimals = step >= 0.1 ? 1 : (step >= 0.01 ? 2 : 3);
+        const std::uint64_t unit = decimals == 1   ? 100'000'000ULL
+                                   : decimals == 2 ? 10'000'000ULL
+                                                   : 1'000'000ULL;
+        out += std::format(".{:0{}}", (wallNs % 1'000'000'000ULL) / unit, decimals);
+    }
+    return out;
 }
 
 /// Digit grouping, so a line count reads at a glance instead of being counted.
@@ -5339,6 +5367,14 @@ void MainWindow::drawHistorySettingsPopup() {
     ImGui::SetNextItemWidth(180.0F);
     ImGui::SliderFloat("Rate", &m_historySpeed, 0.1F, 16.0F, "%.2fx", ImGuiSliderFlags_Logarithmic);
 
+    ImGui::SeparatorText("Times");
+    int clock = m_historyClockTime ? 1 : 0;
+    ImGui::RadioButton("From start", &clock, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Clock time", &clock, 1);
+    m_historyClockTime = clock == 1;
+    helpMarker("Time into the recording, or the local time each line was captured at.");
+
     ImGui::EndPopup();
 }
 
@@ -5521,10 +5557,18 @@ void MainWindow::drawHistoryStatusBar() {
     const double sessionSeconds = summary.durationSeconds();
     const std::string total = formatPlayhead(sessionSeconds, sessionSeconds);
     const float timeBoxX = ImGui::GetCursorPosX();
+    const bool clock = m_historyClockTime && historyWallNs(summary.firstLineNs) != 0;
     const float timeBoxWidth =
-        ImGui::CalcTextSize(bar::digitMask(std::format("{}  into  {}", total, total)).c_str()).x;
+        ImGui::CalcTextSize(bar::digitMask(clock ? std::string("8888-88-88 88:88:88.8")
+                                                 : std::format("{}  into  {}", total, total))
+                                .c_str())
+            .x;
 
-    if (m_historySelection) {
+    if (m_historySelection && clock) {
+        // The date as well: a recording is usually quoted by when it was.
+        ImGui::TextDisabled("%s",
+                            historyTimeLabel(m_historySelection->monotonicNs, 0.1, true).c_str());
+    } else if (m_historySelection) {
         const double into =
             static_cast<double>(static_cast<std::int64_t>(m_historySelection->monotonicNs) -
                                 static_cast<std::int64_t>(summary.firstLineNs)) *
@@ -5533,6 +5577,16 @@ void MainWindow::drawHistoryStatusBar() {
                             total.c_str());
     } else {
         ImGui::TextDisabled("Click the strip to place the playhead");
+    }
+    // The readout is where the question comes up, so it is the switch too.
+    if (m_historySelection) {
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(m_historyClockTime ? "Click for time into the recording"
+                                                 : "Click for clock time");
+        }
+        if (ImGui::IsItemClicked()) {
+            m_historyClockTime = !m_historyClockTime;
+        }
     }
 
     if (m_historyPlaying) {
@@ -5744,7 +5798,11 @@ void MainWindow::drawHistoryOverview(float height) {
         // is also exactly what clicking will do.
         const auto fraction = static_cast<double>(std::clamp(
             (ImGui::GetIO().MousePos.x - origin.x) / std::max(size.x, 1.0F), 0.0F, 1.0F));
-        ImGui::SetTooltip("%s", formatDuration(sessionSpan * fraction * 1e-9).c_str());
+        const auto at =
+            m_history.overviewFromNs() + static_cast<std::uint64_t>(sessionSpan * fraction);
+        ImGui::SetTooltip("%s", m_historyClockTime && historyWallNs(at) != 0
+                                    ? historyTimeLabel(at, 1.0, true).c_str()
+                                    : formatDuration(sessionSpan * fraction * 1e-9).c_str());
     }
 }
 
@@ -5877,11 +5935,10 @@ void MainWindow::drawHistoryAxes(const ImVec2& origin, const ImVec2& size, float
     const ChromeTheme& chrome = m_state.theme().chrome();
     ImDrawList* draw = ImGui::GetWindowDrawList();
 
-    // Labelled against the start of the session, not the start of the view: an
-    // absolute position in the recording is what an operator wants to quote,
-    // and a view-relative one changes meaning every time they scroll.
-    const auto sessionStart = m_history.reader()->summary().firstLineNs;
-
+    // Labelled against the start of the session, or by the clock, never against
+    // the start of the view: an absolute position in the recording is what an
+    // operator wants to quote, and a view-relative one changes meaning every
+    // time they scroll.
     constexpr int kTimeLabels = 8;
     const double labelStepSeconds =
         static_cast<double>(m_history.viewToNs() - m_history.viewFromNs()) * 1e-9 / kTimeLabels;
@@ -5889,16 +5946,7 @@ void MainWindow::drawHistoryAxes(const ImVec2& origin, const ImVec2& size, float
     for (int i = 0; i <= kTimeLabels; ++i) {
         const double fraction = static_cast<double>(i) / kTimeLabels;
         const float y = origin.y + size.y * static_cast<float>(fraction);
-        // Subtracted as signed. These are two unrelated points on a monotonic
-        // clock, and an instant before the session start is a small negative
-        // number rather than the enormous positive one unsigned wraparound
-        // would make of it.
-        const double intoSession =
-            static_cast<double>(static_cast<std::int64_t>(m_history.timeAt(fraction)) -
-                                static_cast<std::int64_t>(sessionStart)) *
-            1e-9;
-
-        const std::string label = formatTimestamp(intoSession, labelStepSeconds);
+        const std::string label = historyTimeLabel(m_history.timeAt(fraction), labelStepSeconds);
         const ImVec2 extent = ImGui::CalcTextSize(label.c_str());
         // Nudged inside the pane at the ends so the first and last labels are
         // not half-clipped by the window edge.
@@ -5927,6 +5975,57 @@ void MainWindow::drawHistoryAxes(const ImVec2& origin, const ImVec2& size, float
 
     (void)axisWidth;
     (void)axisHeight;
+}
+
+std::uint64_t MainWindow::historyWallNs(std::uint64_t monotonicNs) const {
+    const session::SessionReader* reader = m_history.reader();
+    if (reader == nullptr) {
+        return 0;
+    }
+
+    // The segment the line belongs to: the latest one starting at or before
+    // it, or the first when it comes before them all. Each segment pairs the
+    // two clocks afresh, so a recording that spans a clock change stays right
+    // on either side of it.
+    const session::SegmentInfo* chosen = nullptr;
+    for (const session::SegmentInfo& segment : reader->segments()) {
+        if (segment.startWallNs == 0) {
+            continue;
+        }
+        if (chosen == nullptr) {
+            chosen = &segment;
+            continue;
+        }
+        const bool started = segment.startMonotonicNs <= monotonicNs;
+        const bool chosenStarted = chosen->startMonotonicNs <= monotonicNs;
+        if ((started && (!chosenStarted || segment.startMonotonicNs > chosen->startMonotonicNs)) ||
+            (!started && !chosenStarted && segment.startMonotonicNs < chosen->startMonotonicNs)) {
+            chosen = &segment;
+        }
+    }
+    if (chosen == nullptr) {
+        return 0;
+    }
+    // Signed, for a line before its segment's pairing.
+    const std::int64_t offset = static_cast<std::int64_t>(monotonicNs) -
+                                static_cast<std::int64_t>(chosen->startMonotonicNs);
+    return static_cast<std::uint64_t>(static_cast<std::int64_t>(chosen->startWallNs) + offset);
+}
+
+std::string MainWindow::historyTimeLabel(std::uint64_t monotonicNs, double stepSeconds,
+                                         bool withDate) const {
+    if (m_historyClockTime) {
+        if (const std::uint64_t wallNs = historyWallNs(monotonicNs); wallNs != 0) {
+            return formatClockTime(wallNs, stepSeconds, withDate);
+        }
+    }
+    const std::uint64_t start = m_history.reader()->summary().firstLineNs;
+    // Signed: an instant before the session start is a small negative number,
+    // not the enormous positive one unsigned wraparound would make of it.
+    const double intoSession = static_cast<double>(static_cast<std::int64_t>(monotonicNs) -
+                                                   static_cast<std::int64_t>(start)) *
+                               1e-9;
+    return formatTimestamp(intoSession, stepSeconds);
 }
 
 } // namespace sweeppp::ui
