@@ -29,7 +29,7 @@ else()
 endif()
 
 project(sweeppp
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "SDR sweeping and spectrum analysis platform"
     HOMEPAGE_URL "https://github.com/aurimasniekis/sweeppp"
     LANGUAGES ${SWEEPPP_PROJECT_LANGUAGES})

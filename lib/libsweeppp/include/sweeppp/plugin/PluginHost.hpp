@@ -4,6 +4,7 @@
 #pragma once
 
 #include "sweeppp/core/Result.hpp"
+#include "sweeppp/core/Version.hpp"
 #include "sweeppp/plugin/Plugin.hpp"
 #include "sweeppp/plugin/PluginAbi.h"
 #include "sweeppp/sdr/SdrParameter.hpp"
@@ -195,14 +196,6 @@ struct Contribution {
 /// already carries one is left alone, since a plugin is free to declare
 /// "v2.0" and "vv2.0" helps nobody.
 [[nodiscard]] std::string displayVersion(std::string_view version);
-
-/// Compares dotted-decimal versions. Negative, zero or positive, like strcmp.
-///
-/// Missing components read as zero, so "1.2" and "1.2.0" are equal and a
-/// manifest may be as precise as it likes. Anything non-numeric in a component
-/// stops the comparison there and the components compared so far decide it --
-/// which makes "1.2.3-rc1" sort with "1.2.3" rather than throwing.
-[[nodiscard]] int compareVersions(std::string_view left, std::string_view right);
 
 /// One directory to look in, and how much of it to believe.
 struct PluginSearchEntry {

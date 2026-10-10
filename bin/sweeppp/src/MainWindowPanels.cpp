@@ -3836,6 +3836,11 @@ void MainWindow::drawGeneralSettingsBody() {
                         std::string(buildCompiler()).c_str());
     ImGui::TextDisabled("for %s", std::string(buildPlatform()).c_str());
 
+    if (ImGui::Button("What's new", ImVec2(-1, 0))) {
+        openWhatsNew(false);
+        ImGui::CloseCurrentPopup();
+    }
+
     // Offered only where the build can honour it. A checkbox that does
     // nothing because libcurl was not found at configure time is worse than
     // no checkbox: it says the application is checking when it is not.

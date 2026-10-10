@@ -11,9 +11,11 @@ set(SWEEPPP_GUI_SOURCES
     src/MainWindowPlots.cpp
     src/MainWindowPanels.cpp
     src/MainWindowViews.cpp
+    src/MainWindowWhatsNew.cpp
     src/Snapshot.cpp
     src/UpdateCheck.cpp
     src/render/HistoryView.cpp
+    src/render/ImageTexture.cpp
     src/render/WaterfallRenderer.cpp
 )
 

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string>
 #include <sweeppp/core/Result.hpp>
 
 namespace sweeppp::ui {
@@ -43,6 +44,10 @@ struct AppSettings {
 
     /// Whether to ask GitHub about newer releases at start-up.
     bool checkForUpdates = true;
+
+    /// The version whose notes were last shown in What's new; empty before the
+    /// first run, which is what shows them on a fresh install.
+    std::string whatsNewSeen;
 
     /// Reads the file, or returns the defaults. A missing file is the normal
     /// first-run case and not an error; a malformed one is logged and then

@@ -556,6 +556,8 @@ jobs:
           cp build/release/dist/plugins/sweeppp-plugin-* "$stage/plugins/"
 
           cp -R resources/. "$stage/resources/"
+          # What's new reads it beside the screenshots it names.
+          cp CHANGELOG.md "$stage/resources/"
           # resources/fonts/ is empty in the repo -- git tracks no empty
           # directories -- and the icon font is fetched, not committed. Without
           # this the packaged GUI has no icons to find.
@@ -574,6 +576,7 @@ jobs:
             mkdir -p "$app/PlugIns"
             cp build/release/dist/plugins/sweeppp-plugin-* "$app/PlugIns/"
             cp -R resources/. "$app/Resources/"
+            cp CHANGELOG.md "$app/Resources/"
             mkdir -p "$app/Resources/fonts"
             cp build/release/_deps/mdi_font-src/fonts/materialdesignicons-webfont.ttf \
                "$app/Resources/fonts/"
@@ -741,6 +744,7 @@ jobs:
                         "$root/usr/lib/$triplet/$app/plugins/"
 
           cp -R resources/. "$root/usr/share/$app/resources/"
+          install -m644 CHANGELOG.md "$root/usr/share/$app/resources/"
           install -m644 build/release/_deps/mdi_font-src/fonts/materialdesignicons-webfont.ttf \
                         "$root/usr/share/$app/resources/fonts/"
 
@@ -1154,12 +1158,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
+      # The release's own section of CHANGELOG.md, with GitHub's list of what
+      # was merged appended after it.
+      - name: Release notes
+        run: tools/changelog-notes.sh "${GITHUB_REF_NAME#v}" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > notes.md
+
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
+          body_path: notes.md
           generate_release_notes: true

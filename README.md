@@ -121,7 +121,7 @@ sudo apt install sweeppp          # or sweeppp-nightly
 ```
 
 Or install a downloaded package directly, for example
-`sudo apt install ./sweeppp-0.1.0-ubuntu2404-amd64.deb`. The nightly package is
+`sudo apt install ./sweeppp-0.2.0-ubuntu2404-amd64.deb`. The nightly package is
 `sweeppp-nightly`, with `sweeppp-nightly-cli` beside `sweeppp-cli`.
 
 **Windows** support is experimental. Unzip it and run `sweeppp.exe`. Run
@@ -154,6 +154,7 @@ off in **Menu → Plugins**, and install plugins from other people. See
 
 | Document                                                                | What's in it                                                              |
 |-------------------------------------------------------------------------|---------------------------------------------------------------------------|
+| [Changelog](CHANGELOG.md)                                               | What changed in each release                                              |
 | [User guide](docs/user-guide.md)                                        | Every part of the app, and where settings are stored                      |
 | [Supported devices](docs/devices.md)                                    | What each radio can do and how to set it up                               |
 | [Plugins](docs/plugins.md)                                              | The bundled plugins, your own band plans and channels, installing plugins |

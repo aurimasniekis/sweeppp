@@ -629,6 +629,10 @@ void MainWindow::draw() {
     if (m_showClearCorrectionsPrompt) {
         drawClearCorrectionsPrompt();
     }
+    offerWhatsNew();
+    if (m_showWhatsNew) {
+        drawWhatsNew();
+    }
 
     // A plugin's own floating window, beside the application's own and outside
     // every popup and child: the argument for the spot existing is that these
