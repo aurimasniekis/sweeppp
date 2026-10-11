@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <sweeppp/core/Result.hpp>
+#include <vector>
 
 namespace sweeppp::ui {
 
@@ -48,6 +49,18 @@ struct AppSettings {
     /// The version whose notes were last shown in What's new; empty before the
     /// first run, which is what shows them on a fresh install.
     std::string whatsNewSeen;
+
+    /// A radio reached over the network rather than found on a bus.
+    struct NetworkDevice {
+        std::string driver; ///< "pluto"
+        std::string id;     ///< "ip:192.168.2.1"
+        std::string name;   ///< What the operator called it: "Roof Pluto"
+    };
+
+    /// Network radios connected to before, which no scan can find, kept so
+    /// the device chooser lists them beside the ones it detected. A bench fact
+    /// rather than a measurement setting, so here and not in a profile.
+    std::vector<NetworkDevice> networkDevices;
 
     /// Reads the file, or returns the defaults. A missing file is the normal
     /// first-run case and not an error; a malformed one is logged and then

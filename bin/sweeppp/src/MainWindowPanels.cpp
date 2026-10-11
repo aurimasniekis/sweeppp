@@ -492,6 +492,32 @@ void readoutRow(const char* label, const std::string& value, const char* tooltip
 /// a serial is compared, against a label on a case or another window, and the
 /// ends are what a comparison uses. Callers keep the full string for the
 /// tooltip.
+/// What can be reached over the network, and how a typed address becomes the
+/// id its driver opens. A Sweep++ server is the next row.
+struct NetworkKind {
+    const char* label;  ///< "PlutoSDR"
+    const char* driver; ///< "pluto"
+    const char* hint;   ///< What an address looks like
+    const char* scheme; ///< Put in front of the address to make the id
+};
+
+constexpr std::array kNetworkKinds{
+    NetworkKind{.label = "PlutoSDR",
+                .driver = "pluto",
+                .hint = "192.168.2.1 or pluto.local",
+                .scheme = "ip:"},
+};
+
+/// What was typed, without the spaces a paste brings along.
+[[nodiscard]] std::string trimmed(std::string_view text) {
+    const std::size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    const std::size_t last = text.find_last_not_of(" \t\r\n");
+    return std::string(text.substr(first, last - first + 1));
+}
+
 [[nodiscard]] std::string shortSerial(const std::string& serial) {
     constexpr std::size_t kKeep = 8;
 
@@ -1009,6 +1035,11 @@ void MainWindow::drawSourceSection() {
             m_state.beginRefreshDevices();
         }
 
+        ImGui::Spacing();
+        if (const std::optional<SdrDeviceInfo> network = drawNetworkDeviceList()) {
+            pendingOpen = network;
+        }
+
         if (device != nullptr) {
             if (ImGui::Button("Back to settings", ImVec2(-1, 0))) {
                 m_deviceChooserMode = false;
@@ -1166,6 +1197,175 @@ void MainWindow::drawAntennaRow(const char* label, const SdrRxPort* port,
         fieldCaption(reason);
         ImGui::PopStyleColor();
     }
+}
+
+std::optional<SdrDeviceInfo> MainWindow::drawNetworkDeviceList() {
+    ImGui::SeparatorText("Network");
+
+    const auto& saved = m_state.appSettings().networkDevices;
+
+    const ISdrDevice* device = m_state.device();
+    std::optional<SdrDeviceInfo> pendingConnect;
+    std::optional<AppSettings::NetworkDevice> pendingForget;
+    std::optional<AppSettings::NetworkDevice> pendingEdit;
+
+    for (const AppSettings::NetworkDevice& entry : saved) {
+        const bool isOpen = device != nullptr && device->info().driver == entry.driver &&
+                            device->info().id == entry.id;
+        const std::string name = entry.name.empty() ? entry.id : entry.name;
+
+        ImGui::PushID(std::format("{}:{}", entry.driver, entry.id).c_str());
+        ImGui::BeginGroup();
+        if (ImGui::Selectable("##network", isOpen, ImGuiSelectableFlags_None,
+                              ImVec2(0, ImGui::GetTextLineHeight() * 2.4F))) {
+            pendingConnect = SdrDeviceInfo{.driver = entry.driver, .id = entry.id, .label = name};
+        }
+        if (ImGui::BeginPopupContextItem("##networkmenu")) {
+            if (ImGui::MenuItem("Edit...")) {
+                pendingEdit = entry;
+            }
+            if (ImGui::MenuItem("Forget")) {
+                pendingForget = entry;
+            }
+            ImGui::EndPopup();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Connect to %s\nRight-click to edit or forget it.", entry.id.c_str());
+        }
+
+        const ImVec2 rowMin = ImGui::GetItemRectMin();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F),
+                      packed(m_state.theme().chrome().text), name.c_str());
+        const std::string detail = std::format("{}  {}", entry.driver, entry.id);
+        draw->AddText(ImVec2(rowMin.x + 6.0F, rowMin.y + 3.0F + ImGui::GetTextLineHeight()),
+                      packed(m_state.theme().chrome().textDim), detail.c_str());
+        ImGui::EndGroup();
+        ImGui::PopID();
+    }
+
+    // After the loop, which is iterating the list these edit.
+    if (pendingForget) {
+        m_state.forgetNetworkDevice(pendingForget->driver, pendingForget->id);
+        pendingConnect.reset();
+    }
+    if (pendingEdit) {
+        beginEditingNetworkDevice(&*pendingEdit);
+    }
+
+    if (ImGui::Button("Connect to network device...", ImVec2(-1, 0))) {
+        beginEditingNetworkDevice(nullptr);
+    }
+    return pendingConnect;
+}
+
+void MainWindow::beginEditingNetworkDevice(const AppSettings::NetworkDevice* device) {
+    m_networkKind = 0;
+    m_networkName.clear();
+    m_networkAddress.clear();
+    m_networkOriginalId.clear();
+
+    if (device != nullptr) {
+        for (std::size_t i = 0; i < kNetworkKinds.size(); ++i) {
+            if (device->driver == kNetworkKinds[i].driver) {
+                m_networkKind = i;
+            }
+        }
+        const std::string_view scheme = kNetworkKinds[m_networkKind].scheme;
+        m_networkName = device->name;
+        m_networkAddress =
+            device->id.starts_with(scheme) ? device->id.substr(scheme.size()) : device->id;
+        m_networkOriginalId = device->id;
+    }
+    m_showNetworkDialog = true;
+}
+
+void MainWindow::drawNetworkDeviceDialog() {
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5F, 0.5F));
+    if (!ImGui::Begin("Network device", &m_showNetworkDialog,
+                      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        return;
+    }
+
+    const auto textField = [](const char* id, std::string& value, const char* hint) {
+        std::array<char, 256> buffer{};
+        std::snprintf(buffer.data(), buffer.size(), "%s", value.c_str());
+        ImGui::SetNextItemWidth(bar::scaled(240.0F));
+        if (ImGui::InputTextWithHint(id, hint, buffer.data(), buffer.size())) {
+            value = buffer.data();
+        }
+    };
+
+    const std::vector<std::string> drivers = SdrDeviceManager::instance().drivers();
+    const auto loaded = [&drivers](const NetworkKind& kind) {
+        return std::ranges::find(drivers, kind.driver) != drivers.end();
+    };
+
+    const NetworkKind& kind = kNetworkKinds[m_networkKind];
+    field("Type", nullptr, 0.0F, 80.0F);
+    ImGui::SetNextItemWidth(bar::scaled(240.0F));
+    if (ImGui::BeginCombo("##networkkind", kind.label)) {
+        for (std::size_t i = 0; i < kNetworkKinds.size(); ++i) {
+            ImGui::BeginDisabled(!loaded(kNetworkKinds[i]));
+            if (ImGui::Selectable(kNetworkKinds[i].label, i == m_networkKind)) {
+                m_networkKind = i;
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+
+    field("Name", nullptr, 0.0F, 80.0F);
+    textField("##networkname", m_networkName, "Roof Pluto");
+
+    field("Address", nullptr, 0.0F, 80.0F);
+    textField("##networkaddress", m_networkAddress, kind.hint);
+
+    // A pasted "ip:" is the id's own spelling, and is taken as meant.
+    std::string address = trimmed(m_networkAddress);
+    if (address.starts_with(kind.scheme)) {
+        address.erase(0, std::string_view(kind.scheme).size());
+    }
+
+    ImGui::Separator();
+
+    const bool usable = !address.empty() && loaded(kind);
+    if (!loaded(kind)) {
+        ImGui::TextColored(toImVec4(m_state.theme().chrome().warning),
+                           "The %s plugin is not loaded.", kind.label);
+    }
+
+    // Saved either way: a device worth connecting to once is worth finding in
+    // the list again.
+    const auto save = [&]() -> AppSettings::NetworkDevice {
+        AppSettings::NetworkDevice saved{.driver = kind.driver,
+                                         .id = std::string(kind.scheme) + address,
+                                         .name = trimmed(m_networkName)};
+        m_state.putNetworkDevice(saved, m_networkOriginalId);
+        return saved;
+    };
+
+    ImGui::BeginDisabled(!usable);
+    if (ImGui::Button("Connect", ImVec2(bar::scaled(100.0F), 0))) {
+        const AppSettings::NetworkDevice saved = save();
+        m_state.beginOpenDevice(saved.driver, saved.id, saved.name.empty() ? saved.id : saved.name);
+        m_deviceChooserMode = false;
+        m_showNetworkDialog = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save", ImVec2(bar::scaled(100.0F), 0))) {
+        (void)save();
+        m_showNetworkDialog = false;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(bar::scaled(100.0F), 0))) {
+        m_showNetworkDialog = false;
+    }
+
+    ImGui::End();
 }
 
 void MainWindow::drawDeviceAntennas() {

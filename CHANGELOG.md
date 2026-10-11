@@ -8,6 +8,12 @@ What changed in each release of Sweep++. The app shows the new entries as
 ### New
 
 - **PlutoSDR.** The ADALM-PLUTO, over USB or by network address.
+- **Network devices.** Device → Connect to network device adds a PlutoSDR on
+  the network, and keeps it listed under Network.
+
+![Saved network devices in the device chooser](resources/whats-new/network-devices.png)
+
+![Connecting to a PlutoSDR on the network](resources/whats-new/network-device-dialog.png)
 
 ## [0.2.0] - 2026-10-10
 

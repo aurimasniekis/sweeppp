@@ -106,6 +106,13 @@ public:
     void beginOpenDevice(const std::string& driver, const std::string& id,
                          const std::string& label);
 
+    /// Saves a network device, replacing the one filed under `replacingId` --
+    /// the id it had before an edit -- or the one with its own id.
+    void putNetworkDevice(AppSettings::NetworkDevice device, std::string_view replacingId);
+
+    /// Drops a saved network device from the chooser.
+    void forgetNetworkDevice(std::string_view driver, std::string_view id);
+
     /// Adopts a finished open. Called once per frame on the UI thread.
     void pollDeviceStartup();
 

@@ -96,6 +96,11 @@ Click the **Device** button. When no radio is open, it lists every radio
 Sweep++ can see, with its name, driver and serial number. Click one to open
 it, or **Refresh** after plugging one in.
 
+A radio on the network, such as a PlutoSDR, is added with **Connect to network
+device...**: pick its type, give it a name and its address (`192.168.2.1`), and
+**Connect** or **Save**. It is then listed under **Network**; right-click it to
+edit or forget it.
+
 The **Synthetic signal generator** is always listed. It makes up signals, so
 you can try Sweep++ with no hardware.
 
