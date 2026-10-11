@@ -252,6 +252,31 @@ void AppState::beginOpenDevice(const std::string& driver, const std::string& id,
     startDeviceWorker(std::move(startup));
 }
 
+void AppState::putNetworkDevice(AppSettings::NetworkDevice device, std::string_view replacingId) {
+    auto& saved = m_appSettings.networkDevices;
+    const auto existing = std::ranges::find_if(saved, [&](const AppSettings::NetworkDevice& entry) {
+        return entry.driver == device.driver &&
+               (entry.id == device.id || (!replacingId.empty() && entry.id == replacingId));
+    });
+    if (existing != saved.end()) {
+        *existing = std::move(device);
+    } else {
+        saved.push_back(std::move(device));
+    }
+    if (auto written = saveAppSettings(); !written) {
+        logWarn("app", "{}", written.error().describe());
+    }
+}
+
+void AppState::forgetNetworkDevice(std::string_view driver, std::string_view id) {
+    std::erase_if(m_appSettings.networkDevices, [driver, id](const auto& entry) {
+        return entry.driver == driver && entry.id == id;
+    });
+    if (auto written = saveAppSettings(); !written) {
+        logWarn("app", "{}", written.error().describe());
+    }
+}
+
 void AppState::startDeviceWorker(DeviceStartup startup) {
     // The radio in hand is released before another is claimed, on this thread,
     // before the worker exists.

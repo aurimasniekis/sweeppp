@@ -37,6 +37,21 @@ AppSettings AppSettings::load(const std::filesystem::path& path) {
         toml_util::getBool(*table, "updates.check_on_start", settings.checkForUpdates);
     settings.whatsNewSeen = toml_util::getString(*table, "whats_new.seen", settings.whatsNewSeen);
 
+    if (const auto* devices = toml_util::at(*table, "network_device").as_array()) {
+        for (const auto& node : *devices) {
+            const auto* declared = node.as_table();
+            if (declared == nullptr) {
+                continue;
+            }
+            NetworkDevice device{.driver = toml_util::getString(*declared, "driver", ""),
+                                 .id = toml_util::getString(*declared, "id", ""),
+                                 .name = toml_util::getString(*declared, "name", "")};
+            if (!device.driver.empty() && !device.id.empty()) {
+                settings.networkDevices.push_back(std::move(device));
+            }
+        }
+    }
+
     return settings;
 }
 
@@ -52,6 +67,16 @@ Status AppSettings::save(const std::filesystem::path& path) const {
     updates.insert_or_assign("check_on_start", checkForUpdates);
 
     toml_util::ensureTable(root, "whats_new").insert_or_assign("seen", whatsNewSeen);
+
+    ::toml::array devices;
+    for (const NetworkDevice& device : networkDevices) {
+        ::toml::table row;
+        row.insert_or_assign("driver", device.driver);
+        row.insert_or_assign("id", device.id);
+        row.insert_or_assign("name", device.name);
+        devices.push_back(std::move(row));
+    }
+    root.insert_or_assign("network_device", std::move(devices));
 
     return toml_util::save(path, root,
                            "Sweep++ application preferences.\n"

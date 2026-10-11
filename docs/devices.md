@@ -162,9 +162,9 @@ user open the radio. If you built Sweep++ yourself, install
 **Driver name:** `pluto`. Works with the ADALM-PLUTO, over USB or the network.
 
 - **Finding it:** Plutos on USB are listed by serial number. A Pluto on the
-  network isn't listed; open it by address:
-  `sweeppp-cli sweep --device pluto:ip:192.168.2.1`, or the same driver and id
-  in a profile.
+  network is added in the Device panel with **Connect to network device...**
+  (address `192.168.2.1`), or opened with
+  `sweeppp-cli sweep --device pluto:ip:192.168.2.1`.
 - **Frequency:** read from the radio when it opens: 325 MHz – 3.8 GHz on a
   stock Pluto, 70 MHz – 6 GHz on one set up as an AD9364. Before it is opened
   it is listed as 70 MHz – 6 GHz.

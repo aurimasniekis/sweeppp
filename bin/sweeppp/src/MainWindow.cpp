@@ -629,6 +629,9 @@ void MainWindow::draw() {
     if (m_showClearCorrectionsPrompt) {
         drawClearCorrectionsPrompt();
     }
+    if (m_showNetworkDialog) {
+        drawNetworkDeviceDialog();
+    }
     offerWhatsNew();
     if (m_showWhatsNew) {
         drawWhatsNew();

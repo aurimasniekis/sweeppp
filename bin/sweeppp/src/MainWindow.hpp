@@ -510,6 +510,20 @@ private:
     /// device".
     bool m_deviceChooserMode = false;
 
+    /// The device chooser's Network section: saved network devices, and the
+    /// button to add one. Returns the one clicked.
+    [[nodiscard]] std::optional<SdrDeviceInfo> drawNetworkDeviceList();
+
+    /// The dialog that connects to a network device, new or saved.
+    void beginEditingNetworkDevice(const AppSettings::NetworkDevice* device);
+    void drawNetworkDeviceDialog();
+    bool m_showNetworkDialog = false;
+    std::size_t m_networkKind = 0;
+    std::string m_networkName;
+    std::string m_networkAddress;
+    /// The id it was saved under before this edit, or empty for a new one.
+    std::string m_networkOriginalId;
+
     /// Whether a radio was open last frame, so the frame one arrives on can be
     /// told from every frame after it.
     bool m_deviceWasOpen = false;
