@@ -46,23 +46,24 @@ libcurl, for the update check, comes with the macOS SDK.
 ```sh
 sudo apt install build-essential cmake ninja-build pkg-config \
                  libfftw3-dev libglfw3-dev libgl1-mesa-dev libgtk-3-dev libcurl4-openssl-dev \
-                 libhackrf-dev libbladerf-dev librtlsdr-dev libusb-1.0-0-dev
+                 libhackrf-dev libbladerf-dev librtlsdr-dev libusb-1.0-0-dev libiio-dev
 ```
 
 CI installs the same list, plus the tools its packaging step needs; see
 `LINUX_PACKAGES` in
 [`.github/workflows/build.yml`](../.github/workflows/build.yml).
 
-| Library               | Needed for                                      | Turn off with                   |
-|-----------------------|-------------------------------------------------|---------------------------------|
-| GLFW ≥ 3.3            | the GUI                                         | `SWEEPPP_BUILD_GUI=OFF`         |
-| OpenGL, GTK 3 (Linux) | the GUI (GTK for the file dialog and clipboard) | `SWEEPPP_BUILD_GUI=OFF`         |
-| libcurl               | the update check                                | `SWEEPPP_WITH_UPDATE_CHECK=OFF` |
-| FFTW (`fftw3f`)       | the FFTW plugin                                 | `SWEEPPP_WITH_FFTW=OFF`         |
-| libhackrf             | the HackRF plugin                               | `SWEEPPP_WITH_HACKRF=OFF`       |
-| libbladeRF            | the bladeRF plugin                              | `SWEEPPP_WITH_BLADERF=OFF`      |
-| librtlsdr             | the RTL-SDR plugin                              | `SWEEPPP_WITH_RTLSDR=OFF`       |
-| libusb-1.0            | the Fobos SDR plugin                            | `SWEEPPP_WITH_FOBOS=OFF`        |
+| Library                  | Needed for                                      | Turn off with                                                   |
+|--------------------------|-------------------------------------------------|-----------------------------------------------------------------|
+| GLFW ≥ 3.3               | the GUI                                         | `SWEEPPP_BUILD_GUI=OFF`                                         |
+| OpenGL, GTK 3 (Linux)    | the GUI (GTK for the file dialog and clipboard) | `SWEEPPP_BUILD_GUI=OFF`                                         |
+| libcurl                  | the update check                                | `SWEEPPP_WITH_UPDATE_CHECK=OFF`                                 |
+| FFTW (`fftw3f`)          | the FFTW plugin                                 | `SWEEPPP_WITH_FFTW=OFF`                                         |
+| libhackrf                | the HackRF plugin                               | `SWEEPPP_WITH_HACKRF=OFF`                                       |
+| libbladeRF               | the bladeRF plugin                              | `SWEEPPP_WITH_BLADERF=OFF`                                      |
+| librtlsdr                | the RTL-SDR plugin                              | `SWEEPPP_WITH_RTLSDR=OFF`                                       |
+| libusb-1.0               | the Fobos SDR plugin; PlutoSDR on macOS         | `SWEEPPP_WITH_FOBOS=OFF`, and `SWEEPPP_WITH_PLUTO=OFF` on macOS |
+| libiio 0.25+ (not macOS) | the PlutoSDR plugin                             | `SWEEPPP_WITH_PLUTO=OFF`                                        |
 
 You only need the libraries for the parts you build. Turn off what you don't
 need rather than installing it.
@@ -70,8 +71,8 @@ need rather than installing it.
 When something is missing, configuration behaves differently depending on
 what:
 
-- **FFTW, libhackrf, libbladeRF, librtlsdr, libusb and GLFW** stop
-  configuration with the `brew` and `apt` command that installs them.
+- **FFTW, libhackrf, libbladeRF, librtlsdr, libusb, libiio and GLFW** stop
+  configuration with the command that installs them.
 - **GTK 3, OpenGL and pkg-config** stop with CMake's own "not found" error,
   with no install hint.
 - **libcurl** only prints a warning, and the update check is turned off.
@@ -127,22 +128,23 @@ in every preset; none of them turns warnings into errors.
 
 Pass these to CMake with `-D<option>=ON|OFF`.
 
-| Option                      | Default | Effect                                                                                                     |
-|-----------------------------|---------|------------------------------------------------------------------------------------------------------------|
-| `SWEEPPP_BUILD_GUI`         | `ON`    | The desktop GUI, `sweeppp`.                                                                                |
-| `SWEEPPP_BUILD_SERVER`      | `ON`    | `sweeppp-server`, currently a placeholder.                                                                 |
-| `SWEEPPP_BUILD_PLUGINS`     | `ON`    | All bundled plugins. Off skips every plugin's system library.                                              |
-| `SWEEPPP_BUILD_TESTS`       | `ON`    | The test suites, including libsweepsfile's.                                                                |
-| `SWEEPPP_WITH_FFTW`         | `ON`    | The FFTW plugin. Needs `fftw3f`.                                                                           |
-| `SWEEPPP_WITH_ACCELERATE`   | `ON`    | The Accelerate plugin. macOS only; ignored elsewhere.                                                      |
-| `SWEEPPP_WITH_POCKETFFT`    | `ON`    | The PocketFFT plugin. Downloaded at build time; builds everywhere.                                         |
-| `SWEEPPP_WITH_HACKRF`       | `ON`    | The HackRF plugin. Needs `libhackrf`.                                                                      |
-| `SWEEPPP_WITH_BLADERF`      | `ON`    | The bladeRF plugin. Needs `libbladeRF`.                                                                    |
-| `SWEEPPP_WITH_RTLSDR`       | `ON`    | The RTL-SDR plugin. Needs `librtlsdr`.                                                                     |
-| `SWEEPPP_WITH_FOBOS`        | `ON`    | The Fobos SDR plugin. Needs `libusb-1.0`; the two Fobos libraries are downloaded and linked in statically. |
-| `SWEEPPP_WITH_UPDATE_CHECK` | `ON`    | The GUI's update check. Needs libcurl; turned off automatically, with a warning, when libcurl isn't found. |
-| `SWEEPPP_WERROR`            | `OFF`   | Treat warnings as errors.                                                                                  |
-| `SWEEPPP_SANITIZER`         | *empty* | `address`, `thread`, `undefined` or `address+undefined`. Not supported with MSVC.                          |
+| Option                      | Default | Effect                                                                                                           |
+|-----------------------------|---------|------------------------------------------------------------------------------------------------------------------|
+| `SWEEPPP_BUILD_GUI`         | `ON`    | The desktop GUI, `sweeppp`.                                                                                      |
+| `SWEEPPP_BUILD_SERVER`      | `ON`    | `sweeppp-server`, currently a placeholder.                                                                       |
+| `SWEEPPP_BUILD_PLUGINS`     | `ON`    | All bundled plugins. Off skips every plugin's system library.                                                    |
+| `SWEEPPP_BUILD_TESTS`       | `ON`    | The test suites, including libsweepsfile's.                                                                      |
+| `SWEEPPP_WITH_FFTW`         | `ON`    | The FFTW plugin. Needs `fftw3f`.                                                                                 |
+| `SWEEPPP_WITH_ACCELERATE`   | `ON`    | The Accelerate plugin. macOS only; ignored elsewhere.                                                            |
+| `SWEEPPP_WITH_POCKETFFT`    | `ON`    | The PocketFFT plugin. Downloaded at build time; builds everywhere.                                               |
+| `SWEEPPP_WITH_HACKRF`       | `ON`    | The HackRF plugin. Needs `libhackrf`.                                                                            |
+| `SWEEPPP_WITH_BLADERF`      | `ON`    | The bladeRF plugin. Needs `libbladeRF`.                                                                          |
+| `SWEEPPP_WITH_RTLSDR`       | `ON`    | The RTL-SDR plugin. Needs `librtlsdr`.                                                                           |
+| `SWEEPPP_WITH_FOBOS`        | `ON`    | The Fobos SDR plugin. Needs `libusb-1.0`; the two Fobos libraries are downloaded and linked in statically.       |
+| `SWEEPPP_WITH_PLUTO`        | `ON`    | The PlutoSDR plugin. Needs `libiio`; on macOS it is downloaded and linked in statically, and needs `libusb-1.0`. |
+| `SWEEPPP_WITH_UPDATE_CHECK` | `ON`    | The GUI's update check. Needs libcurl; turned off automatically, with a warning, when libcurl isn't found.       |
+| `SWEEPPP_WERROR`            | `OFF`   | Treat warnings as errors.                                                                                        |
+| `SWEEPPP_SANITIZER`         | *empty* | `address`, `thread`, `undefined` or `address+undefined`. Not supported with MSVC.                                |
 
 On macOS the minimum system version defaults to 13.3
 (`CMAKE_OSX_DEPLOYMENT_TARGET`).
@@ -196,7 +198,7 @@ turns off `SWEEPPP_WITH_BLADERF` and `SWEEPPP_BUILD_GUI`, and builds into
 `build/without-bladerf-gui/`. Each combination gets its own directory, so a
 turned-off part never lingers in a stale cache. The names are the option names
 in lowercase with dashes: `tests`, `gui`, `server`, `plugins`, `fftw`,
-`accelerate`, `pocketfft`, `hackrf`, `bladerf`, `rtlsdr`, `fobos` and
+`accelerate`, `pocketfft`, `hackrf`, `bladerf`, `rtlsdr`, `fobos`, `pluto` and
 `update-check`. `BUILD_TYPE` sets the build type (RelWithDebInfo by default).
 
 ## Tests
@@ -238,8 +240,8 @@ Windows builds are experimental. The only tested recipe is the CI job in
 
 - uses MSVC;
 - installs `fftw3`, `glfw3`, `pkgconf` and `curl` from vcpkg;
-- installs `libhackrf` and `rtl-sdr` from conda-forge, which also brings
-  libusb;
+- installs `libhackrf`, `rtl-sdr` and `libiio-c` from conda-forge, which also
+  brings libusb and libxml2;
 - unpacks libbladeRF from Nuand's Windows installer;
 - writes `.pc` files for the libraries that don't ship one, and configures with
   the vcpkg toolchain file and vcpkg's `pkgconf.exe`;

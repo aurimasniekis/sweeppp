@@ -1,10 +1,10 @@
 # Where Sweep++'s dependencies come from.
 #
-# The C libraries -- FFTW, GLFW, libhackrf, libbladeRF, librtlsdr, libusb --
-# come from the system, with no vendored fallback. Everything else is fetched
-# and built from source, because nothing packages it: ImGui on its docking
-# branch, ImPlot at a post-release commit, an icon webfont, a file dialog, the
-# two Fobos SDR libraries, PocketFFT.
+# The C libraries -- FFTW, GLFW, libhackrf, libbladeRF, librtlsdr, libusb,
+# libiio -- come from the system, with no vendored fallback. Everything else is
+# fetched and built from source, because nothing packages it: ImGui on its
+# docking branch, ImPlot at a post-release commit, an icon webfont, a file
+# dialog, the two Fobos SDR libraries, PocketFFT, and libiio on macOS.
 #
 # What is fetched lands in ${CMAKE_BINARY_DIR}/_deps, which is FetchContent's own
 # default: one tree per build directory, so no two presets share sources, and
@@ -105,6 +105,9 @@ set(SWEEPPP_PIN_DOCTEST "v2.4.12")
 # own spelling, the stray dot in the agile one included.
 set(SWEEPPP_PIN_LIBFOBOS       "v2.4.0")
 set(SWEEPPP_PIN_LIBFOBOS_AGILE "v.3.3.0")
+# Analog Devices' libiio, for the PlutoSDR plugin on macOS only. The last of the
+# 0.x API, which is what every distribution packages; 1.0 is a different API.
+set(SWEEPPP_PIN_LIBIIO "v0.26")
 # PocketFFT's C++ header, from its `cpp` branch. No releases; the commit is the
 # only pin, as with stb.
 set(SWEEPPP_PIN_POCKETFFT "c90e55b3d529f8efa40ed01a20de22405f45fc65")
@@ -210,10 +213,10 @@ endif()
 # FFTW or libhackrf be installed to build an application that cannot reach
 # either.
 #
-# libusb is linked for the Fobos plugin alone, because the Fobos libraries are
-# compiled here and call it directly. No code of ours calls it: libhackrf does
-# not expose its libusb handle, so even a link-speed readout could not reach
-# it, and the other radio libraries bring their own.
+# libusb is linked only where a USB library is compiled here and calls it
+# directly: the Fobos libraries, and libiio on macOS. No code of ours calls it:
+# libhackrf does not expose its libusb handle, so even a link-speed readout
+# could not reach it, and the other radio libraries bring their own.
 # ---------------------------------------------------------------------------
 if(SWEEPPP_BUILD_PLUGINS AND SWEEPPP_WITH_FFTW)
     # Single precision. The version is reported by `sweeppp-cli info` and the
@@ -270,6 +273,10 @@ if(SWEEPPP_BUILD_PLUGINS AND SWEEPPP_WITH_RTLSDR)
     target_link_libraries(sweeppp_rtlsdr INTERFACE PkgConfig::RTLSDR)
 endif()
 
+if(SWEEPPP_BUILD_PLUGINS AND (SWEEPPP_WITH_FOBOS OR (SWEEPPP_WITH_PLUTO AND APPLE)))
+    sweeppp_require_package(libusb-1.0 LIBUSB libusb libusb-1.0-0-dev)
+endif()
+
 # ---------------------------------------------------------------------------
 # libfobos and libfobos-sdr-agile -- fetched, and compiled into the Fobos
 # plugin.
@@ -286,8 +293,6 @@ endif()
 # the sources and adds nothing.
 # ---------------------------------------------------------------------------
 if(SWEEPPP_BUILD_PLUGINS AND SWEEPPP_WITH_FOBOS)
-    sweeppp_require_package(libusb-1.0 LIBUSB libusb libusb-1.0-0-dev)
-
     FetchContent_Declare(libfobos
         URL https://github.com/rigexpert/libfobos/archive/refs/tags/${SWEEPPP_PIN_LIBFOBOS}.tar.gz
         SOURCE_SUBDIR fobos)
@@ -349,6 +354,124 @@ if(SWEEPPP_BUILD_PLUGINS AND SWEEPPP_WITH_FOBOS)
         target_compile_options(sweeppp_vendor_fobos PRIVATE -w)
         target_link_libraries(sweeppp_vendor_fobos PUBLIC m)
     endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# libiio -- from the system on Linux and Windows, fetched and compiled into the
+# PlutoSDR plugin on macOS.
+#
+# Debian, Ubuntu and conda-forge all package the 0.x library; Homebrew does
+# not, outside a third-party tap. The plugin is written against the 0.25 API,
+# the oldest any supported distribution ships.
+#
+# On macOS upstream's CMake is bypassed, as the Fobos libraries' is: it forces
+# CMAKE_INSTALL_PREFIX, adds global definitions and include directories, builds
+# a framework by default, and resolves paths from CMAKE_SOURCE_DIR, which is
+# ours once it is a subproject. Only the USB and network backends are built;
+# the network one is what reaches a Pluto at ip:192.168.2.1. DNS-SD is left
+# out, so nothing is discovered over the network -- a network Pluto is named by
+# its address.
+# ---------------------------------------------------------------------------
+if(SWEEPPP_BUILD_PLUGINS AND SWEEPPP_WITH_PLUTO AND NOT APPLE)
+    sweeppp_recheck_package(LIBIIO libiio)
+    if(NOT LIBIIO_FOUND)
+        message(FATAL_ERROR
+            "libiio was not found, and Sweep++ builds it itself only on macOS.\n"
+            "  Debian:  sudo apt install libiio-dev\n"
+            "  Windows: conda install -c conda-forge libiio\n")
+    endif()
+    if(LIBIIO_VERSION)
+        message(STATUS "libiio: ${LIBIIO_VERSION}")
+    else()
+        message(STATUS "libiio: ${LIBIIO_LINK_LIBRARIES}")
+    endif()
+
+    add_library(sweeppp_iio INTERFACE)
+    target_link_libraries(sweeppp_iio INTERFACE PkgConfig::LIBIIO)
+endif()
+
+# Upstream's own iio-config.h template, filled in with the backends built here.
+# A function, so none of the WITH_* names it sets leak into the caller.
+function(sweeppp_configure_libiio source_dir output)
+    include(CheckSymbolExists)
+    check_symbol_exists(strdup "string.h" HAS_STRDUP)
+    check_symbol_exists(strndup "string.h" HAS_STRNDUP)
+    check_symbol_exists(strerror_r "string.h" HAS_STRERROR_R)
+    check_symbol_exists(strtok_r "string.h" HAS_STRTOK_R)
+    check_symbol_exists(newlocale "locale.h" HAS_NEWLOCALE)
+
+    get_target_property(_libusb_includes PkgConfig::LIBUSB INTERFACE_INCLUDE_DIRECTORIES)
+    set(CMAKE_REQUIRED_INCLUDES ${_libusb_includes})
+    set(CMAKE_REQUIRED_LIBRARIES PkgConfig::LIBUSB)
+    check_symbol_exists(libusb_get_version "libusb.h" HAS_LIBUSB_GETVERSION)
+
+    set(LIBIIO_VERSION_MAJOR 0)
+    set(LIBIIO_VERSION_MINOR 26)
+    set(LIBIIO_VERSION_GIT "${SWEEPPP_PIN_LIBIIO}")
+    # Errors only. libiio writes its log straight to stderr, beside ours.
+    set(LOG_LEVEL Error)
+    set(LIBIIO_SCAN_BACKENDS "usb")
+
+    set(WITH_USB_BACKEND ON)
+    set(WITH_NETWORK_BACKEND ON)
+    set(WITH_XML_BACKEND ON)
+    set(HAVE_IPV6 ON)
+    foreach(_off WITH_LOCAL_BACKEND WITH_SERIAL_BACKEND WITH_NETWORK_GET_BUFFER
+                 WITH_NETWORK_EVENTFD WITH_IIOD_USBD WITH_IIOD_SERIAL WITH_LOCAL_CONFIG
+                 WITH_LOCAL_MMAP_API WITH_HWMON WITH_AIO HAVE_DNS_SD HAVE_AVAHI WITH_ZSTD
+                 HAS_PIPE2 HAS_PTHREAD_SETNAME_NP NO_THREADS)
+        set(${_off} OFF)
+    endforeach()
+
+    configure_file("${source_dir}/iio-config.h.cmakein" "${output}")
+endfunction()
+
+if(SWEEPPP_BUILD_PLUGINS AND SWEEPPP_WITH_PLUTO AND APPLE)
+    FetchContent_Declare(libiio
+        URL https://github.com/analogdevicesinc/libiio/archive/refs/tags/${SWEEPPP_PIN_LIBIIO}.tar.gz
+        SOURCE_SUBDIR sweeppp-no-cmake)
+    FetchContent_MakeAvailable(libiio)
+
+    # The SDK's libxml2, which every Mac has, so it adds nothing to install.
+    find_package(LibXml2 REQUIRED)
+
+    set(_libiio_generated "${CMAKE_BINARY_DIR}/_deps/libiio-config")
+    sweeppp_configure_libiio("${libiio_SOURCE_DIR}" "${_libiio_generated}/iio-config.h")
+
+    set(_libiio_sources
+        backend.c buffer.c channel.c context.c device.c scan.c sort.c utilities.c
+        iiod-client.c lock.c xml.c usb.c network.c network-unix.c)
+    list(TRANSFORM _libiio_sources PREPEND "${libiio_SOURCE_DIR}/")
+    add_library(sweeppp_vendor_iio STATIC ${_libiio_sources})
+
+    # Hidden, or every function in the library would be exported from the
+    # plugin that links it. iio.h marks its own API visibility("default"),
+    # which the preset cannot override, so those are dropped at link time.
+    target_link_options(sweeppp_vendor_iio INTERFACE "LINKER:-unexported_symbol,_iio_*")
+    set_target_properties(sweeppp_vendor_iio PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        C_VISIBILITY_PRESET hidden
+        C_STANDARD 99
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF)
+
+    # LIBIIO_STATIC is public: iio.h reads it to leave out the dllimport
+    # decoration, so the plugin has to see the same answer the library did.
+    target_compile_definitions(sweeppp_vendor_iio
+        PUBLIC LIBIIO_STATIC=1
+        PRIVATE _DARWIN_C_SOURCE _POSIX_C_SOURCE=200809L __XSI_VISIBLE=500 LIBIIO_EXPORTS=1)
+
+    # SYSTEM, so a diagnostic inside iio.h is not ours to act on.
+    target_include_directories(sweeppp_vendor_iio SYSTEM PUBLIC "${libiio_SOURCE_DIR}")
+    target_include_directories(sweeppp_vendor_iio PRIVATE "${_libiio_generated}")
+
+    target_compile_options(sweeppp_vendor_iio PRIVATE -w)
+    target_link_libraries(sweeppp_vendor_iio PUBLIC
+        PkgConfig::LIBUSB LibXml2::LibXml2 Threads::Threads)
+
+    add_library(sweeppp_iio INTERFACE)
+    target_link_libraries(sweeppp_iio INTERFACE sweeppp_vendor_iio)
+    message(STATUS "libiio: ${SWEEPPP_PIN_LIBIIO}, built here")
 endif()
 
 # ---------------------------------------------------------------------------

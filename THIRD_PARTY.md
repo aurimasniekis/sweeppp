@@ -12,17 +12,19 @@ comes from, its licence, and which part of Sweep++ uses it.
 These are found with pkg-config or CMake when you configure. Nothing is
 bundled. If one is missing, configuration stops and prints the install command.
 
-| Library                                                  | Licence              | Used by                     | Turn off with                   |
-|----------------------------------------------------------|----------------------|-----------------------------|---------------------------------|
-| [GLFW](https://github.com/glfw/glfw) ≥ 3.3               | Zlib                 | GUI                         | `SWEEPPP_BUILD_GUI=OFF`         |
-| [GTK 3](https://www.gtk.org/) (Linux only)               | LGPL-2.1-or-later    | GUI: file dialog, clipboard | `SWEEPPP_BUILD_GUI=OFF`         |
-| [libcurl](https://curl.se/libcurl/)                      | curl (MIT-style)     | GUI: update check           | `SWEEPPP_WITH_UPDATE_CHECK=OFF` |
-| [FFTW](https://www.fftw.org/) (`fftw3f`)                 | **GPL-2.0-or-later** | `fft-fftw` plugin           | `SWEEPPP_WITH_FFTW=OFF`         |
-| Accelerate (macOS only)                                  | Part of macOS        | `fft-accelerate` plugin     | `SWEEPPP_WITH_ACCELERATE=OFF`   |
-| [libhackrf](https://github.com/greatscottgadgets/hackrf) | **GPL-2.0-only**     | `sdr-hackrf` plugin         | `SWEEPPP_WITH_HACKRF=OFF`       |
-| [librtlsdr](https://gitea.osmocom.org/sdr/rtl-sdr)       | **GPL-2.0-or-later** | `sdr-rtlsdr` plugin         | `SWEEPPP_WITH_RTLSDR=OFF`       |
-| [libbladeRF](https://github.com/Nuand/bladeRF)           | LGPL-2.1-or-later    | `sdr-bladerf` plugin        | `SWEEPPP_WITH_BLADERF=OFF`      |
-| [libusb](https://libusb.info/)                           | LGPL-2.1-or-later    | `sdr-fobos` plugin          | `SWEEPPP_WITH_FOBOS=OFF`        |
+| Library                                                          | Licence              | Used by                                  | Turn off with                   |
+|------------------------------------------------------------------|----------------------|------------------------------------------|---------------------------------|
+| [GLFW](https://github.com/glfw/glfw) ≥ 3.3                       | Zlib                 | GUI                                      | `SWEEPPP_BUILD_GUI=OFF`         |
+| [GTK 3](https://www.gtk.org/) (Linux only)                       | LGPL-2.1-or-later    | GUI: file dialog, clipboard              | `SWEEPPP_BUILD_GUI=OFF`         |
+| [libcurl](https://curl.se/libcurl/)                              | curl (MIT-style)     | GUI: update check                        | `SWEEPPP_WITH_UPDATE_CHECK=OFF` |
+| [FFTW](https://www.fftw.org/) (`fftw3f`)                         | **GPL-2.0-or-later** | `fft-fftw` plugin                        | `SWEEPPP_WITH_FFTW=OFF`         |
+| Accelerate (macOS only)                                          | Part of macOS        | `fft-accelerate` plugin                  | `SWEEPPP_WITH_ACCELERATE=OFF`   |
+| [libhackrf](https://github.com/greatscottgadgets/hackrf)         | **GPL-2.0-only**     | `sdr-hackrf` plugin                      | `SWEEPPP_WITH_HACKRF=OFF`       |
+| [librtlsdr](https://gitea.osmocom.org/sdr/rtl-sdr)               | **GPL-2.0-or-later** | `sdr-rtlsdr` plugin                      | `SWEEPPP_WITH_RTLSDR=OFF`       |
+| [libbladeRF](https://github.com/Nuand/bladeRF)                   | LGPL-2.1-or-later    | `sdr-bladerf` plugin                     | `SWEEPPP_WITH_BLADERF=OFF`      |
+| [libusb](https://libusb.info/)                                   | LGPL-2.1-or-later    | `sdr-fobos` plugin; `sdr-pluto` on macOS | `SWEEPPP_WITH_FOBOS=OFF`        |
+| [libiio](https://github.com/analogdevicesinc/libiio) (not macOS) | LGPL-2.1-or-later    | `sdr-pluto` plugin                       | `SWEEPPP_WITH_PLUTO=OFF`        |
+| [libxml2](https://gitlab.gnome.org/GNOME/libxml2) (macOS only)   | MIT, part of macOS   | `sdr-pluto` plugin                       | `SWEEPPP_WITH_PLUTO=OFF`        |
 
 If libcurl is missing, the build turns the update check off and prints a
 warning instead of failing.
@@ -45,6 +47,7 @@ downloads go into `build/<preset>/_deps`.
 | [PocketFFT](https://github.com/mreineck/pocketfft) (`cpp` branch)              | `c90e55b3`         | BSD-3-Clause         | `fft-pocketfft` plugin                |
 | [libfobos](https://github.com/rigexpert/libfobos)                              | `v2.4.0`           | LGPL-2.1             | `sdr-fobos` plugin, linked statically |
 | [libfobos-sdr-agile](https://github.com/rigexpert/libfobos-sdr-agile)          | `v.3.3.0`          | LGPL-2.1             | `sdr-fobos` plugin, linked statically |
+| [libiio](https://github.com/analogdevicesinc/libiio) (macOS only)              | `v0.26`            | LGPL-2.1-or-later    | `sdr-pluto` plugin, linked statically |
 | [doctest](https://github.com/doctest/doctest)                                  | `v2.4.12`          | MIT                  | Tests only                            |
 
 ## Copied into the repository
@@ -81,6 +84,9 @@ third-party code.
   copy. If you distribute a binary, you must pass that option on.
   libbladeRF and libusb are linked as shared libraries, so this does not apply
   to them.
+- **libiio is linked statically on macOS**, because Homebrew doesn't ship it.
+  The same applies: `-DFETCHCONTENT_SOURCE_DIR_LIBIIO=<dir>` builds the plugin
+  against your copy. Elsewhere it is the system's shared library.
 - **A build with no GPL components** is possible on every platform:
   `-DSWEEPPP_WITH_FFTW=OFF -DSWEEPPP_WITH_HACKRF=OFF -DSWEEPPP_WITH_RTLSDR=OFF`.
   The PocketFFT plugin supplies the FFT, and on macOS the Accelerate plugin

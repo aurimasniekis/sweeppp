@@ -18,15 +18,15 @@ of the plugin still works, and **Menu → Plugins** says what went wrong.
 
 ## Bundled plugins
 
-| Plugin                                              | Adds                                                                  |
-|-----------------------------------------------------|-----------------------------------------------------------------------|
-| **Band plan**                                       | Band allocation labels, and the **Bands** button.                     |
-| **Channels**                                        | Channel labels, the **Channels** button and the channel editor.       |
-| **Detections**                                      | Automatic signal detection, and the **Detections** button and window. |
-| **PocketFFT**                                       | An FFT engine. Works on every system.                                 |
-| **FFTW**                                            | An FFT engine, using the FFTW library.                                |
-| **Accelerate**                                      | An FFT engine, using Apple's Accelerate framework. macOS only.        |
-| **HackRF**, **bladeRF**, **RTL-SDR**, **Fobos SDR** | Radio drivers. See [Supported devices](devices.md).                   |
+| Plugin                                                            | Adds                                                                  |
+|-------------------------------------------------------------------|-----------------------------------------------------------------------|
+| **Band plan**                                                     | Band allocation labels, and the **Bands** button.                     |
+| **Channels**                                                      | Channel labels, the **Channels** button and the channel editor.       |
+| **Detections**                                                    | Automatic signal detection, and the **Detections** button and window. |
+| **PocketFFT**                                                     | An FFT engine. Works on every system.                                 |
+| **FFTW**                                                          | An FFT engine, using the FFTW library.                                |
+| **Accelerate**                                                    | An FFT engine, using Apple's Accelerate framework. macOS only.        |
+| **HackRF**, **bladeRF**, **RTL-SDR**, **Fobos SDR**, **PlutoSDR** | Radio drivers. See [Supported devices](devices.md).                   |
 
 The synthetic signal generator and the IQ file player are built into Sweep++
 rather than being plugins.

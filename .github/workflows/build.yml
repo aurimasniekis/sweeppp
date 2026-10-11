@@ -50,7 +50,7 @@ env:
   LINUX_PACKAGES: >-
     ca-certificates curl git build-essential cmake ninja-build pkg-config dpkg-dev
     libfftw3-dev libglfw3-dev libgl1-mesa-dev libgtk-3-dev libcurl4-openssl-dev
-    libhackrf-dev libbladerf-dev librtlsdr-dev libusb-1.0-0-dev librsvg2-bin
+    libhackrf-dev libbladerf-dev librtlsdr-dev libusb-1.0-0-dev libiio-dev librsvg2-bin
 
 jobs:
   build:
@@ -295,15 +295,16 @@ jobs:
       # the import library, the DLL lives in libhackrf0, and that pulls in
       # libusb and libwinpthread in turn.
       #
-      # librtlsdr goes into the same environment, so that there is one
-      # libusb-1.0.dll: the one both radio libraries load, and the one the
-      # Fobos plugin -- which calls libusb itself -- links against.
-      - name: libhackrf and librtlsdr (conda-forge)
+      # librtlsdr and libiio go into the same environment, so that there is
+      # one libusb-1.0.dll: the one every radio library loads, and the one the
+      # Fobos plugin -- which calls libusb itself -- links against. libiio-c
+      # rather than libiio, which adds the Python bindings.
+      - name: libhackrf, librtlsdr and libiio (conda-forge)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           & "$env:CONDA\Scripts\conda.exe" create -y -p C:\sweeppp-hackrf `
-            -c conda-forge --override-channels libhackrf=2026.01.3 rtl-sdr=2.0.3
+            -c conda-forge --override-channels libhackrf=2026.01.3 rtl-sdr=2.0.3 libiio-c=0.26
           Get-ChildItem -Recurse C:\sweeppp-hackrf\Library\bin -Filter *.dll |
             ForEach-Object { $_.FullName }
 
@@ -348,6 +349,9 @@ jobs:
                    /c/sweeppp-hackrf/Library/include/rtl-sdr.h \
                    /c/sweeppp-hackrf/Library/lib/rtlsdr.lib \
                    /c/sweeppp-hackrf/Library/bin/rtlsdr.dll \
+                   /c/sweeppp-hackrf/Library/include/iio.h \
+                   /c/sweeppp-hackrf/Library/lib/libiio.lib \
+                   /c/sweeppp-hackrf/Library/bin/libiio.dll \
                    /c/sweeppp-hackrf/Library/include/libusb-1.0/libusb.h \
                    /c/sweeppp-hackrf/Library/lib/libusb-1.0.lib \
                    /c/sweeppp-hackrf/Library/bin/libusb-1.0.dll; do
@@ -430,6 +434,15 @@ jobs:
           Cflags: -IC:/sweeppp-hackrf/Library/include/libusb-1.0
           EOF
 
+          # -llibiio for the same reason: the import library is libiio.lib.
+          cat > "$pcdir/libiio.pc" <<EOF
+          Name: libiio
+          Description: libiio
+          Version: 0.26
+          Libs: -LC:/sweeppp-hackrf/Library/lib -llibiio
+          Cflags: -IC:/sweeppp-hackrf/Library/include
+          EOF
+
           for pc in "$pcdir"/*.pc; do echo "== $pc"; cat "$pc"; done
 
           echo "PKG_CONFIG_PATH=$pcdir" >> "$GITHUB_ENV"
@@ -505,6 +518,25 @@ jobs:
              /c/sweeppp-hackrf/Library/bin/libwinpthread-1.dll \
              /c/bladeRF/app/x64/bladeRF.dll \
              build/release/dist/
+          # libiio.dll, and what conda installed behind it -- libxml2 and its
+          # own dependencies -- read off with dumpbin rather than listed, as
+          # the package step does for vcpkg's.
+          conda_bin=/c/sweeppp-hackrf/Library/bin
+          queue=(libiio.dll)
+          while ((${#queue[@]} > 0)); do
+            dll=${queue[0]}
+            queue=("${queue[@]:1}")
+            if [[ -f "build/release/dist/$dll" ]]; then
+              continue
+            fi
+            cp "$conda_bin/$dll" build/release/dist/
+            while read -r dep; do
+              if [[ -f "$conda_bin/$dep" ]]; then
+                queue+=("$dep")
+              fi
+            done < <(dumpbin -nologo -dependents "$conda_bin/$dll" | tr -d '\r' |
+                     sed -nE 's/^ +([^ ]+\.[dD][lL][lL])$/\1/p')
+          done
           ls -1 build/release/dist/*.dll
 
       # --test-dir rather than --preset: there is no release test preset, and
@@ -628,6 +660,24 @@ jobs:
                /c/sweeppp-hackrf/Library/bin/libusb-1.0.dll \
                /c/sweeppp-hackrf/Library/bin/libwinpthread-1.dll "$stage/"
             cp /c/bladeRF/app/x64/bladeRF.dll "$stage/"
+            # libiio.dll, and the libxml2 conda installed behind it, the same
+            # way as for the tests.
+            conda_bin=/c/sweeppp-hackrf/Library/bin
+            queue=(libiio.dll)
+            while ((${#queue[@]} > 0)); do
+              dll=${queue[0]}
+              queue=("${queue[@]:1}")
+              if [[ -f "$stage/$dll" ]]; then
+                continue
+              fi
+              cp "$conda_bin/$dll" "$stage/"
+              while read -r dep; do
+                if [[ -f "$conda_bin/$dep" ]]; then
+                  queue+=("$dep")
+                fi
+              done < <(dumpbin -nologo -dependents "$conda_bin/$dll" | tr -d '\r' |
+                       sed -nE 's/^ +([^ ]+\.[dD][lL][lL])$/\1/p')
+            done
             7z a -tzip "pkg/artifacts/${name}.zip" "./$stage" > /dev/null
           else
             tar -czf "pkg/artifacts/${name}.tar.gz" -C pkg "$name"

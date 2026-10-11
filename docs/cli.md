@@ -55,9 +55,11 @@ Options can be written as `--option value` or `--option=value`. A word with no
   hertz such as `100e6`.
 - **Durations** take a suffix: `500ms`, `30s`, `2min`, `1h`, or plain seconds.
 - **Devices** are written `driver` or `driver:id`:
-  - `synthetic` (the default), `hackrf`, `bladerf`, `rtlsdr`, `fobos`;
+  - `synthetic` (the default), `hackrf`, `bladerf`, `rtlsdr`, `fobos`,
+    `pluto`;
   - `hackrf:<serial>` to pick one of several radios. `sweeppp-cli info` lists
     the ids;
+  - `pluto:ip:192.168.2.1` for a PlutoSDR on the network;
   - `iqfile:/path/to/capture.cf32` to replay a raw IQ file. See
     [IQ file](devices.md#iq-file).
 
@@ -131,14 +133,15 @@ exists.
 Numbers accept the same suffixes as frequencies (`bandwidth=5M`). On/off
 settings take `true` or `false` (`on`/`off`, `yes`/`no` and `1`/`0` work too).
 
-| Radio     | Keys                                                                    |
-|-----------|-------------------------------------------------------------------------|
-| HackRF    | `bandwidth`, `amp_enable`, `lna_gain`, `vga_gain`, `bias_tee`           |
-| bladeRF   | `bandwidth`, `gain_mode`, `gain`, `bias_tee`, `packed_link`             |
-| RTL-SDR   | `bandwidth`, `gain_mode`, `gain`, `rtl_agc`, `ppm`, `bias_tee`          |
-| Fobos SDR | `bandwidth`, `lna_gain`, `vga_gain`, `clock_source`                     |
-| Synthetic | `gain`, `noise_floor`, `emitters`, `sample_format`, `simulate_overruns` |
-| IQ file   | `loop`, `realtime`                                                      |
+| Radio     | Keys                                                                                        |
+|-----------|---------------------------------------------------------------------------------------------|
+| HackRF    | `bandwidth`, `amp_enable`, `lna_gain`, `vga_gain`, `bias_tee`                               |
+| bladeRF   | `bandwidth`, `gain_mode`, `gain`, `bias_tee`, `packed_link`                                 |
+| RTL-SDR   | `bandwidth`, `gain_mode`, `gain`, `rtl_agc`, `ppm`, `bias_tee`                              |
+| Fobos SDR | `bandwidth`, `lna_gain`, `vga_gain`, `clock_source`                                         |
+| PlutoSDR  | `bandwidth`, `gain_mode`, `gain`, `quadrature_tracking`, `rf_dc_tracking`, `bb_dc_tracking` |
+| Synthetic | `gain`, `noise_floor`, `emitters`, `sample_format`, `simulate_overruns`                     |
+| IQ file   | `loop`, `realtime`                                                                          |
 
 Every radio also has `center_hz` and `sample_rate`, which `--center` and
 `--sample-rate` already set.
