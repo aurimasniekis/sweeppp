@@ -3,6 +3,12 @@
 What changed in each release of Sweep++. The app shows the new entries as
 **What's new** after an update.
 
+## [Unreleased]
+
+### New
+
+- **PlutoSDR.** The ADALM-PLUTO, over USB or by network address.
+
 ## [0.2.0] - 2026-10-10
 
 ### New

@@ -6,6 +6,7 @@ Sweep++ works with these radios:
 - [bladeRF](#bladerf)
 - [RTL-SDR](#rtl-sdr)
 - [Fobos SDR](#fobos-sdr)
+- [PlutoSDR](#plutosdr)
 - [Synthetic signal generator](#synthetic-signal-generator), which needs no
   hardware
 - [IQ file](#iq-file), which replays a recording of raw samples
@@ -30,14 +31,14 @@ Sweep++ works with these radios:
 
 ## At a glance
 
-|                 | HackRF One/Pro | bladeRF                                                        | RTL-SDR                                                                        | Fobos SDR                              |
-|-----------------|----------------|----------------------------------------------------------------|--------------------------------------------------------------------------------|----------------------------------------|
-| Frequency range | 1 MHz – 6 GHz  | 47 MHz – 6 GHz                                                 | depends on the tuner, about 24 – 1766 MHz; 0.5 – 28.8 MHz with direct sampling | 50 MHz – 6.9 GHz                       |
-| Sample rates    | 2 – 20 MS/s    | 0.52 – 61.44 MS/s, plus 8-bit rates above that where supported | 0.25 – 3.2 MS/s                                                                | 8 – 80 MS/s (8 – 64 on agile firmware) |
-| Sample format   | 8-bit          | 16-bit, or 8-bit above 61.44 MS/s                              | 8-bit                                                                          | floating point                         |
-| Inputs          | 1              | 1, or 2 on the 2.0 micro                                       | tuner, plus HF on most tuners                                                  | 1                                      |
-| Bias-T          | yes, 3.3 V     | yes                                                            | yes, if your librtlsdr supports it                                             | —                                      |
-| Health readings | —              | yes (2.0 micro)                                                | —                                                                              | —                                      |
+|                 | HackRF One/Pro | bladeRF                                                        | RTL-SDR                                                                        | Fobos SDR                              | PlutoSDR                                          |
+|-----------------|----------------|----------------------------------------------------------------|--------------------------------------------------------------------------------|----------------------------------------|---------------------------------------------------|
+| Frequency range | 1 MHz – 6 GHz  | 47 MHz – 6 GHz                                                 | depends on the tuner, about 24 – 1766 MHz; 0.5 – 28.8 MHz with direct sampling | 50 MHz – 6.9 GHz                       | 325 MHz – 3.8 GHz, or 70 MHz – 6 GHz as an AD9364 |
+| Sample rates    | 2 – 20 MS/s    | 0.52 – 61.44 MS/s, plus 8-bit rates above that where supported | 0.25 – 3.2 MS/s                                                                | 8 – 80 MS/s (8 – 64 on agile firmware) | 2.08 – 61.44 MS/s; about 5 over USB               |
+| Sample format   | 8-bit          | 16-bit, or 8-bit above 61.44 MS/s                              | 8-bit                                                                          | floating point                         | 16-bit                                            |
+| Inputs          | 1              | 1, or 2 on the 2.0 micro                                       | tuner, plus HF on most tuners                                                  | 1                                      | 1                                                 |
+| Bias-T          | yes, 3.3 V     | yes                                                            | yes, if your librtlsdr supports it                                             | —                                      | —                                                 |
+| Health readings | —              | yes (2.0 micro)                                                | —                                                                              | —                                      | yes                                               |
 
 ## HackRF One and HackRF Pro
 
@@ -156,6 +157,40 @@ On Linux, the Sweep++ `.deb` package installs the udev rule that lets your
 user open the radio. If you built Sweep++ yourself, install
 `fobos-sdr.rules` from the Fobos library.
 
+## PlutoSDR
+
+**Driver name:** `pluto`. Works with the ADALM-PLUTO, over USB or the network.
+
+- **Finding it:** Plutos on USB are listed by serial number. A Pluto on the
+  network isn't listed; open it by address:
+  `sweeppp-cli sweep --device pluto:ip:192.168.2.1`, or the same driver and id
+  in a profile.
+- **Frequency:** read from the radio when it opens: 325 MHz – 3.8 GHz on a
+  stock Pluto, 70 MHz – 6 GHz on one set up as an AD9364. Before it is opened
+  it is listed as 70 MHz – 6 GHz.
+- **Sample rate:** 2.083 – 61.44 MS/s; 4 MS/s by default. USB 2.0 carries about
+  5 MS/s; above that, samples are dropped and the Performance window counts
+  them.
+- **Sample format:** 16-bit, carrying the radio's 12-bit samples.
+- **Filter bandwidth:** follows the sample rate by default, up to the radio's
+  maximum.
+- **Gain:**
+  - **Gain mode:** Manual by default, or the radio's slow attack, fast attack
+    and hybrid AGC;
+  - **Manual gain:** −3 – 71 dB. Above 1.3 GHz the radio stops lower, and a
+    higher setting is lowered to fit.
+- **Corrections:** quadrature, RF DC and baseband DC tracking, on by default.
+- **Bias-T:** not available.
+- **Inputs:** one.
+- **Health readings**, shown in the Performance window: RF chip temperature,
+  with an alarm above 85 °C, and RSSI.
+
+**If the Pluto isn't found or won't open:**
+
+- On Linux, install libiio's udev rule (`90-libiio.rules`) so your user can
+  open the device.
+- Close any other program that is using the Pluto.
+
 ## Synthetic signal generator
 
 **Driver name:** `synthetic`. Always listed, needs no hardware.
@@ -211,6 +246,7 @@ system.
 | bladeRF   | `brew install libbladerf` | `libbladerf-dev`          | `SWEEPPP_WITH_BLADERF=OFF`   |
 | RTL-SDR   | `brew install librtlsdr`  | `librtlsdr-dev`           | `SWEEPPP_WITH_RTLSDR=OFF`    |
 | Fobos SDR | `brew install libusb`     | `libusb-1.0-0-dev`        | `SWEEPPP_WITH_FOBOS=OFF`     |
+| PlutoSDR  | `brew install libusb`     | `libiio-dev`              | `SWEEPPP_WITH_PLUTO=OFF`     |
 
 - **macOS:** when Sweep++ starts, it checks which of these are missing and tells
   you the `brew install` command. You only need the ones for radios you own.
@@ -219,6 +255,8 @@ system.
   yourself.
 - **Fobos:** the Fobos libraries themselves are built into the plugin, so only
   libusb is needed.
+- **PlutoSDR:** on macOS, libiio is built into the plugin, so only libusb is
+  needed. On Linux and Windows it comes from the system.
 
 For building from source, see [Building from source](build.md).
 

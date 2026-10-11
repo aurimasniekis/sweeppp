@@ -76,10 +76,14 @@ jobs:
           install -d tap/Casks
 
           render() {
-            local channel=$1 tag=$2 dir="dl/$2" arm intel version
+            local channel=$1 tag=$2 dir="dl/$2" arm intel sha_intel='' version
             gh release download "$tag" --repo "$repo" --pattern '*-macos-*.tar.gz' --dir "$dir"
             arm=$(ls "$dir"/*-macos-arm.tar.gz)
-            intel=$(ls "$dir"/*-macos-intel.tar.gz)
+            # Optional: without it the cask is for Apple silicon only.
+            intel=$(ls "$dir"/*-macos-intel.tar.gz 2>/dev/null || true)
+            if [[ -n "$intel" ]]; then
+              sha_intel=$(sha256sum "$intel" | cut -d' ' -f1)
+            fi
             # sed reads the whole listing; `head -n 1` would close the pipe
             # on tar, and pipefail makes that write error a failure.
             version=$(tar tzf "$arm" | sed -nE '1s|^sweeppp-(.*)-macos-arm/$|\1|p')
@@ -88,8 +92,7 @@ jobs:
               exit 1
             fi
             packaging/homebrew/cask.sh "$channel" "$repo" "$version" \
-              "$(sha256sum "$arm" | cut -d' ' -f1)" \
-              "$(sha256sum "$intel" | cut -d' ' -f1)"
+              "$(sha256sum "$arm" | cut -d' ' -f1)" "$sha_intel"
           }
 
           if [[ -n "$stable" ]]; then

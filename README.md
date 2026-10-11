@@ -75,6 +75,7 @@ One click copies a PNG of the spectrum and waterfall to the clipboard.
 | bladeRF (x40/x115, 2.0 micro xA4/xA5/xA9) | 47 MHz – 6 GHz                                                              | 61.44 MS/s, more in 8-bit mode where the FPGA supports it | 2 on the 2.0 micro                      | yes    |
 | RTL-SDR                                   | about 24 – 1766 MHz depending on the tuner, plus HF through direct sampling | 3.2 MS/s                                                  | tuner, and HF where the tuner allows it | yes    |
 | Fobos SDR (standard and agile firmware)   | 50 MHz – 6.9 GHz                                                            | 80 MS/s                                                   | 1                                       | —      |
+| PlutoSDR (ADALM-PLUTO), USB or network    | 325 MHz – 3.8 GHz, or 70 MHz – 6 GHz as an AD9364                           | 61.44 MS/s, about 5 MS/s sustained over USB               | 1                                       | —      |
 | Synthetic signal generator                | no hardware needed, for trying the app                                      |                                                           |                                         |        |
 
 [Supported devices](docs/devices.md) has the full details for each one.
@@ -92,7 +93,7 @@ are on the GitHub Releases page. Each has:
 
 - `.deb` packages for Ubuntu 24.04, Ubuntu 26.04 and Debian 13, for amd64 and
   arm64, plus a `.tar.gz` of each;
-- a `.tar.gz` for macOS, for Apple silicon (`arm`) or Intel;
+- a `.tar.gz` for macOS on Apple silicon;
 - a `.zip` for Windows x64.
 
 **macOS.** Install from the Homebrew tap:

@@ -28,7 +28,7 @@ optional_libs=(
     "hackrf:libhackrf.0.dylib:HackRF radios"
     "libbladerf:libbladeRF.2.dylib:bladeRF radios"
     "librtlsdr:librtlsdr.0.dylib:RTL-SDR radios"
-    "libusb:libusb-1.0.0.dylib:Fobos SDR radios"
+    "libusb:libusb-1.0.0.dylib:Fobos SDR and PlutoSDR radios"
 )
 
 # Homebrew, located without trusting PATH. An application started from the

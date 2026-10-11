@@ -29,7 +29,7 @@ bin/                sweeppp/         the desktop GUI
                     sweeppp-server/  placeholder for a future web interface
 plugins/            bandplan/ channels/ detections/
                     fft-pocketfft/ fft-fftw/ fft-accelerate/
-                    sdr-hackrf/ sdr-bladerf/ sdr-rtlsdr/ sdr-fobos/
+                    sdr-hackrf/ sdr-bladerf/ sdr-rtlsdr/ sdr-fobos/ sdr-pluto/
 resources/          built-in data, all TOML:
                     antennas/ bandplans/ channels/ themes/
                     colormaps/ (a README only; the colour maps are compiled in)
@@ -379,6 +379,7 @@ third-party GPL libraries are each linked only by their own plugin:
 | `sdr-rtlsdr` plugin     | GPL-3.0-or-later | **librtlsdr (GPL-2.0-or-later)**                                                                                                                                    |
 | `sdr-bladerf` plugin    | GPL-3.0-or-later | libbladeRF (LGPL-2.1-or-later)                                                                                                                                      |
 | `sdr-fobos` plugin      | GPL-3.0-or-later | libusb (LGPL), libfobos and libfobos-sdr-agile (LGPL-2.1, static)                                                                                                   |
+| `sdr-pluto` plugin      | GPL-3.0-or-later | libiio (LGPL-2.1-or-later; static on macOS, with libusb (LGPL) and libxml2 (MIT))                                                                                   |
 | `fft-pocketfft` plugin  | GPL-3.0-or-later | PocketFFT (BSD-3-Clause)                                                                                                                                            |
 | `fft-accelerate` plugin | GPL-3.0-or-later | Accelerate (macOS system framework)                                                                                                                                 |
 

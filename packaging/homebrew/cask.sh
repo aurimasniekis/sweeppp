@@ -3,15 +3,17 @@
 # the tap. Everything that changes per build comes in as an argument, so the
 # same text can be produced by hand for a given release.
 #
-#   cask.sh release <owner/repo> <version> <sha256 arm> <sha256 intel>
-#   cask.sh nightly <owner/repo> <version> <sha256 arm> <sha256 intel>
+#   cask.sh release <owner/repo> <version> <sha256 arm> [<sha256 intel>]
+#   cask.sh nightly <owner/repo> <version> <sha256 arm> [<sha256 intel>]
+#
+# Without the Intel checksum the cask is for Apple silicon only.
 #
 # <version> is the archive's own: 1.2.3 for a release, 0.1.0+<sha8> for a
 # nightly. It names the directory inside the tarball, which is why the cask
 # interpolates it into the app path rather than only the URL.
 set -euo pipefail
 
-channel=$1 repo=$2 version=$3 sha_arm=$4 sha_intel=$5
+channel=$1 repo=$2 version=$3 sha_arm=$4 sha_intel=${5:-}
 
 case "$channel" in
   release)
@@ -42,15 +44,34 @@ target() {
   [[ -z "$suffix" ]] || printf ', target: "%s"' "$1"
 }
 
+arches() {
+  if [[ -n "$sha_intel" ]]; then
+    printf '  arch arm: "arm", intel: "intel"'
+  else
+    printf '  arch arm: "arm"'
+  fi
+}
+
+checksums() {
+  if [[ -n "$sha_intel" ]]; then
+    printf '  sha256 arm:   "%s",\n         intel: "%s"' "$sha_arm" "$sha_intel"
+  else
+    printf '  sha256 arm: "%s"' "$sha_arm"
+  fi
+}
+
+arm_only() {
+  [[ -n "$sha_intel" ]] || printf '\n  depends_on arch: :arm64'
+}
+
 # Unquoted so $repo and friends expand; Ruby's #{...} is not shell syntax and
 # passes through.
 cat <<EOF
 cask "$token" do
-  arch arm: "arm", intel: "intel"
+$(arches)
 
   version "$version"
-  sha256 arm:   "$sha_arm",
-         intel: "$sha_intel"
+$(checksums)
 
   url "$url"
   name "$name"
@@ -58,7 +79,7 @@ cask "$token" do
   homepage "https://sweeppp.app/"
 
   depends_on formula: "glfw"
-  depends_on macos: ">= :ventura"
+  depends_on macos: ">= :ventura"$(arm_only)
 
   app "sweeppp-#{version}-macos-#{arch}/$name.app"
   binary "sweeppp-#{version}-macos-#{arch}/sweeppp-cli"$(target "sweeppp$suffix-cli")
